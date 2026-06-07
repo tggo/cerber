@@ -41,6 +41,14 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Secrets are never present in `String()`/logs; readable only via explicit accessors.
 **Verified:** `internal/credential` tests, 100% coverage — 2026-06-07.
 
+## Access control — client API keys
+**What:** clients authenticate to cerber with an API key via `Authorization: Bearer` or `x-api-key`; only allow-listed keys pass.
+**DoD:**
+- Valid configured key (either header) → allowed; bearer takes precedence; non-bearer Authorization falls back to x-api-key.
+- Unknown/empty/wrong-case/wrong-length key → denied.
+- Key comparison is constant-time and scans all keys (no timing/which-key leak).
+**Verified:** `internal/access` tests, 100% coverage — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**
