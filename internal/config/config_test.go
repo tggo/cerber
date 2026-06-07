@@ -159,6 +159,56 @@ func TestLoadEnvFile(t *testing.T) {
 	}
 }
 
+func TestParse_OpenAIAndGeminiDefaults(t *testing.T) {
+	y := `
+access: {keys: ["k"]}
+providers:
+  openai:
+    credentials: [{type: api_key, key: "sk-o"}]
+  gemini:
+    credentials: [{type: api_key, key: "g"}]
+  routing:
+    - {prefix: "gpt", provider: openai}
+    - {prefix: "gemini", provider: gemini}
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Anthropic != nil {
+		t.Error("anthropic should be nil")
+	}
+	if c.Providers.OpenAI.BaseURL != defaultOpenAIBase || c.Providers.OpenAI.Timeout.Std() != defaultProviderWaitNS {
+		t.Errorf("openai defaults = %+v", c.Providers.OpenAI)
+	}
+	if c.Providers.Gemini.BaseURL != defaultGeminiBase {
+		t.Errorf("gemini base = %q", c.Providers.Gemini.BaseURL)
+	}
+	if len(c.Providers.Routing) != 2 {
+		t.Errorf("routing = %+v", c.Providers.Routing)
+	}
+}
+
+func TestParse_ProviderErrors(t *testing.T) {
+	cases := map[string]string{
+		"openai bad url":    "access: {keys: [k]}\nproviders: {openai: {base_url: \"ftp://x\", credentials: [{type: api_key, key: k}]}}",
+		"openai no creds":   "access: {keys: [k]}\nproviders: {openai: {credentials: []}}",
+		"openai bad cred":   "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key}]}}",
+		"gemini bad url":    "access: {keys: [k]}\nproviders: {gemini: {base_url: \"::\", credentials: [{type: api_key, key: k}]}}",
+		"gemini no creds":   "access: {keys: [k]}\nproviders: {gemini: {credentials: []}}",
+		"route bad prov":    "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key, key: k}]}, routing: [{prefix: gpt, provider: bogus}]}",
+		"route no prefix":   "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key, key: k}]}, routing: [{prefix: \"\", provider: openai}]}",
+		"truly no provider": "access: {keys: [k]}\nproviders: {}",
+	}
+	for name, y := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(y)); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestLoad_FileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")

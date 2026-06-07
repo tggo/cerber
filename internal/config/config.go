@@ -40,15 +40,39 @@ type Access struct {
 }
 
 // Providers groups upstream provider configuration. Only configured providers
-// are reachable; a nil entry means the provider is disabled.
+// are reachable; a nil entry means the provider is disabled. Routing maps model
+// name prefixes to a provider on the OpenAI-compatible endpoint.
 type Providers struct {
 	Anthropic *Anthropic `yaml:"anthropic"`
+	OpenAI    *OpenAI    `yaml:"openai"`
+	Gemini    *Gemini    `yaml:"gemini"`
+	Routing   []Route    `yaml:"routing"`
+}
+
+// Route maps a model-name prefix to a provider name (anthropic|openai|gemini).
+type Route struct {
+	Prefix   string `yaml:"prefix"`
+	Provider string `yaml:"provider"`
 }
 
 // Anthropic configures the Anthropic upstream.
 type Anthropic struct {
 	BaseURL     string       `yaml:"base_url"`
 	Version     string       `yaml:"version"`
+	Timeout     Duration     `yaml:"timeout"`
+	Credentials []Credential `yaml:"credentials"`
+}
+
+// OpenAI configures the OpenAI (OpenAI-compatible) upstream.
+type OpenAI struct {
+	BaseURL     string       `yaml:"base_url"`
+	Timeout     Duration     `yaml:"timeout"`
+	Credentials []Credential `yaml:"credentials"`
+}
+
+// Gemini configures the Google Generative Language (Gemini) upstream.
+type Gemini struct {
+	BaseURL     string       `yaml:"base_url"`
 	Timeout     Duration     `yaml:"timeout"`
 	Credentials []Credential `yaml:"credentials"`
 }
@@ -82,6 +106,9 @@ const (
 	defaultAnthropicBase   = "https://api.anthropic.com"
 	defaultAnthropicVer    = "2023-06-01"
 	defaultAnthropicWaitNS = 120 * time.Second
+	defaultOpenAIBase      = "https://api.openai.com"
+	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
+	defaultProviderWaitNS  = 120 * time.Second
 )
 
 // Load reads, parses, defaults and validates the config at path.
@@ -132,6 +159,22 @@ func (c *Config) applyDefaults() {
 			a.Timeout = Duration(defaultAnthropicWaitNS)
 		}
 	}
+	if o := c.Providers.OpenAI; o != nil {
+		if o.BaseURL == "" {
+			o.BaseURL = defaultOpenAIBase
+		}
+		if o.Timeout == 0 {
+			o.Timeout = Duration(defaultProviderWaitNS)
+		}
+	}
+	if g := c.Providers.Gemini; g != nil {
+		if g.BaseURL == "" {
+			g.BaseURL = defaultGeminiBase
+		}
+		if g.Timeout == 0 {
+			g.Timeout = Duration(defaultProviderWaitNS)
+		}
+	}
 }
 
 // Validate reports the first configuration error found.
@@ -144,23 +187,50 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: access.keys[%d] is empty", i)
 		}
 	}
-	if c.Providers.Anthropic == nil {
+	p := c.Providers
+	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil {
 		return fmt.Errorf("config: no providers configured")
 	}
-	return c.Providers.Anthropic.validate()
+	if p.Anthropic != nil {
+		if err := validateCreds("anthropic", p.Anthropic.BaseURL, p.Anthropic.Credentials); err != nil {
+			return err
+		}
+	}
+	if p.OpenAI != nil {
+		if err := validateCreds("openai", p.OpenAI.BaseURL, p.OpenAI.Credentials); err != nil {
+			return err
+		}
+	}
+	if p.Gemini != nil {
+		if err := validateCreds("gemini", p.Gemini.BaseURL, p.Gemini.Credentials); err != nil {
+			return err
+		}
+	}
+	for i, r := range p.Routing {
+		switch r.Provider {
+		case "anthropic", "openai", "gemini":
+		default:
+			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini", i, r.Provider)
+		}
+		if strings.TrimSpace(r.Prefix) == "" {
+			return fmt.Errorf("config: providers.routing[%d].prefix is empty", i)
+		}
+	}
+	return nil
 }
 
-func (a *Anthropic) validate() error {
-	u, err := url.Parse(a.BaseURL)
+// validateCreds checks a provider's base URL and credentials.
+func validateCreds(name, baseURL string, creds []Credential) error {
+	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("config: providers.anthropic.base_url must be an http(s) URL, got %q", a.BaseURL)
+		return fmt.Errorf("config: providers.%s.base_url must be an http(s) URL, got %q", name, baseURL)
 	}
-	if len(a.Credentials) == 0 {
-		return fmt.Errorf("config: providers.anthropic.credentials must list at least one credential")
+	if len(creds) == 0 {
+		return fmt.Errorf("config: providers.%s.credentials must list at least one credential", name)
 	}
-	for i := range a.Credentials {
-		if err := a.Credentials[i].validate(); err != nil {
-			return fmt.Errorf("config: providers.anthropic.credentials[%d]: %w", i, err)
+	for i := range creds {
+		if err := creds[i].validate(); err != nil {
+			return fmt.Errorf("config: providers.%s.credentials[%d]: %w", name, i, err)
 		}
 	}
 	return nil

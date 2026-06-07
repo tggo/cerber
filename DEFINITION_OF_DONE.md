@@ -141,6 +141,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `GET /dashboard` serves an HTML page that, given a client key, polls `/admin/stats` and renders totals + per-credential/per-model tables with auto-refresh.
 **Verified:** served 200 text/html; live stats render — 2026-06-07.
 
+## Multi-provider routing + OpenAI provider
+**What:** the OpenAI-compatible endpoint routes by model name to a provider; OpenAI is supported as a real upstream (passthrough).
+**DoD:**
+- `route(model)`: configured `providers.routing` prefixes win; built-in defaults `gpt*/o1*/o3*/o4*/chatgpt*→openai`, `gemini*→gemini`, else `anthropic`.
+- `/v1/chat/completions` with an OpenAI model → forwarded to OpenAI (Bearer key, rotation across credentials), response relayed unchanged (stream + non-stream); tokens recorded from OpenAI usage.
+- Model routed to an unconfigured provider → 501; native `/v1/messages` remains Anthropic-only.
+- Anthropic is currently required as the base provider; OpenAI/Gemini are optional.
+**Verified:** `internal/provider/openai` (93%) + `internal/provider` Rotate (96%) + server routing tests + live `make integration` (OpenAI route → "pong" via real api.openai.com) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

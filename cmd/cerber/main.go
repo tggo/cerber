@@ -14,6 +14,7 @@ import (
 	"cerber/internal/credential"
 	"cerber/internal/logging"
 	"cerber/internal/provider/anthropic"
+	"cerber/internal/provider/openai"
 	"cerber/internal/server"
 	"cerber/internal/version"
 
@@ -45,16 +46,30 @@ func main() {
 	}
 	defer func() { _ = closeLog() }()
 
-	store, err := credential.NewStore(cfg.Providers.Anthropic.Credentials)
+	a := cfg.Providers.Anthropic
+	if a == nil {
+		logger.Fatal("anthropic provider is currently required (it backs /v1/messages and the default route)")
+	}
+	store, err := credential.NewStore(a.Credentials)
 	if err != nil {
 		logger.Fatal("credentials", zap.Error(err))
 	}
 
-	httpClient := &http.Client{Timeout: cfg.Providers.Anthropic.Timeout.Std()}
-	client := anthropic.New(cfg.Providers.Anthropic.BaseURL, cfg.Providers.Anthropic.Version, httpClient)
-	refresher := anthropic.NewRefresher(cfg.Providers.Anthropic.BaseURL, httpClient)
+	httpClient := &http.Client{Timeout: a.Timeout.Std()}
+	client := anthropic.New(a.BaseURL, a.Version, httpClient)
+	refresher := anthropic.NewRefresher(a.BaseURL, httpClient)
 
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
+	srv.SetRoutes(cfg.Providers.Routing)
+
+	if o := cfg.Providers.OpenAI; o != nil {
+		ostore, err := credential.NewStore(o.Credentials)
+		if err != nil {
+			logger.Fatal("openai credentials", zap.Error(err))
+		}
+		srv.RegisterChatter(openai.New(o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
+		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.Addr,

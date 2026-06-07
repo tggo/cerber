@@ -16,6 +16,18 @@ access:
     - "change-me-client-key"
 
 providers:
+  # Multiple providers can be enabled; on /v1/chat/completions cerber routes by
+  # model name (gpt*/o1*/o3*/o4*/chatgpt* -> openai, gemini* -> gemini,
+  # everything else -> anthropic). Override with `routing` below.
+  # routing:
+  #   - { prefix: "gpt", provider: openai }
+  #   - { prefix: "gemini", provider: gemini }
+
+  # openai:
+  #   base_url: "https://api.openai.com"
+  #   credentials:
+  #     - { type: api_key, name: oai, key: "${OPENAI_KEY}" }
+
   anthropic:
     base_url: "https://api.anthropic.com"
     version: "2023-06-01"

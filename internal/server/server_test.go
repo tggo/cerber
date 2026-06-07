@@ -14,6 +14,8 @@ import (
 	"cerber/internal/access"
 	"cerber/internal/config"
 	"cerber/internal/credential"
+	"cerber/internal/provider"
+	providermocks "cerber/internal/provider/mocks"
 	"cerber/internal/server/mocks"
 
 	"github.com/stretchr/testify/mock"
@@ -374,6 +376,75 @@ func TestStats_RecordsErrors(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &rep)
 	if rep.Totals.Requests != 1 || rep.Totals.Errors != 1 {
 		t.Errorf("error stat = %+v", rep.Totals)
+	}
+}
+
+func TestRoute(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.SetRoutes([]config.Route{{Prefix: "custom-", Provider: "openai"}})
+	cases := map[string]string{
+		"claude-sonnet-4-6": "anthropic",
+		"gpt-4o":            "openai",
+		"o3-mini":           "openai",
+		"chatgpt-x":         "openai",
+		"gemini-2.5-flash":  "gemini",
+		"custom-model":      "openai", // config override
+		"mystery":           "anthropic",
+	}
+	for model, want := range cases {
+		if got := s.route(model); got != want {
+			t.Errorf("route(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestOpenAI_RoutedToChatter(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	ch := providermocks.NewChatter(t)
+	ch.EXPECT().Name().Return("openai").Maybe()
+	s.RegisterChatter(ch)
+
+	ch.EXPECT().Chat(mock.Anything, mock.Anything, false, mock.Anything).Return(&provider.Response{
+		Status:       200,
+		Header:       http.Header{"Content-Type": {"application/json"}},
+		Body:         io.NopCloser(strings.NewReader(`{"object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4}}`)),
+		Credential:   "oai-1",
+		InputTokens:  0,
+		OutputTokens: 0,
+	}, nil)
+
+	h := s.Handler()
+	rec := do(t, h, "POST", "/v1/chat/completions", `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`, clientKey)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "chat.completion") {
+		t.Fatalf("routed resp = %d %s", rec.Code, rec.Body.String())
+	}
+	// usage parsed from the OpenAI response
+	stats := do(t, h, "GET", "/admin/stats", "", clientKey)
+	if !strings.Contains(stats.Body.String(), `"input_tokens":3`) || !strings.Contains(stats.Body.String(), `"output_tokens":4`) {
+		t.Errorf("openai usage not recorded: %s", stats.Body.String())
+	}
+}
+
+func TestOpenAI_RouteUnconfigured_501(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1)) // no openai chatter registered
+	rec := do(t, s.Handler(), "POST", "/v1/chat/completions", `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`, clientKey)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("code %d, want 501", rec.Code)
+	}
+}
+
+func TestChatter_ErrorRelayed(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	ch := providermocks.NewChatter(t)
+	ch.EXPECT().Name().Return("openai").Maybe()
+	s.RegisterChatter(ch)
+	ch.EXPECT().Chat(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(&provider.Response{
+		Status: 400, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{"error":"bad"}`)), Credential: "oai-1",
+	}, nil)
+	rec := do(t, s.Handler(), "POST", "/v1/chat/completions", `{"model":"gpt-4o","messages":[{"role":"user","content":"x"}]}`, clientKey)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "bad") {
+		t.Errorf("relay = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

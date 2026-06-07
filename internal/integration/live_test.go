@@ -23,6 +23,7 @@ import (
 	"cerber/internal/config"
 	"cerber/internal/credential"
 	"cerber/internal/provider/anthropic"
+	"cerber/internal/provider/openai"
 	"cerber/internal/server"
 
 	"go.uber.org/zap"
@@ -81,6 +82,63 @@ func post(t *testing.T, url, body string) (int, []byte) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, b
+}
+
+func openaiKey(t *testing.T) string {
+	t.Helper()
+	_ = config.LoadEnvFile("../../.env")
+	k := os.Getenv("OPENAI_KEY")
+	if k == "" {
+		t.Skip("OPENAI_KEY not set; skipping live OpenAI integration test")
+	}
+	return k
+}
+
+// liveServerWithOpenAI wires a cerber server with both Anthropic (playground) and
+// a real OpenAI provider, returning its base URL.
+func liveServerWithOpenAI(t *testing.T, anthropicKey, oaiKey string) string {
+	t.Helper()
+	store, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "playground", Key: anthropicKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Timeout: 60 * time.Second}
+	srv := server.New(access.New([]string{clientKey}), store,
+		anthropic.New(baseURL, "2023-06-01", hc), anthropic.NewRefresher(baseURL, hc), zap.NewNop())
+
+	ostore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "oai", Key: oaiKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.RegisterChatter(openai.New("https://api.openai.com", ostore, &http.Client{Timeout: 60 * time.Second}))
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+func TestLive_OpenAIRoute(t *testing.T) {
+	url := liveServerWithOpenAI(t, apiKey(t), openaiKey(t)) + "/v1/chat/completions"
+	body := `{"model":"gpt-4o-mini","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly the word: pong"}]}`
+	status, raw := post(t, url, body)
+	if status != http.StatusOK {
+		t.Fatalf("status %d: %s", status, raw)
+	}
+	var r struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("parse: %v (%s)", err, raw)
+	}
+	if r.Object != "chat.completion" || len(r.Choices) == 0 || strings.TrimSpace(r.Choices[0].Message.Content) == "" {
+		t.Fatalf("unexpected openai response: %s", raw)
+	}
+	t.Logf("openai route OK: %q", r.Choices[0].Message.Content)
 }
 
 func TestLive_NativeMessages(t *testing.T) {

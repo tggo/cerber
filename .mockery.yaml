@@ -12,6 +12,7 @@ packages:
   cerber/internal/provider:
     interfaces:
       HTTPDoer:
+      Chatter:
   cerber/internal/server:
     interfaces:
       Upstream:

@@ -12,11 +12,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"cerber/internal/access"
+	"cerber/internal/config"
 	"cerber/internal/credential"
 	"cerber/internal/metrics"
+	"cerber/internal/provider"
 	"cerber/internal/translator"
 	"cerber/internal/usage"
 
@@ -47,6 +50,8 @@ type Server struct {
 	tr          *translator.Translator
 	log         *zap.Logger
 	usage       *usage.Tracker
+	chatters    map[string]provider.Chatter
+	routes      []config.Route
 	cooldown    time.Duration
 	refreshSkew time.Duration
 	now         func() time.Time
@@ -73,6 +78,7 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		tr:          translator.New(),
 		log:         logger,
 		usage:       usage.New(),
+		chatters:    map[string]provider.Chatter{},
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
@@ -81,6 +87,33 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 
 // Usage returns the usage tracker (for metrics and the dashboard).
 func (s *Server) Usage() *usage.Tracker { return s.usage }
+
+// RegisterChatter adds an extra provider reachable from the OpenAI-compatible
+// endpoint, keyed by its Name (e.g. "openai", "gemini").
+func (s *Server) RegisterChatter(c provider.Chatter) { s.chatters[c.Name()] = c }
+
+// SetRoutes installs model-prefix routing overrides.
+func (s *Server) SetRoutes(routes []config.Route) { s.routes = routes }
+
+// route returns the provider name a model should go to on the OpenAI endpoint.
+// Configured prefixes win; otherwise built-in defaults; default is "anthropic".
+func (s *Server) route(model string) string {
+	for _, r := range s.routes {
+		if strings.HasPrefix(model, r.Prefix) {
+			return r.Provider
+		}
+	}
+	switch {
+	case strings.HasPrefix(model, "gpt"), strings.HasPrefix(model, "o1"),
+		strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"),
+		strings.HasPrefix(model, "chatgpt"):
+		return "openai"
+	case strings.HasPrefix(model, "gemini"):
+		return "gemini"
+	default:
+		return "anthropic"
+	}
+}
 
 // Handler returns the HTTP handler for the API.
 func (s *Server) Handler() http.Handler {
@@ -209,7 +242,22 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := extractModel(body)
-	anthropicBody, stream, err := s.tr.OpenAIToAnthropic(body)
+	stream := wantsStream(body)
+
+	// Route non-Anthropic models to their provider (OpenAI-format passthrough/translation).
+	if target := s.route(model); target != "anthropic" {
+		chatter, ok := s.chatters[target]
+		if !ok {
+			s.usage.Record(usage.Event{Model: model, IsError: true})
+			writeError(w, http.StatusNotImplemented, "provider "+target+" is not configured")
+			return
+		}
+		s.serveChatter(w, r, chatter, body, model, stream)
+		return
+	}
+
+	anthropicBody, streamA, err := s.tr.OpenAIToAnthropic(body)
+	stream = streamA
 	if err != nil {
 		s.usage.Record(usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -374,10 +422,15 @@ func relay(w http.ResponseWriter, resp *http.Response) {
 		w.Header().Set("Content-Type", ct)
 	}
 	w.WriteHeader(resp.StatusCode)
+	streamCopy(w, resp.Body)
+}
+
+// streamCopy copies body to w, flushing after each chunk so streaming works.
+func streamCopy(w http.ResponseWriter, body io.Reader) {
 	flush := flusher(w)
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := resp.Body.Read(buf)
+		n, err := body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
@@ -388,6 +441,70 @@ func relay(w http.ResponseWriter, resp *http.Response) {
 			return
 		}
 	}
+}
+
+// serveChatter delegates an OpenAI-format request to a non-Anthropic provider and
+// relays/records the OpenAI-format response.
+func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider.Chatter, body []byte, model string, stream bool) {
+	resp, err := c.Chat(r.Context(), body, stream, r.Header)
+	if err != nil {
+		s.usage.Record(usage.Event{Model: model, IsError: true})
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	ct := resp.Header.Get("Content-Type")
+	if resp.Status != http.StatusOK {
+		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, IsError: true})
+		s.log.Warn("provider error response", zap.String("provider", c.Name()),
+			zap.Int("status", resp.Status), zap.String("body", string(buf)))
+		if ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.Status)
+		_, _ = w.Write(buf)
+		return
+	}
+
+	if stream {
+		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model})
+		if ct == "" {
+			ct = "text/event-stream"
+		}
+		w.Header().Set("Content-Type", ct)
+		w.WriteHeader(http.StatusOK)
+		streamCopy(w, resp.Body)
+		return
+	}
+
+	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, IsError: true})
+		writeError(w, http.StatusBadGateway, "read provider response")
+		return
+	}
+	in, out := openaiUsage(buf)
+	s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, InputTokens: in, OutputTokens: out})
+	if ct == "" {
+		ct = "application/json"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf)
+}
+
+// openaiUsage extracts token counts from an OpenAI chat-completion response.
+func openaiUsage(body []byte) (in, out int64) {
+	var probe struct {
+		Usage struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	return probe.Usage.PromptTokens, probe.Usage.CompletionTokens
 }
 
 // relayError buffers a small upstream error response, logs it (status + body
