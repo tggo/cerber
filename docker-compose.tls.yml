@@ -1,0 +1,34 @@
+# cerber TLS-impersonation stack (DOCKER ONLY — never do this on the host).
+#
+#   docker compose -f docker-compose.tls.yml up -d --build
+#   docker compose -f docker-compose.tls.yml exec cerber claude   # 1M + tool-search
+#
+# Inside the container: api.anthropic.com -> 127.0.0.1 (cerber), cerber's CA is
+# trusted, Claude Code thinks it's first-party. cerber reaches the real Anthropic
+# via DoH. The host is untouched.
+services:
+  cerber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cerber-tls
+    extra_hosts:
+      - "api.anthropic.com:127.0.0.1"
+    environment:
+      - NODE_EXTRA_CA_CERTS=/work/certs/ca.pem
+      # Gives Claude Code a token to send; cerber ignores it (allow_localhost) and
+      # uses its own credentials upstream. For 1M context via a Max subscription,
+      # mount your host login instead (see the ~/.claude volume below).
+      - ANTHROPIC_API_KEY=local
+    volumes:
+      - ./.env:/work/.env:ro
+      - ./config.tls.yaml:/work/config.tls.yaml:ro
+      - ./auths:/work/auths
+      - ./certs:/work/certs
+      - ./logs:/work/logs
+      # Optional: reuse your host Claude Code login (Max) so 1M context activates.
+      # - ${HOME}/.claude:/root/.claude
+    ports:
+      - "127.0.0.1:8088:8080"   # dashboard/stats/metrics on the host
+    tty: true
+    stdin_open: true

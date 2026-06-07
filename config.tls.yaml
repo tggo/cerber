@@ -1,0 +1,34 @@
+# cerber config for the TLS-impersonation container (Docker only).
+# Claude Code in the container hits api.anthropic.com -> (extra_hosts) -> cerber:443.
+server:
+  addr: ":8080"        # HTTP: dashboard/stats/metrics
+logging:
+  level: "info"
+  dir: "/work/logs"
+auth_dir: "/work/auths"
+
+tls:
+  enabled: true
+  addr: ":443"         # HTTPS impersonation listener
+  cert_dir: "/work/certs"
+  hosts: ["api.anthropic.com"]
+  use_doh: true        # reach the real Anthropic despite the hosts redirect
+
+access:
+  allow_localhost: true   # accept whatever Claude Code sends (in-container)
+
+providers:
+  anthropic:
+    # OAuth tokens from /work/auths (cerber --claude-login) are merged in.
+    # Optional extra API key from .env:
+    credentials:
+      - { type: api_key, name: playground, key: "${PLAYGROUND_API_KEY}" }
+  openai:
+    credentials:
+      - { type: api_key, name: openai, key: "${OPENAI_KEY}" }
+  gemini:
+    credentials:
+      - { type: api_key, name: gemini, key: "${GEMINI_KEY}" }
+  grok:
+    credentials:
+      - { type: api_key, name: grok, key: "${GROK_API_KEY}" }

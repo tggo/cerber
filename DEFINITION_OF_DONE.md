@@ -189,6 +189,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Config validation allows empty `access.keys` when `allow_localhost` is true.
 **Verified:** `internal/server` allow-localhost + isLoopback tests + live (no-key/any-key localhost → 200) — 2026-06-07.
 
+## TLS impersonation (Docker only)
+**What:** in a container, cerber impersonates `api.anthropic.com` so Claude Code treats it as first-party and enables 1M context + tool-search.
+**DoD:**
+- `cerber --gen-cert` writes a CA + leaf cert for the impersonated host(s) (default `api.anthropic.com`).
+- With `tls.enabled`, cerber serves HTTPS on `tls.addr` using the generated cert; with `tls.use_doh`, it resolves the real upstream via DNS-over-HTTPS, bypassing the container's `/etc/hosts` redirect.
+- `docker compose -f docker-compose.tls.yml up` runs cerber + Claude Code in a container with `extra_hosts` redirect and `NODE_EXTRA_CA_CERTS`; the host is untouched.
+- 1M context + tool-search require Claude Code logged into Max in the container (mount `~/.claude`).
+**Verified:** `internal/tlscert` + `internal/upstreamdial` tests + live in-container: `https://api.anthropic.com/healthz`→ok via cerber, real `/v1/messages`→Anthropic via DoH, `claude -p`→"pong" through the impersonation — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**
