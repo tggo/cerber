@@ -41,7 +41,7 @@ func TestChat_Passthrough(t *testing.T) {
 		sentBody, _ = io.ReadAll(r.Body)
 		return resp(200, `{"object":"chat.completion"}`), nil
 	})
-	p := New("https://api.openai.com/", store(t, "sk-key"), doer)
+	p := New("openai", "https://api.openai.com/", store(t, "sk-key"), doer)
 
 	in := []byte(`{"model":"gpt-4o","messages":[]}`)
 	out, err := p.Chat(context.Background(), in, false, nil)
@@ -75,7 +75,7 @@ func TestChat_StreamAccept(t *testing.T) {
 		captured = r
 		return resp(200, "data: x"), nil
 	})
-	p := New("https://api.openai.com", store(t, "k"), doer)
+	p := New("openai", "https://api.openai.com", store(t, "k"), doer)
 	out, err := p.Chat(context.Background(), []byte(`{"stream":true}`), true, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestChat_RotatesOn429(t *testing.T) {
 		}
 		return resp(200, `{"ok":true}`), nil
 	})
-	p := New("https://api.openai.com", store(t, "k1", "k2"), doer)
+	p := New("openai", "https://api.openai.com", store(t, "k1", "k2"), doer)
 	out, err := p.Chat(context.Background(), []byte(`{}`), false, nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -110,14 +110,14 @@ func TestChat_RotatesOn429(t *testing.T) {
 func TestChat_TransportError(t *testing.T) {
 	doer := mocks.NewHTTPDoer(t)
 	doer.EXPECT().Do(mock.Anything).Return(nil, errors.New("dial"))
-	p := New("https://api.openai.com", store(t, "k"), doer)
+	p := New("openai", "https://api.openai.com", store(t, "k"), doer)
 	if _, err := p.Chat(context.Background(), []byte(`{}`), false, nil); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestName(t *testing.T) {
-	if New("x", store(t, "k"), mocks.NewHTTPDoer(t)).Name() != "openai" {
+	if New("openai", "x", store(t, "k"), mocks.NewHTTPDoer(t)).Name() != "openai" {
 		t.Error("name")
 	}
 }

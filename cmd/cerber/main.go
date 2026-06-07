@@ -104,8 +104,18 @@ func main() {
 		if err != nil {
 			logger.Fatal("openai credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(openai.New(o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
+		srv.RegisterChatter(openai.New("openai", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
+	}
+
+	if k := cfg.Providers.Grok; k != nil {
+		kstore, err := credential.NewStore(k.Credentials)
+		if err != nil {
+			logger.Fatal("grok credentials", zap.Error(err))
+		}
+		// xAI/Grok is OpenAI-compatible: reuse the OpenAI provider, named "grok".
+		srv.RegisterChatter(openai.New("grok", k.BaseURL, kstore, &http.Client{Timeout: k.Timeout.Std()}))
+		logger.Info("grok provider enabled", zap.Int("credentials", kstore.Len()))
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {

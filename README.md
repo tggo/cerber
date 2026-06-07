@@ -51,6 +51,7 @@ On `/v1/chat/completions`, cerber routes by model name:
 | `claude*` (default) | Anthropic | OpenAI↔Anthropic translation; also native `/v1/messages` |
 | `gpt* o1* o3* o4* chatgpt*` | OpenAI | passthrough |
 | `gemini*` | Gemini | OpenAI↔Gemini translation |
+| `grok*` | xAI / Grok | passthrough (OpenAI-compatible) |
 
 Override routing with `providers.routing` in the config. Each provider pools
 multiple credentials with rotation; Anthropic adds OAuth refresh + Claude Code spoofing.

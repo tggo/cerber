@@ -47,6 +47,7 @@ type Providers struct {
 	Anthropic *Anthropic `yaml:"anthropic"`
 	OpenAI    *OpenAI    `yaml:"openai"`
 	Gemini    *Gemini    `yaml:"gemini"`
+	Grok      *Grok      `yaml:"grok"`
 	Routing   []Route    `yaml:"routing"`
 }
 
@@ -73,6 +74,13 @@ type OpenAI struct {
 
 // Gemini configures the Google Generative Language (Gemini) upstream.
 type Gemini struct {
+	BaseURL     string       `yaml:"base_url"`
+	Timeout     Duration     `yaml:"timeout"`
+	Credentials []Credential `yaml:"credentials"`
+}
+
+// Grok configures the xAI (Grok) upstream, which is OpenAI-compatible.
+type Grok struct {
 	BaseURL     string       `yaml:"base_url"`
 	Timeout     Duration     `yaml:"timeout"`
 	Credentials []Credential `yaml:"credentials"`
@@ -110,6 +118,7 @@ const (
 	defaultAnthropicWaitNS = 120 * time.Second
 	defaultOpenAIBase      = "https://api.openai.com"
 	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
+	defaultGrokBase        = "https://api.x.ai"
 	defaultProviderWaitNS  = 120 * time.Second
 )
 
@@ -191,6 +200,14 @@ func (c *Config) applyDefaults() {
 			g.Timeout = Duration(defaultProviderWaitNS)
 		}
 	}
+	if g := c.Providers.Grok; g != nil {
+		if g.BaseURL == "" {
+			g.BaseURL = defaultGrokBase
+		}
+		if g.Timeout == 0 {
+			g.Timeout = Duration(defaultProviderWaitNS)
+		}
+	}
 }
 
 // Validate reports the first configuration error found.
@@ -204,7 +221,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	p := c.Providers
-	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil {
+	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil {
 		return fmt.Errorf("config: no providers configured")
 	}
 	if p.Anthropic != nil {
@@ -225,9 +242,14 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if p.Grok != nil {
+		if err := validateCreds("grok", p.Grok.BaseURL, p.Grok.Credentials, true); err != nil {
+			return err
+		}
+	}
 	for i, r := range p.Routing {
 		switch r.Provider {
-		case "anthropic", "openai", "gemini":
+		case "anthropic", "openai", "gemini", "grok":
 		default:
 			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini", i, r.Provider)
 		}

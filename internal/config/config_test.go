@@ -183,8 +183,22 @@ providers:
 	if c.Providers.Gemini.BaseURL != defaultGeminiBase {
 		t.Errorf("gemini base = %q", c.Providers.Gemini.BaseURL)
 	}
+	if c.Providers.Grok != nil {
+		t.Error("grok should be nil when omitted")
+	}
 	if len(c.Providers.Routing) != 2 {
 		t.Errorf("routing = %+v", c.Providers.Routing)
+	}
+}
+
+func TestParse_GrokDefaults(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {grok: {credentials: [{type: api_key, key: x}]}, routing: [{prefix: grok, provider: grok}]}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Grok.BaseURL != defaultGrokBase || c.Providers.Grok.Timeout.Std() != defaultProviderWaitNS {
+		t.Errorf("grok defaults = %+v", c.Providers.Grok)
 	}
 }
 
@@ -198,6 +212,7 @@ func TestParse_ProviderErrors(t *testing.T) {
 		"route bad prov":    "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key, key: k}]}, routing: [{prefix: gpt, provider: bogus}]}",
 		"route no prefix":   "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key, key: k}]}, routing: [{prefix: \"\", provider: openai}]}",
 		"truly no provider": "access: {keys: [k]}\nproviders: {}",
+		"grok no creds":     "access: {keys: [k]}\nproviders: {grok: {credentials: []}}",
 	}
 	for name, y := range cases {
 		t.Run(name, func(t *testing.T) {

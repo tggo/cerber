@@ -115,6 +115,8 @@ func (s *Server) route(model string) string {
 		return "openai"
 	case strings.HasPrefix(model, "gemini"):
 		return "gemini"
+	case strings.HasPrefix(model, "grok"):
+		return "grok"
 	default:
 		return "anthropic"
 	}

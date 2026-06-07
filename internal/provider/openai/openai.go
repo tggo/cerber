@@ -22,17 +22,22 @@ const ChatPath = "/v1/chat/completions"
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
 const defaultCooldown = 60 * time.Second
 
-// Provider routes OpenAI-format requests to an OpenAI-compatible upstream.
+// Provider routes OpenAI-format requests to an OpenAI-compatible upstream. The
+// same implementation serves OpenAI and any OpenAI-compatible API (e.g. xAI/Grok)
+// — only the name and base URL differ.
 type Provider struct {
+	name     string
 	baseURL  string
 	store    *credential.Store
 	http     provider.HTTPDoer
 	cooldown time.Duration
 }
 
-// New builds a Provider. baseURL is the OpenAI origin (e.g. https://api.openai.com).
-func New(baseURL string, store *credential.Store, doer provider.HTTPDoer) *Provider {
+// New builds a Provider with the given name (e.g. "openai", "grok") and base URL
+// (e.g. https://api.openai.com, https://api.x.ai).
+func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer) *Provider {
 	return &Provider{
+		name:     name,
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		store:    store,
 		http:     doer,
@@ -41,7 +46,7 @@ func New(baseURL string, store *credential.Store, doer provider.HTTPDoer) *Provi
 }
 
 // Name identifies this provider.
-func (p *Provider) Name() string { return "openai" }
+func (p *Provider) Name() string { return p.name }
 
 // Chat forwards an OpenAI chat-completions request upstream, rotating across
 // credentials, and returns the OpenAI-format response unchanged.

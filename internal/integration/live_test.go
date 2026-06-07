@@ -111,7 +111,7 @@ func liveServerWithOpenAI(t *testing.T, anthropicKey, oaiKey string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.RegisterChatter(openai.New("https://api.openai.com", ostore, &http.Client{Timeout: 60 * time.Second}))
+	srv.RegisterChatter(openai.New("openai", "https://api.openai.com", ostore, &http.Client{Timeout: 60 * time.Second}))
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -188,6 +188,54 @@ func TestLive_GeminiRoute(t *testing.T) {
 		t.Fatalf("unexpected gemini response: %s", raw)
 	}
 	t.Logf("gemini route OK: %q", r.Choices[0].Message.Content)
+}
+
+func grokKey(t *testing.T) string {
+	t.Helper()
+	_ = config.LoadEnvFile("../../.env")
+	k := os.Getenv("GROK_API_KEY")
+	if k == "" {
+		t.Skip("GROK_API_KEY not set; skipping live Grok integration test")
+	}
+	return k
+}
+
+func TestLive_GrokRoute(t *testing.T) {
+	store, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "playground", Key: apiKey(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Timeout: 60 * time.Second}
+	srv := server.New(access.New([]string{clientKey}), store,
+		anthropic.New(baseURL, "2023-06-01", hc), anthropic.NewRefresher(baseURL, hc), zap.NewNop())
+	kstore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "grok", Key: grokKey(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.RegisterChatter(openai.New("grok", "https://api.x.ai", kstore, &http.Client{Timeout: 60 * time.Second}))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	body := `{"model":"grok-4.3","messages":[{"role":"user","content":"Reply with exactly the word: pong"}]}`
+	status, raw := post(t, ts.URL+"/v1/chat/completions", body)
+	if status != http.StatusOK {
+		t.Fatalf("status %d: %s", status, raw)
+	}
+	var r struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("parse: %v (%s)", err, raw)
+	}
+	if r.Object != "chat.completion" || len(r.Choices) == 0 || strings.TrimSpace(r.Choices[0].Message.Content) == "" {
+		t.Fatalf("unexpected grok response: %s", raw)
+	}
+	t.Logf("grok route OK: %q", r.Choices[0].Message.Content)
 }
 
 func TestLive_NativeMessages(t *testing.T) {

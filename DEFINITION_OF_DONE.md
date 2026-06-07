@@ -175,6 +175,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Applies to `/v1/messages` and the Anthropic-routed `/v1/chat/completions`; rotation/cooldown still honored within the chosen kind; none of the requested kind available → 503.
 **Verified:** `internal/credential` NextOf tests (100%) + server header tests + live (oauth header → OAuth login cred, key header → api key) — 2026-06-07.
 
+## Grok (xAI) provider
+**What:** Grok supported as an upstream on the OpenAI-compatible endpoint.
+**DoD:**
+- `/v1/chat/completions` with a `grok*` model → forwarded to xAI (`https://api.x.ai`, Bearer key, credential rotation), response relayed unchanged (xAI is OpenAI-compatible — reuses the OpenAI provider named "grok").
+- `providers.grok` config (base_url default `https://api.x.ai`); `grok` valid in `routing`.
+**Verified:** reuses `internal/provider/openai` (93%) + config grok tests + live `make integration` (grok route → "pong" via real api.x.ai, model grok-4.3) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

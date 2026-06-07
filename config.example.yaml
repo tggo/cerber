@@ -38,6 +38,11 @@ providers:
   #   credentials:
   #     - { type: api_key, name: gem, key: "${GEMINI_KEY}" }
 
+  # grok:   # xAI, OpenAI-compatible; routes grok* models here
+  #   base_url: "https://api.x.ai"
+  #   credentials:
+  #     - { type: api_key, name: grok, key: "${GROK_API_KEY}" }
+
   anthropic:
     base_url: "https://api.anthropic.com"
     version: "2023-06-01"
