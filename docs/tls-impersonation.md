@@ -29,6 +29,15 @@ claude (in container, no ANTHROPIC_BASE_URL)
   the actual API.
 - **`access.allow_localhost: true`** — cerber accepts whatever Claude Code sends and
   injects its own pooled credentials upstream.
+- **Transparent login** — the entrypoint runs `cerber --seed-claude-creds`, writing
+  `~/.claude/.credentials.json` from `auth_dir` so Claude Code starts as a normal
+  Max login (no `ANTHROPIC_API_KEY`, no prompt). cerber is the sole token owner: it
+  injects its pooled OAuth on `/v1/messages` *and* on the catch-all proxy, so the
+  seeded token is never actually used upstream and never needs refreshing.
+
+With a Max login seen on a first-party host, Claude Code enables
+`advanced-tool-use` (tool-search) — so it stops dumping every MCP tool into each
+request, which is what caused the instant auto-compact via a custom base URL.
 
 ## Run
 
@@ -46,20 +55,14 @@ docker compose -f docker-compose.tls.yml exec cerber \
   claude -p "say pong" --model claude-sonnet-4-6                          # -> pong
 ```
 
-## Getting 1M context + tool-search
+## Tool-search / 1M context
 
-These are **Max-subscription** features, so Claude Code in the container must be
-logged into your Max account (not API-key mode). Mount your host login by
-uncommenting in `docker-compose.tls.yml`:
-
-```yaml
-    volumes:
-      - ${HOME}/.claude:/root/.claude
-```
-
-and remove the `ANTHROPIC_API_KEY=local` env (so Claude Code uses the subscription
-OAuth). Then `claude` in the container — seeing `api.anthropic.com` + your Max
-login — enables 1M context and tool-search, and the requests flow through cerber.
+These activate when Claude Code believes it has a Max login on the first-party
+host — which the seeded credentials + impersonation provide automatically. No API
+key and no manual login are needed: the entrypoint seeds the login from `auth_dir`
+(run `cerber --claude-login` once on the host to populate it). Verified: through
+impersonation Claude Code sends `advanced-tool-use-2025-11-20` (tool-search), which
+it never sends via a custom `ANTHROPIC_BASE_URL`.
 
 ## Notes / limits
 
