@@ -125,7 +125,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **What:** cerber tracks request/error/token counts per credential and per model, exposed as JSON.
 **DoD:**
 - `GET /admin/stats` (requires a client key) returns totals + by_credential + by_model (requests, errors, input/output tokens, last_used), sorted by requests.
-- Tokens are recorded for non-streaming responses (parsed from Anthropic usage); streaming records request counts only.
+- Tokens are recorded for non-streaming responses (parsed from Anthropic usage) AND for native streaming responses (parsed from `message_start`/`message_delta` SSE events as they pass through). OpenAI-compat streaming still records request counts only.
 - Errors (4xx/5xx, transport, refresh, none-available) increment the error count.
 **Verified:** `internal/usage` (100%) + `internal/server` stats tests + live (`input 9/output 6` after one real call) — 2026-06-07.
 

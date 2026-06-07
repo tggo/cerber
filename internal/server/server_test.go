@@ -160,6 +160,41 @@ func TestNative_StreamFlagDetected(t *testing.T) {
 	}
 }
 
+func TestNative_StreamRecordsUsage(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	stream := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":56}}\n\n"
+	up.EXPECT().Send(mock.Anything, mock.Anything, true, mock.Anything, mock.Anything).
+		Return(resp(200, "text/event-stream", stream), nil)
+	h := s.Handler()
+	rec := do(t, h, "POST", "/v1/messages", `{"model":"claude-x","stream":true}`, clientKey)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"text":"hi"`) {
+		t.Fatalf("stream relay = %d %q", rec.Code, rec.Body.String())
+	}
+	stats := do(t, h, "GET", "/admin/stats", "", clientKey)
+	if !strings.Contains(stats.Body.String(), `"input_tokens":1234`) || !strings.Contains(stats.Body.String(), `"output_tokens":56`) {
+		t.Errorf("streaming usage not recorded: %s", stats.Body.String())
+	}
+}
+
+func TestParseAnthropicStreamUsage(t *testing.T) {
+	in, out := parseAnthropicStreamUsage([]byte(`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`))
+	if in != 10 {
+		t.Errorf("input = %d", in)
+	}
+	_, out = parseAnthropicStreamUsage([]byte(`{"type":"message_delta","usage":{"output_tokens":42}}`))
+	if out != 42 {
+		t.Errorf("output = %d", out)
+	}
+	if i, o := parseAnthropicStreamUsage([]byte(`not json`)); i != 0 || o != 0 {
+		t.Errorf("bad json = %d %d", i, o)
+	}
+}
+
 func TestOpenAI_NonStreamTranslated(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
 	anthropicResp := `{"id":"msg_9","model":"claude","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`

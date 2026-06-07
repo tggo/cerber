@@ -5,6 +5,8 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -247,8 +249,63 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
-	s.usage.Record(usage.Event{Credential: cred, Model: model})
-	relay(w, resp)
+	// Streaming: relay the SSE through while parsing Anthropic usage events so
+	// token counts are recorded (Claude Code streams).
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	in, out := streamRelayAnthropicUsage(w, resp.Body)
+	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+}
+
+// streamRelayAnthropicUsage copies an Anthropic SSE stream to the client
+// (flushing per line) while extracting token usage: input from message_start,
+// output from message_delta.
+func streamRelayAnthropicUsage(w http.ResponseWriter, body io.Reader) (in, out int64) {
+	flush := flusher(w)
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if _, err := w.Write(append(line, '\n')); err != nil {
+			return in, out
+		}
+		flush()
+		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			i, o := parseAnthropicStreamUsage(bytes.TrimSpace(data))
+			if i > 0 {
+				in = i
+			}
+			if o > 0 {
+				out = o
+			}
+		}
+	}
+	return in, out
+}
+
+// parseAnthropicStreamUsage pulls token counts from one SSE data payload.
+func parseAnthropicStreamUsage(data []byte) (in, out int64) {
+	var ev struct {
+		Message struct {
+			Usage struct {
+				InputTokens  int64 `json:"input_tokens"`
+				OutputTokens int64 `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+		Usage struct {
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(data, &ev) != nil {
+		return 0, 0
+	}
+	out = ev.Usage.OutputTokens
+	if out == 0 {
+		out = ev.Message.Usage.OutputTokens
+	}
+	return ev.Message.Usage.InputTokens, out
 }
 
 // handleOpenAI accepts an OpenAI chat-completions request, translates it to
