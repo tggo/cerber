@@ -60,6 +60,16 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Known gaps (slice #1): OAuth token refresh and Claude-Code system-prompt spoofing not yet implemented.
 **Verified:** `internal/provider/anthropic` tests (mockery HTTPDoer), 100% coverage — 2026-06-07.
 
+## Translator — OpenAI ↔ Anthropic
+**What:** converts OpenAI chat-completions requests/responses to and from Anthropic Messages, including streaming.
+**DoD:**
+- Request: OpenAI → Anthropic merges system messages into `system`; defaults `max_tokens` to 4096; maps temperature/top_p/stop(string|array)/stream; text + image content parts (data: URIs → base64 source, others → url source).
+- Request errors: bad JSON, missing model, no messages, unsupported role/part, only-system, bad stop/content → clear error.
+- Response (non-stream): Anthropic → OpenAI concatenates text blocks; maps stop_reason→finish_reason (end_turn/stop_sequence→stop, max_tokens→length, tool_use→tool_calls); maps usage; derives `chatcmpl-<id>`.
+- Streaming: Anthropic SSE → OpenAI `chat.completion.chunk` SSE — role chunk first, content deltas, final finish_reason chunk, then `data: [DONE]`; tolerates pings/non-JSON; finishes on EOF even without message_stop.
+- Known gaps (slice #1): OpenAI `tools`/function-calling not translated (use native endpoint).
+**Verified:** `internal/translator` tests, 94.8% coverage — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**
