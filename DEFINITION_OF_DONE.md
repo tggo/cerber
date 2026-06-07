@@ -32,6 +32,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Rejects: no access keys, empty key, no providers, non-http(s) base_url, no credentials, api_key without key, oauth without access_token, unknown/missing credential type, bad duration.
 **Verified:** `internal/config` tests, 98.2% coverage — 2026-06-07.
 
+## Credentials — store, rotation, cooldown
+**What:** thread-safe store of Anthropic credentials handed out round-robin, with per-credential cooldown after upstream failures.
+**DoD:**
+- Round-robin order is stable; `Next()` cycles through all credentials.
+- A credential put on `Cooldown(d)` is skipped until `d` elapses, then returns to rotation.
+- When all credentials are cooling down, `Next()` returns `ErrNoneAvailable`.
+- Secrets are never present in `String()`/logs; readable only via explicit accessors.
+**Verified:** `internal/credential` tests, 100% coverage — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**
