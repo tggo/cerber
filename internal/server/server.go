@@ -203,7 +203,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	}
 	model := extractModel(body)
 	stream := wantsStream(body)
-	resp, cred, err := s.dispatch(r.Context(), body, stream, r.Header)
+	resp, cred, err := s.dispatch(r.Context(), body, stream, r.Header, credFilter(r))
 	if err != nil {
 		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
@@ -268,7 +268,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	resp, cred, err := s.dispatch(r.Context(), anthropicBody, stream, r.Header)
+	resp, cred, err := s.dispatch(r.Context(), anthropicBody, stream, r.Header, credFilter(r))
 	if err != nil {
 		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
@@ -316,11 +316,11 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 // dispatch sends body upstream, rotating credentials and sidelining any that
 // fail with auth/rate-limit errors. It returns the response, the name of the
 // credential used (or last tried), and an error. The response Body must be closed.
-func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*http.Response, string, error) {
+func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientHeader http.Header, match func(*credential.Credential) bool) (*http.Response, string, error) {
 	var lastErr error
 	var lastCred string
 	for i, n := 0, s.creds.Len(); i < n; i++ {
-		cred, err := s.creds.Next()
+		cred, err := s.creds.NextOf(match)
 		if err != nil {
 			return nil, lastCred, err // ErrNoneAvailable
 		}
@@ -361,6 +361,20 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 		lastErr = errors.New("no credentials available")
 	}
 	return nil, lastCred, lastErr
+}
+
+// credFilter returns a credential matcher from the X-Cerber-Cred header:
+// "oauth" -> OAuth credentials only, "key"/"api_key" -> API-key credentials only,
+// anything else (or absent) -> any credential.
+func credFilter(r *http.Request) func(*credential.Credential) bool {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Cerber-Cred"))) {
+	case "oauth":
+		return func(c *credential.Credential) bool { return c.Kind() == credential.KindOAuth }
+	case "key", "api_key", "apikey":
+		return func(c *credential.Credential) bool { return c.Kind() == credential.KindAPIKey }
+	default:
+		return nil
+	}
 }
 
 // extractModel reads the top-level "model" field from a request body (present in

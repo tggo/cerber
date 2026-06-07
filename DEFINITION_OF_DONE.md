@@ -168,6 +168,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Refreshed OAuth tokens are persisted back to `auth_dir`, so logins survive restarts.
 **Verified:** `internal/auth/claude` + `internal/auth/login` + `internal/tokenstore` tests + server persister test + live smoke (`--claude-login --no-browser` prints the real claude.ai authorize URL and serves the callback) — 2026-06-07.
 
+## Credential selection by header (X-Cerber-Cred)
+**What:** clients can pick which Anthropic credential type handles a request.
+**DoD:**
+- `X-Cerber-Cred: oauth` → only OAuth (auth_dir) credentials are used; `key`/`api_key` → only API-key credentials; absent/other → any (round-robin), unchanged default.
+- Applies to `/v1/messages` and the Anthropic-routed `/v1/chat/completions`; rotation/cooldown still honored within the chosen kind; none of the requested kind available → 503.
+**Verified:** `internal/credential` NextOf tests (100%) + server header tests + live (oauth header → OAuth login cred, key header → api key) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

@@ -165,6 +165,41 @@ func TestUpdateOAuth(t *testing.T) {
 	s.UpdateOAuth(&Credential{}, OAuthTokens{AccessToken: "x"})
 }
 
+func TestNextOf_FiltersByKind(t *testing.T) {
+	s, _ := NewStore([]config.Credential{
+		apiKeyCfg("k1", "x"),
+		{Type: config.CredentialOAuth, Name: "o1", AccessToken: "t"},
+		apiKeyCfg("k2", "y"),
+	})
+	isOAuth := func(c *Credential) bool { return c.Kind() == KindOAuth }
+	for i := 0; i < 3; i++ {
+		c, err := s.NextOf(isOAuth)
+		if err != nil || c.Name() != "o1" {
+			t.Fatalf("NextOf(oauth) = %v %v", c, err)
+		}
+	}
+	isKey := func(c *Credential) bool { return c.Kind() == KindAPIKey }
+	got := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		c, _ := s.NextOf(isKey)
+		got[c.Name()] = true
+		if c.Kind() != KindAPIKey {
+			t.Errorf("got non-key %s", c.Name())
+		}
+	}
+	if !got["k1"] || !got["k2"] {
+		t.Errorf("key rotation missed one: %v", got)
+	}
+}
+
+func TestNextOf_NoMatch(t *testing.T) {
+	s, _ := NewStore([]config.Credential{apiKeyCfg("k", "x")})
+	_, err := s.NextOf(func(c *Credential) bool { return c.Kind() == KindOAuth })
+	if err != ErrNoneAvailable {
+		t.Fatalf("err = %v, want ErrNoneAvailable", err)
+	}
+}
+
 func TestCooldown_NoopCases(t *testing.T) {
 	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1")})
 	s.Cooldown(nil, time.Minute)           // nil credential

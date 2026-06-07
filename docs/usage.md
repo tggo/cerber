@@ -83,6 +83,26 @@ msg = client.messages.create(
 print(msg.content[0].text)
 ```
 
+## Choosing the Anthropic credential (X-Cerber-Cred)
+
+When the Anthropic provider has both an API key and an OAuth (Claude Code) login,
+clients can pick which to use per request:
+
+| Header | Effect |
+|---|---|
+| `X-Cerber-Cred: oauth` | use only OAuth (Claude Code) credentials |
+| `X-Cerber-Cred: key` | use only API-key credentials |
+| (absent) | any credential, round-robin |
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer my-client-key" \
+  -H "X-Cerber-Cred: oauth" \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+If no credential of the requested kind is available, cerber returns `503`.
+
 ## Authentication errors
 
 | Status | Meaning |

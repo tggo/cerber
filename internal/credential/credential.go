@@ -179,6 +179,13 @@ func (s *Store) Len() int { return len(s.entries) }
 // Next returns the next available credential in round-robin order, skipping any
 // still in cooldown. Returns ErrNoneAvailable if all are cooling down.
 func (s *Store) Next() (*Credential, error) {
+	return s.NextOf(nil)
+}
+
+// NextOf is like Next but only considers credentials for which match returns
+// true (a nil match accepts any). Returns ErrNoneAvailable if none match and are
+// available.
+func (s *Store) NextOf(match func(*Credential) bool) (*Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -187,6 +194,9 @@ func (s *Store) Next() (*Credential, error) {
 		e := s.entries[s.idx]
 		s.idx = (s.idx + 1) % n
 		if now.Before(e.cooldownUntil) {
+			continue
+		}
+		if match != nil && !match(e.cred) {
 			continue
 		}
 		return e.cred, nil

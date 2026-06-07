@@ -485,6 +485,58 @@ func TestChatter_BadRequest_400(t *testing.T) {
 	}
 }
 
+func TestCredFilter_HeaderRoutesByKind(t *testing.T) {
+	store, err := credential.NewStore([]config.Credential{
+		{Type: config.CredentialAPIKey, Name: "key1", Key: "k"},
+		{Type: config.CredentialOAuth, Name: "oauth1", AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := mocks.NewUpstream(t)
+	s := New(access.New([]string{clientKey}), store, up, nil, nil) // nil refresher: no refresh
+	var gotKind credential.Kind
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, cred *credential.Credential, _ http.Header) (*http.Response, error) {
+			gotKind = cred.Kind()
+			return resp(200, "application/json", `{"id":"ok"}`), nil
+		})
+	h := s.Handler()
+
+	send := func(credHeader string) credential.Kind {
+		r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+		r.Header.Set("Authorization", "Bearer "+clientKey)
+		if credHeader != "" {
+			r.Header.Set("X-Cerber-Cred", credHeader)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != 200 {
+			t.Fatalf("code %d", rec.Code)
+		}
+		return gotKind
+	}
+
+	if k := send("oauth"); k != credential.KindOAuth {
+		t.Errorf("X-Cerber-Cred: oauth -> %s, want oauth", k)
+	}
+	if k := send("key"); k != credential.KindAPIKey {
+		t.Errorf("X-Cerber-Cred: key -> %s, want api_key", k)
+	}
+}
+
+func TestCredFilter_OAuthRequestedButNone_503(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1)) // api_key only
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+	r.Header.Set("Authorization", "Bearer "+clientKey)
+	r.Header.Set("X-Cerber-Cred", "oauth")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("code %d, want 503 (no oauth cred)", rec.Code)
+	}
+}
+
 func TestDispatch_NoneAvailable_503(t *testing.T) {
 	store := newStore(t, 1)
 	// Put the only credential into cooldown so Next() returns ErrNoneAvailable.
