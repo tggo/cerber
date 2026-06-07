@@ -1,4 +1,5 @@
 bin/
 coverage.out
+coverage.gate.out
 *.test
 .DS_Store
