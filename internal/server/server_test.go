@@ -203,6 +203,11 @@ func TestParseAnthropicStreamUsage(t *testing.T) {
 	if in != 10 {
 		t.Errorf("input = %d", in)
 	}
+	// cache tokens are included in input (Claude Code caches its big tool/system prompt)
+	inC, _ := parseAnthropicStreamUsage([]byte(`{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":2000,"cache_read_input_tokens":48000}}}`))
+	if inC != 50010 {
+		t.Errorf("input with cache = %d, want 50010", inC)
+	}
 	_, out = parseAnthropicStreamUsage([]byte(`{"type":"message_delta","usage":{"output_tokens":42}}`))
 	if out != 42 {
 		t.Errorf("output = %d", out)

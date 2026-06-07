@@ -283,18 +283,14 @@ func streamRelayAnthropicUsage(w http.ResponseWriter, body io.Reader) (in, out i
 	return in, out
 }
 
-// parseAnthropicStreamUsage pulls token counts from one SSE data payload.
+// parseAnthropicStreamUsage pulls token counts from one SSE data payload. Input
+// (from message_start) includes cache tokens; output comes from message_delta.
 func parseAnthropicStreamUsage(data []byte) (in, out int64) {
 	var ev struct {
 		Message struct {
-			Usage struct {
-				InputTokens  int64 `json:"input_tokens"`
-				OutputTokens int64 `json:"output_tokens"`
-			} `json:"usage"`
+			Usage anthropicUsageFields `json:"usage"`
 		} `json:"message"`
-		Usage struct {
-			OutputTokens int64 `json:"output_tokens"`
-		} `json:"usage"`
+		Usage anthropicUsageFields `json:"usage"`
 	}
 	if json.Unmarshal(data, &ev) != nil {
 		return 0, 0
@@ -303,7 +299,7 @@ func parseAnthropicStreamUsage(data []byte) (in, out int64) {
 	if out == 0 {
 		out = ev.Message.Usage.OutputTokens
 	}
-	return ev.Message.Usage.InputTokens, out
+	return ev.Message.Usage.totalInput(), out
 }
 
 // handleOpenAI accepts an OpenAI chat-completions request, translates it to
@@ -484,16 +480,27 @@ func extractModel(body []byte) string {
 }
 
 // anthropicUsage extracts input/output token counts from an Anthropic Messages
-// response body. Returns zeros if absent.
+// response body. Input includes cache creation/read tokens (Claude Code caches
+// its large tool/system prompt, so plain input_tokens alone is misleadingly low).
 func anthropicUsage(body []byte) (in, out int64) {
 	var probe struct {
-		Usage struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
-		} `json:"usage"`
+		Usage anthropicUsageFields `json:"usage"`
 	}
 	_ = json.Unmarshal(body, &probe)
-	return probe.Usage.InputTokens, probe.Usage.OutputTokens
+	return probe.Usage.totalInput(), probe.Usage.OutputTokens
+}
+
+// anthropicUsageFields are the token fields in an Anthropic usage object.
+type anthropicUsageFields struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+// totalInput sums fresh input with cache creation and cache read tokens.
+func (u anthropicUsageFields) totalInput() int64 {
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
 // isCredFailure reports statuses that indicate the credential, not the request,
