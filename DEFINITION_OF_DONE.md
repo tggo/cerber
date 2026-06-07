@@ -121,6 +121,26 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `scripts/verify-claude.sh` verifies the real `claude -p` CLI through cerber.
 **Verified:** `make integration` → 3/3 PASS; verify-claude.sh → PASS — 2026-06-07.
 
+## Usage & stats
+**What:** cerber tracks request/error/token counts per credential and per model, exposed as JSON.
+**DoD:**
+- `GET /admin/stats` (requires a client key) returns totals + by_credential + by_model (requests, errors, input/output tokens, last_used), sorted by requests.
+- Tokens are recorded for non-streaming responses (parsed from Anthropic usage); streaming records request counts only.
+- Errors (4xx/5xx, transport, refresh, none-available) increment the error count.
+**Verified:** `internal/usage` (100%) + `internal/server` stats tests + live (`input 9/output 6` after one real call) — 2026-06-07.
+
+## Prometheus metrics
+**What:** usage exposed in Prometheus format for scraping.
+**DoD:**
+- `GET /metrics` (unauthenticated; counts + credential/model names only, no secrets) emits `cerber_requests_total`, `cerber_errors_total`, `cerber_input_tokens_total`, `cerber_output_tokens_total` (by credential) and `cerber_requests_by_model_total` (by model).
+**Verified:** `internal/metrics` (100%) + live `/metrics` scrape — 2026-06-07.
+
+## Web dashboard
+**What:** a self-contained usage dashboard (no external/CDN assets).
+**DoD:**
+- `GET /dashboard` serves an HTML page that, given a client key, polls `/admin/stats` and renders totals + per-credential/per-model tables with auto-refresh.
+**Verified:** served 200 text/html; live stats render — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

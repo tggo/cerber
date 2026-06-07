@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +16,15 @@ import (
 
 	"cerber/internal/access"
 	"cerber/internal/credential"
+	"cerber/internal/metrics"
 	"cerber/internal/translator"
+	"cerber/internal/usage"
 
 	"go.uber.org/zap"
 )
+
+//go:embed web/dashboard.html
+var dashboardHTML []byte
 
 // Upstream issues Anthropic Messages requests. *anthropic.Client satisfies it;
 // it is an interface so the server can be unit-tested against a mock.
@@ -40,6 +46,7 @@ type Server struct {
 	refresher   Refresher
 	tr          *translator.Translator
 	log         *zap.Logger
+	usage       *usage.Tracker
 	cooldown    time.Duration
 	refreshSkew time.Duration
 	now         func() time.Time
@@ -65,11 +72,15 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		refresher:   refresher,
 		tr:          translator.New(),
 		log:         logger,
+		usage:       usage.New(),
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
 	}
 }
+
+// Usage returns the usage tracker (for metrics and the dashboard).
+func (s *Server) Usage() *usage.Tracker { return s.usage }
 
 // Handler returns the HTTP handler for the API.
 func (s *Server) Handler() http.Handler {
@@ -80,6 +91,14 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
+	mux.HandleFunc("GET /admin/stats", s.handleStats)
+	// /metrics is unauthenticated (standard for Prometheus scraping); it exposes
+	// counts and credential names, never secrets.
+	mux.Handle("GET /metrics", metrics.Handler(s.usage))
+	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(dashboardHTML)
+	})
 	return s.logRequests(mux)
 }
 
@@ -124,6 +143,16 @@ func (r *recorder) Flush() {
 	}
 }
 
+// handleStats returns the usage snapshot as JSON (requires a client key).
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(s.usage.Snapshot())
+}
+
 // handleNative passes an Anthropic Messages request straight through, injecting a
 // credential and relaying the (possibly streaming) response unchanged.
 func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
@@ -134,16 +163,38 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	resp, err := s.dispatch(r.Context(), body, wantsStream(body), r.Header)
+	model := extractModel(body)
+	stream := wantsStream(body)
+	resp, cred, err := s.dispatch(r.Context(), body, stream, r.Header)
 	if err != nil {
+		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
+		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		s.relayError(w, resp)
 		return
 	}
+	// Non-streaming bodies are small: buffer to extract token usage, then write.
+	if !stream {
+		body, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+			writeError(w, http.StatusBadGateway, "read upstream response")
+			return
+		}
+		in, out := anthropicUsage(body)
+		s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
+		return
+	}
+	s.usage.Record(usage.Event{Credential: cred, Model: model})
 	relay(w, resp)
 }
 
@@ -157,13 +208,16 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	model := extractModel(body)
 	anthropicBody, stream, err := s.tr.OpenAIToAnthropic(body)
 	if err != nil {
+		s.usage.Record(usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	resp, err := s.dispatch(r.Context(), anthropicBody, stream, r.Header)
+	resp, cred, err := s.dispatch(r.Context(), anthropicBody, stream, r.Header)
 	if err != nil {
+		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
 		return
 	}
@@ -171,11 +225,13 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	// Upstream errors are relayed as-is (already JSON).
 	if resp.StatusCode != http.StatusOK {
+		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		s.relayError(w, resp)
 		return
 	}
 
 	if stream {
+		s.usage.Record(usage.Event{Credential: cred, Model: model})
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
@@ -188,28 +244,34 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	upstreamBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeError(w, http.StatusBadGateway, "read upstream response")
 		return
 	}
-	out, err := s.tr.AnthropicToOpenAI(upstreamBody)
+	in, out := anthropicUsage(upstreamBody)
+	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+	translated, err := s.tr.AnthropicToOpenAI(upstreamBody)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "translate upstream response")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
+	_, _ = w.Write(translated)
 }
 
 // dispatch sends body upstream, rotating credentials and sidelining any that
-// fail with auth/rate-limit errors. The returned response's Body must be closed.
-func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*http.Response, error) {
+// fail with auth/rate-limit errors. It returns the response, the name of the
+// credential used (or last tried), and an error. The response Body must be closed.
+func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*http.Response, string, error) {
 	var lastErr error
+	var lastCred string
 	for i, n := 0, s.creds.Len(); i < n; i++ {
 		cred, err := s.creds.Next()
 		if err != nil {
-			return nil, err // ErrNoneAvailable
+			return nil, lastCred, err // ErrNoneAvailable
 		}
+		lastCred = cred.Name()
 		if s.refresher != nil && cred.NeedsRefresh(s.now(), s.refreshSkew) {
 			s.log.Debug("refreshing oauth credential", zap.String("credential", cred.Name()))
 			tok, rerr := s.refresher.Refresh(ctx, cred.RefreshToken())
@@ -237,12 +299,35 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", resp.StatusCode)
 			continue
 		}
-		return resp, nil
+		return resp, cred.Name(), nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no credentials available")
 	}
-	return nil, lastErr
+	return nil, lastCred, lastErr
+}
+
+// extractModel reads the top-level "model" field from a request body (present in
+// both OpenAI and Anthropic request shapes).
+func extractModel(body []byte) string {
+	var probe struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	return probe.Model
+}
+
+// anthropicUsage extracts input/output token counts from an Anthropic Messages
+// response body. Returns zeros if absent.
+func anthropicUsage(body []byte) (in, out int64) {
+	var probe struct {
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	return probe.Usage.InputTokens, probe.Usage.OutputTokens
 }
 
 // isCredFailure reports statuses that indicate the credential, not the request,

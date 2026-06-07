@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -301,6 +302,78 @@ func TestRefresh_FailureSidelinesCredential_502(t *testing.T) {
 	ref.EXPECT().Refresh(mock.Anything, mock.Anything).Return(credential.OAuthTokens{}, errors.New("refresh boom"))
 	if rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey); rec.Code != http.StatusBadGateway {
 		t.Errorf("code %d, want 502", rec.Code)
+	}
+}
+
+func TestStats_RecordsAndServes(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"m","usage":{"input_tokens":7,"output_tokens":11}}`), nil)
+	h := s.Handler()
+	if rec := do(t, h, "POST", "/v1/messages", `{"model":"claude-x"}`, clientKey); rec.Code != 200 {
+		t.Fatalf("native code %d", rec.Code)
+	}
+	rec := do(t, h, "GET", "/admin/stats", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("stats code %d", rec.Code)
+	}
+	var rep struct {
+		Totals struct {
+			Requests     int64 `json:"requests"`
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"totals"`
+		ByModel []struct {
+			Name string `json:"name"`
+		} `json:"by_model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Totals.Requests != 1 || rep.Totals.InputTokens != 7 || rep.Totals.OutputTokens != 11 {
+		t.Errorf("totals = %+v", rep.Totals)
+	}
+	if len(rep.ByModel) == 0 || rep.ByModel[0].Name != "claude-x" {
+		t.Errorf("by_model = %+v", rep.ByModel)
+	}
+}
+
+func TestMetricsAndDashboardServed(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	h := s.Handler()
+	if rec := do(t, h, "GET", "/metrics", "", ""); rec.Code != 200 {
+		t.Errorf("metrics = %d", rec.Code)
+	}
+	rec := do(t, h, "GET", "/dashboard", "", "")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "cerber") ||
+		rec.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Errorf("dashboard = %d %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestStats_RequiresAuth(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	if rec := do(t, s.Handler(), "GET", "/admin/stats", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("stats without key = %d, want 401", rec.Code)
+	}
+}
+
+func TestStats_RecordsErrors(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(resp(400, "application/json", `{"error":"bad"}`), nil)
+	h := s.Handler()
+	do(t, h, "POST", "/v1/messages", `{"model":"m"}`, clientKey)
+	rec := do(t, h, "GET", "/admin/stats", "", clientKey)
+	var rep struct {
+		Totals struct {
+			Requests int64 `json:"requests"`
+			Errors   int64 `json:"errors"`
+		} `json:"totals"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &rep)
+	if rep.Totals.Requests != 1 || rep.Totals.Errors != 1 {
+		t.Errorf("error stat = %+v", rep.Totals)
 	}
 }
 

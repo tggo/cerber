@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cerber · usage</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --muted:#8b93a7;
+    --accent:#7c9cff; --err:#ff7b72; --ok:#5ad17e;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { display:flex; align-items:center; gap:12px; padding:16px 22px;
+    border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  header h1 span { color:var(--accent); }
+  .grow { flex:1; }
+  input, button { font:inherit; color:var(--fg); background:var(--panel);
+    border:1px solid var(--line); border-radius:8px; padding:7px 11px; }
+  input { width:300px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  main { padding:22px; display:grid; gap:22px; max-width:1100px; margin:0 auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.6px; }
+  .card .v { font-size:26px; margin-top:6px; }
+  section h2 { font-size:13px; color:var(--muted); text-transform:uppercase;
+    letter-spacing:.6px; margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel);
+    border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  th, td { text-align:right; padding:9px 14px; border-bottom:1px solid var(--line); }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  tr:last-child td { border-bottom:none; }
+  .err { color:var(--err); }
+  .muted { color:var(--muted); }
+  #status { font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cerber<span>·</span>usage</h1>
+  <span id="status" class="muted">enter client key →</span>
+  <span class="grow"></span>
+  <input id="key" type="password" placeholder="client API key" autocomplete="off">
+  <label class="muted"><input id="auto" type="checkbox" style="width:auto" checked> auto</label>
+  <button id="refresh">refresh</button>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+  <section><h2>by credential</h2><table id="byCred"></table></section>
+  <section><h2>by model</h2><table id="byModel"></table></section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const key = $("key");
+  key.value = localStorage.getItem("cerber_key") || "";
+  key.addEventListener("change", () => localStorage.setItem("cerber_key", key.value));
+
+  const fmt = (n) => (n ?? 0).toLocaleString();
+  const ago = (unix) => {
+    if (!unix) return "—";
+    const s = Math.max(0, Math.floor(Date.now()/1000 - unix));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s/60) + "m";
+    return Math.floor(s/3600) + "h";
+  };
+
+  function rows(tbl, items, head) {
+    const h = "<tr>" + head.map(c => `<th>${c}</th>`).join("") + "</tr>";
+    const body = items.map(e => `<tr>
+      <td>${e.name}</td>
+      <td>${fmt(e.requests)}</td>
+      <td class="${e.errors ? 'err' : 'muted'}">${fmt(e.errors)}</td>
+      <td>${fmt(e.input_tokens)}</td>
+      <td>${fmt(e.output_tokens)}</td>
+      <td class="muted">${ago(e.last_used && Date.parse(e.last_used)/1000)}</td>
+    </tr>`).join("");
+    tbl.innerHTML = h + (body || `<tr><td colspan="6" class="muted">no data</td></tr>`);
+  }
+
+  async function load() {
+    if (!key.value) { $("status").textContent = "enter client key →"; return; }
+    try {
+      const r = await fetch("/admin/stats", { headers: { Authorization: "Bearer " + key.value } });
+      if (!r.ok) { $("status").innerHTML = `<span class="err">HTTP ${r.status}</span>`; return; }
+      const d = await r.json();
+      const t = d.totals || {};
+      $("cards").innerHTML = [
+        ["requests", fmt(t.requests)],
+        ["errors", fmt(t.errors)],
+        ["input tokens", fmt(t.input_tokens)],
+        ["output tokens", fmt(t.output_tokens)],
+      ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+      const head = ["name","requests","errors","input","output","last"];
+      rows($("byCred"), d.by_credential || [], head);
+      rows($("byModel"), d.by_model || [], head);
+      $("status").innerHTML = `<span class="ok" style="color:var(--ok)">●</span> updated ${new Date().toLocaleTimeString()}`;
+    } catch (e) {
+      $("status").innerHTML = `<span class="err">${e}</span>`;
+    }
+  }
+
+  $("refresh").addEventListener("click", load);
+  setInterval(() => { if ($("auto").checked) load(); }, 5000);
+  load();
+</script>
+</body>
+</html>
