@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -456,6 +457,27 @@ func TestStats_RecordsAndServes(t *testing.T) {
 	}
 	if len(rep.ByModel) == 0 || rep.ByModel[0].Name != "claude-x" {
 		t.Errorf("by_model = %+v", rep.ByModel)
+	}
+}
+
+func TestCatchAll(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	// no upstream proxy -> unknown path 404
+	if rec := do(t, s.Handler(), "GET", "/api/claude_code/settings", "", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("without proxy = %d, want 404", rec.Code)
+	}
+
+	// with upstream proxy -> forwarded
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "proxied:"+r.URL.Path)
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	s.SetUpstreamProxy(target, nil)
+	rec := do(t, s.Handler(), "GET", "/api/claude_code/settings", "", "")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "proxied:/api/claude_code/settings") {
+		t.Errorf("proxied = %d %q", rec.Code, rec.Body.String())
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,15 @@ func main() {
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
+
+	// TLS impersonation: transparently proxy non-/v1 paths (Claude Code console/
+	// bootstrap calls) to the real upstream, reusing the (DoH) transport.
+	if cfg.TLS.Enabled {
+		if target, perr := url.Parse(a.BaseURL); perr == nil {
+			srv.SetUpstreamProxy(target, httpClient.Transport)
+			logger.Info("upstream reverse-proxy enabled for unhandled paths", zap.String("target", a.BaseURL))
+		}
+	}
 	srv.SetTokenPersister(func(name string, tok credential.OAuthTokens) {
 		if _, perr := tokenstore.Save(cfg.AuthDir, name, tokenstore.Record{
 			Name: name, AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, ExpiresAt: tok.ExpiresAt,

@@ -15,6 +15,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +61,7 @@ type Server struct {
 	routes         []config.Route
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
+	upstreamProxy  http.Handler
 	cooldown       time.Duration
 	refreshSkew    time.Duration
 	now            func() time.Time
@@ -109,6 +112,21 @@ func (s *Server) SetTokenPersister(f func(name string, tok credential.OAuthToken
 // SetAllowLocalhost lets loopback clients call cerber without a valid key.
 func (s *Server) SetAllowLocalhost(v bool) { s.allowLocalhost = v }
 
+// SetUpstreamProxy makes cerber a transparent reverse proxy for any path it does
+// not specifically handle (e.g. /api/claude_code/*). Used by TLS impersonation so
+// Claude Code's console/bootstrap calls reach the real upstream with the client's
+// own auth. transport should resolve the upstream (e.g. via DoH).
+func (s *Server) SetUpstreamProxy(target *url.URL, transport http.RoundTripper) {
+	s.upstreamProxy = &httputil.ReverseProxy{
+		Director: func(r *http.Request) {
+			r.URL.Scheme = target.Scheme
+			r.URL.Host = target.Host
+			r.Host = target.Host
+		},
+		Transport: transport,
+	}
+}
+
 // route returns the provider name a model should go to on the OpenAI endpoint.
 // Configured prefixes win; otherwise built-in defaults; default is "anthropic".
 func (s *Server) route(model string) string {
@@ -156,6 +174,9 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(dashboardHTML)
 	})
+	// Catch-all: transparently proxy anything else to the real upstream (TLS
+	// impersonation), or 404 when no upstream proxy is configured.
+	mux.HandleFunc("/", s.handleCatchAll)
 	return s.logRequests(mux)
 }
 
@@ -198,6 +219,16 @@ func (r *recorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// handleCatchAll transparently proxies unhandled paths to the upstream (used by
+// TLS impersonation for Claude Code's /api/* console calls), or 404s.
+func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
+	if s.upstreamProxy != nil {
+		s.upstreamProxy.ServeHTTP(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // handleStats returns the usage snapshot as JSON (requires a client key).
