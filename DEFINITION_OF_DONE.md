@@ -206,6 +206,16 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Disabled credentials are skipped by selection (`Next`/`NextOf`); change takes effect immediately.
 **Verified:** `internal/credential` (SetEnabled/List, 100%) + `internal/server` accounts tests — 2026-06-08.
 
+## Usage persistence, cost, quota, strategy, management key
+**What:** usage survives restarts, has cost, shows per-account quota; credential strategy and admin auth are configurable.
+**DoD:**
+- Usage aggregates persist to `usage.file` (load on start, save every 30s + on SIGINT/SIGTERM); `usage.pricing` (per-1M-token) yields per-model + total cost in `/admin/stats` and the dashboard.
+- `/admin/accounts` includes each account's quota (5h/7d utilization/status/reset) captured passively from Anthropic rate-limit headers.
+- `providers.strategy: fill-first` drains one credential before the next (default round-robin).
+- `access.management_key`, when set, gates `/admin/*` (Bearer/x-api-key/X-Cerber-Management) instead of client keys.
+- Dashboard shows a cost card + accounts table with enable/disable buttons and 5h quota.
+**Verified:** `internal/usage` (Save/Load/cost), `internal/quota` (100%), `internal/credential` (fill-first), `internal/server` (management key) tests — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

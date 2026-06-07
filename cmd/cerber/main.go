@@ -108,7 +108,7 @@ func main() {
 	if len(merged) == 0 {
 		logger.Fatal("no anthropic credentials configured; add one to config or run: cerber --claude-login")
 	}
-	store, err := credential.NewStore(merged)
+	store, err := credential.NewStore(merged, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 	if err != nil {
 		logger.Fatal("credentials", zap.Error(err))
 	}
@@ -131,6 +131,7 @@ func main() {
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
+	srv.SetManagementKey(cfg.Access.ManagementKey)
 
 	// Persistent usage + per-model pricing (cost). Loaded from disk, saved
 	// periodically and on shutdown.
@@ -174,7 +175,7 @@ func main() {
 	})
 
 	if o := cfg.Providers.OpenAI; o != nil {
-		ostore, err := credential.NewStore(o.Credentials)
+		ostore, err := credential.NewStore(o.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 		if err != nil {
 			logger.Fatal("openai credentials", zap.Error(err))
 		}
@@ -183,7 +184,7 @@ func main() {
 	}
 
 	if k := cfg.Providers.Grok; k != nil {
-		kstore, err := credential.NewStore(k.Credentials)
+		kstore, err := credential.NewStore(k.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 		if err != nil {
 			logger.Fatal("grok credentials", zap.Error(err))
 		}
@@ -193,7 +194,7 @@ func main() {
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {
-		gstore, err := credential.NewStore(g.Credentials)
+		gstore, err := credential.NewStore(g.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 		if err != nil {
 			logger.Fatal("gemini credentials", zap.Error(err))
 		}

@@ -51,6 +51,7 @@
 </header>
 <main>
   <div class="cards" id="cards"></div>
+  <section><h2>accounts</h2><table id="accounts"></table></section>
   <section><h2>by credential</h2><table id="byCred"></table></section>
   <section><h2>by model</h2><table id="byModel"></table></section>
 </main>
@@ -94,14 +95,39 @@
         ["errors", fmt(t.errors)],
         ["input tokens", fmt(t.input_tokens)],
         ["output tokens", fmt(t.output_tokens)],
+        ["cost", "$" + (d.total_cost || 0).toFixed(2)],
       ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
       const head = ["name","requests","errors","input","output","last"];
       rows($("byCred"), d.by_credential || [], head);
       rows($("byModel"), d.by_model || [], head);
+      loadAccounts();
       $("status").innerHTML = `<span class="ok" style="color:var(--ok)">●</span> updated ${new Date().toLocaleTimeString()}`;
     } catch (e) {
       $("status").innerHTML = `<span class="err">${e}</span>`;
     }
+  }
+
+  async function loadAccounts() {
+    try {
+      const r = await fetch("/admin/accounts", { headers: { Authorization: "Bearer " + key.value } });
+      if (!r.ok) { $("accounts").innerHTML = `<tr><td class="muted">accounts: HTTP ${r.status}</td></tr>`; return; }
+      const d = await r.json();
+      const head = "<tr><th>name</th><th>kind</th><th>state</th><th>requests</th><th>errors</th><th>5h quota</th><th></th></tr>";
+      const body = (d.accounts || []).map(a => {
+        const q = a.quota ? (Math.round((a.quota.five_hour.utilization || 0) * 100) + "%") : "—";
+        const btn = a.enabled
+          ? `<button data-n="${a.name}" data-act="disable">disable</button>`
+          : `<button data-n="${a.name}" data-act="enable">enable</button>`;
+        const state = a.cooling_down ? `<span class="err">cooling</span>` : (a.enabled ? `<span style="color:var(--ok)">on</span>` : `<span class="muted">off</span>`);
+        return `<tr><td>${a.name}</td><td class="muted">${a.kind}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
+      }).join("");
+      $("accounts").innerHTML = head + (body || `<tr><td colspan="7" class="muted">no accounts</td></tr>`);
+      $("accounts").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
+        await fetch(`/admin/accounts/${encodeURIComponent(b.dataset.n)}/${b.dataset.act}`,
+          { method: "POST", headers: { Authorization: "Bearer " + key.value } });
+        loadAccounts();
+      }));
+    } catch (e) { /* ignore */ }
   }
 
   $("refresh").addEventListener("click", load);

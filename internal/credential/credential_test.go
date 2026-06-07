@@ -230,6 +230,25 @@ func TestSetEnabledAndList(t *testing.T) {
 	}
 }
 
+func TestNextOf_FillFirst(t *testing.T) {
+	now := time.Unix(1000, 0)
+	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1"), apiKeyCfg("b", "2")},
+		WithFillFirst(true), WithClock(func() time.Time { return now }))
+	// always prefers 'a' (fixed order, not round-robin)
+	for i := 0; i < 3; i++ {
+		c, _ := s.Next()
+		if c.Name() != "a" {
+			t.Fatalf("fill-first should keep returning a, got %s", c.Name())
+		}
+	}
+	// when 'a' is disabled, fall to 'b'
+	s.SetEnabled("a", false)
+	c, _ := s.Next()
+	if c.Name() != "b" {
+		t.Errorf("got %s, want b", c.Name())
+	}
+}
+
 func TestList_CoolingDown(t *testing.T) {
 	now := time.Unix(1000, 0)
 	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1")}, WithClock(func() time.Time { return now }))

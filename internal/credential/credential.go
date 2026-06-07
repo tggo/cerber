@@ -149,10 +149,11 @@ type Info struct {
 // Store holds a provider's credentials and hands them out round-robin, skipping
 // any that are temporarily in cooldown. It is safe for concurrent use.
 type Store struct {
-	mu      sync.Mutex
-	entries []*entry
-	idx     int
-	now     func() time.Time
+	mu        sync.Mutex
+	entries   []*entry
+	idx       int
+	now       func() time.Time
+	fillFirst bool
 }
 
 // Option customizes a Store.
@@ -161,6 +162,12 @@ type Option func(*Store)
 // WithClock injects a clock (for tests). Defaults to time.Now.
 func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
+}
+
+// WithFillFirst selects credentials in fixed order (use the first available,
+// only move on when it is unavailable) instead of round-robin.
+func WithFillFirst(v bool) Option {
+	return func(s *Store) { s.fillFirst = v }
 }
 
 // NewStore builds a Store from validated config credentials.
@@ -200,8 +207,13 @@ func (s *Store) NextOf(match func(*Credential) bool) (*Credential, error) {
 	now := s.now()
 	n := len(s.entries)
 	for i := 0; i < n; i++ {
-		e := s.entries[s.idx]
-		s.idx = (s.idx + 1) % n
+		var e *entry
+		if s.fillFirst {
+			e = s.entries[i] // fixed order: always prefer earlier entries
+		} else {
+			e = s.entries[s.idx]
+			s.idx = (s.idx + 1) % n
+		}
 		if e.disabled || now.Before(e.cooldownUntil) {
 			continue
 		}

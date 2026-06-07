@@ -68,6 +68,7 @@ type TLS struct {
 type Access struct {
 	Keys           []string `yaml:"keys"`
 	AllowLocalhost bool     `yaml:"allow_localhost"`
+	ManagementKey  string   `yaml:"management_key"` // if set, /admin/* requires this key (not client keys)
 }
 
 // Providers groups upstream provider configuration. Only configured providers
@@ -79,6 +80,7 @@ type Providers struct {
 	Gemini    *Gemini    `yaml:"gemini"`
 	Grok      *Grok      `yaml:"grok"`
 	Routing   []Route    `yaml:"routing"`
+	Strategy  string     `yaml:"strategy"` // credential selection: "round-robin" (default) | "fill-first"
 }
 
 // Route maps a model-name prefix to a provider name (anthropic|openai|gemini).
@@ -291,6 +293,11 @@ func (c *Config) Validate() error {
 		if err := validateCreds("grok", p.Grok.BaseURL, p.Grok.Credentials, true); err != nil {
 			return err
 		}
+	}
+	switch p.Strategy {
+	case "", "round-robin", "fill-first":
+	default:
+		return fmt.Errorf("config: providers.strategy %q is not round-robin|fill-first", p.Strategy)
 	}
 	for i, r := range p.Routing {
 		switch r.Provider {

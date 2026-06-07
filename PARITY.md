@@ -36,7 +36,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 |---|---|---|
 | Multiple accounts per provider | ✅ | auth_dir + config, per-org names |
 | Round-robin rotation | ✅ | |
-| Fill-first strategy | ❌ | only round-robin |
+| Fill-first strategy | ✅ | `providers.strategy: fill-first` |
 | Cooldown on 401/403/429 + transport error | ✅ | fixed duration (no exponential backoff yet) |
 | Exponential backoff | ❌ | |
 | Pick credential per request | ✅ | `X-Cerber-Cred: oauth\|key\|<name>` |
@@ -53,7 +53,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 |---|---|
 | Client API keys | ✅ |
 | allow_localhost | ✅ |
-| Separate management key for /admin | ❌ (uses client key) |
+| Separate management key for /admin | ✅ `access.management_key` |
 | Interactive `--claude-login` (PKCE) | ✅ |
 | Per-provider OAuth logins (codex/gemini/xai/kimi) | ❌ |
 
@@ -65,9 +65,9 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | `/admin/stats` JSON | ✅ | |
 | Prometheus `/metrics` | ✅ | |
 | Web dashboard | ✅ | usage view; no accounts/quota view yet |
-| **Persistent usage (survives restart)** | ❌ | in-memory only (upstream uses SQLite) |
-| **Quota inspection per account** (5h/7d windows) | ❌ | upstream polls provider quota APIs |
-| **Cost calculation** (per-model pricing) | ❌ | |
+| **Persistent usage (survives restart)** | ✅ | JSON aggregates (not per-event SQLite) |
+| **Quota inspection per account** (5h/7d windows) | ✅ | passive, from Anthropic rate-limit headers |
+| **Cost calculation** (per-model pricing) | ✅ | `usage.pricing` |
 | Usage event log / export / filtering | ❌ | |
 | Cost/usage history & analytics | ❌ | |
 
@@ -76,9 +76,9 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Feature | Status |
 |---|---|
 | Usage dashboard | ✅ (basic) |
-| Account management UI (enable/disable) | ❌ (API exists; no UI yet) |
+| Account management UI (enable/disable) | ✅ | dashboard accounts table |
 | Config editing via UI/API | ❌ |
-| Quota/cost dashboard | ❌ |
+| Quota/cost dashboard | 🟡 | cost + 5h quota in dashboard |
 
 ## Deployment & ops
 

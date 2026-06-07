@@ -549,6 +549,28 @@ func TestAccounts_ListEnableDisable(t *testing.T) {
 	}
 }
 
+func TestManagementKey(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.SetManagementKey("mgmt-secret")
+	h := s.Handler()
+	// client key is NOT enough for /admin when a management key is set
+	if rec := do(t, h, "GET", "/admin/accounts", "", clientKey); rec.Code != http.StatusUnauthorized {
+		t.Errorf("client key on admin = %d, want 401", rec.Code)
+	}
+	// management key (Bearer) works
+	if rec := do(t, h, "GET", "/admin/accounts", "", "mgmt-secret"); rec.Code != 200 {
+		t.Errorf("mgmt key = %d, want 200", rec.Code)
+	}
+	// also via X-Cerber-Management header
+	r := httptest.NewRequest("GET", "/admin/accounts", nil)
+	r.Header.Set("X-Cerber-Management", "mgmt-secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Errorf("X-Cerber-Management = %d, want 200", rec.Code)
+	}
+}
+
 func TestStats_RequiresAuth(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
 	if rec := do(t, s.Handler(), "GET", "/admin/stats", "", ""); rec.Code != http.StatusUnauthorized {

@@ -63,6 +63,7 @@ type Server struct {
 	routes         []config.Route
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
+	mgmt           *access.Checker // if set, /admin/* requires this key
 	upstreamProxy  http.Handler
 	cooldown       time.Duration
 	refreshSkew    time.Duration
@@ -118,6 +119,27 @@ func (s *Server) SetTokenPersister(f func(name string, tok credential.OAuthToken
 
 // SetAllowLocalhost lets loopback clients call cerber without a valid key.
 func (s *Server) SetAllowLocalhost(v bool) { s.allowLocalhost = v }
+
+// SetManagementKey requires a dedicated key for /admin/* (sent as Bearer,
+// x-api-key, or X-Cerber-Management). Empty keeps /admin on the client-key check.
+func (s *Server) SetManagementKey(key string) {
+	if key != "" {
+		s.mgmt = access.New([]string{key})
+	}
+}
+
+// adminAuthorized gates /admin/* — by the management key if configured, else the
+// normal client-key check.
+func (s *Server) adminAuthorized(w http.ResponseWriter, r *http.Request) bool {
+	if s.mgmt == nil {
+		return s.authorized(w, r)
+	}
+	if s.mgmt.Allow(access.FromRequest(r)) || s.mgmt.Allow(r.Header.Get("X-Cerber-Management")) {
+		return true
+	}
+	writeError(w, http.StatusUnauthorized, "invalid or missing management key")
+	return false
+}
 
 // SetUpstreamProxy makes cerber a transparent reverse proxy for any path it does
 // not specifically handle (e.g. /api/claude_code/*). Used by TLS impersonation so
@@ -252,7 +274,7 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 
 // handleStats returns the usage snapshot as JSON (requires a client key).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
+	if !s.adminAuthorized(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -272,7 +294,7 @@ type accountView struct {
 
 // handleAccounts lists credentials with their state and usage (orchestration view).
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
+	if !s.adminAuthorized(w, r) {
 		return
 	}
 	use := map[string]usage.Stat{}
@@ -299,7 +321,7 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 // handleSetAccount enables/disables a credential at runtime.
 func (s *Server) handleSetAccount(enabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.authorized(w, r) {
+		if !s.adminAuthorized(w, r) {
 			return
 		}
 		name := r.PathValue("name")

@@ -22,11 +22,21 @@ access:
   allow_localhost: true
   keys:
     - "change-me-client-key"
+  # management_key: if set, /admin/* requires this key (not the client keys above).
+  # management_key: "change-me-admin-key"
+
+# Persist usage to disk (survives restart) and price models for cost reporting.
+usage:
+  file: "./data/usage.json"
+  # pricing:                       # cost per 1,000,000 tokens
+  #   claude-sonnet-4-6: { input: 3, output: 15 }
+  #   gpt-4o-mini:       { input: 0.15, output: 0.6 }
 
 providers:
   # Multiple providers can be enabled; on /v1/chat/completions cerber routes by
   # model name (gpt*/o1*/o3*/o4*/chatgpt* -> openai, gemini* -> gemini,
   # everything else -> anthropic). Override with `routing` below.
+  # strategy: round-robin   # or "fill-first" (drain one account before the next)
   # routing:
   #   - { prefix: "gpt", provider: openai }
   #   - { prefix: "gemini", provider: gemini }
