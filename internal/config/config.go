@@ -4,7 +4,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"strings"
@@ -17,12 +19,19 @@ import (
 type Config struct {
 	Server    Server    `yaml:"server"`
 	Access    Access    `yaml:"access"`
+	Logging   Logging   `yaml:"logging"`
 	Providers Providers `yaml:"providers"`
 }
 
 // Server holds HTTP listener settings.
 type Server struct {
 	Addr string `yaml:"addr"`
+}
+
+// Logging configures the zap logger.
+type Logging struct {
+	Level string `yaml:"level"` // debug|info|warn|error
+	Dir   string `yaml:"dir"`   // log directory; dated files ./logs/<date>.log
 }
 
 // Access controls who may call cerber. Keys are the API keys clients present.
@@ -68,6 +77,8 @@ type Credential struct {
 // Defaults applied when the file omits a value.
 const (
 	defaultAddr            = ":8080"
+	defaultLogLevel        = "info"
+	defaultLogDir          = "./logs"
 	defaultAnthropicBase   = "https://api.anthropic.com"
 	defaultAnthropicVer    = "2023-06-01"
 	defaultAnthropicWaitNS = 120 * time.Second
@@ -83,9 +94,12 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse decodes config from raw YAML bytes, applying defaults and validating.
+// ${VAR} / $VAR references in the YAML are expanded from the process environment
+// (load a .env first with LoadEnvFile) so secrets can live outside the file.
 func Parse(data []byte) (*Config, error) {
+	expanded := os.Expand(string(data), os.Getenv)
 	var c Config
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec := yaml.NewDecoder(strings.NewReader(expanded))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -100,6 +114,12 @@ func Parse(data []byte) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.Server.Addr == "" {
 		c.Server.Addr = defaultAddr
+	}
+	if c.Logging.Level == "" {
+		c.Logging.Level = defaultLogLevel
+	}
+	if c.Logging.Dir == "" {
+		c.Logging.Dir = defaultLogDir
 	}
 	if a := c.Providers.Anthropic; a != nil {
 		if a.BaseURL == "" {
@@ -160,6 +180,47 @@ func (c *Credential) validate() error {
 		return fmt.Errorf("missing type (want %q or %q)", CredentialAPIKey, CredentialOAuth)
 	default:
 		return fmt.Errorf("unknown type %q", c.Type)
+	}
+	return nil
+}
+
+// LoadEnvFile loads KEY=VALUE pairs from a .env file into the process
+// environment. Existing environment variables are not overwritten (real env
+// wins). A missing file is not an error. Blank lines and # comments are ignored;
+// surrounding single or double quotes around a value are stripped.
+func LoadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read env file: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			if err := os.Setenv(key, val); err != nil {
+				return fmt.Errorf("set env %q: %w", key, err)
+			}
+		}
 	}
 	return nil
 }

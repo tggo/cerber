@@ -108,6 +108,57 @@ func TestParse_Errors(t *testing.T) {
 	}
 }
 
+func TestParse_LoggingDefaults(t *testing.T) {
+	c, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Logging.Level != defaultLogLevel || c.Logging.Dir != defaultLogDir {
+		t.Errorf("logging defaults = %+v", c.Logging)
+	}
+}
+
+func TestParse_EnvSubstitution(t *testing.T) {
+	t.Setenv("CERBER_TEST_KEY", "sk-from-env")
+	y := `
+access: {keys: ["k"]}
+providers:
+  anthropic:
+    credentials:
+      - {type: api_key, key: "${CERBER_TEST_KEY}"}
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Anthropic.Credentials[0].Key != "sk-from-env" {
+		t.Errorf("env not substituted: %q", c.Providers.Anthropic.Credentials[0].Key)
+	}
+}
+
+func TestLoadEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".env")
+	content := "# comment\n\nexport FOO=bar\nQUOTED=\"q v\"\nSINGLE='s'\nPRESET=fromfile\nnoequals\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PRESET", "fromenv") // must not be overwritten
+	if err := LoadEnvFile(p); err != nil {
+		t.Fatalf("LoadEnvFile: %v", err)
+	}
+	checks := map[string]string{"FOO": "bar", "QUOTED": "q v", "SINGLE": "s", "PRESET": "fromenv"}
+	for k, want := range checks {
+		if got := os.Getenv(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	// Missing file is not an error.
+	if err := LoadEnvFile(filepath.Join(dir, "nope.env")); err != nil {
+		t.Errorf("missing .env should be nil, got %v", err)
+	}
+}
+
 func TestLoad_FileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")

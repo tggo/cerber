@@ -4,6 +4,11 @@
 server:
   addr: ":8080"
 
+# Logging: structured zap logs to <dir>/<YYYY-MM-DD>.log and stdout.
+logging:
+  level: "info"   # debug | info | warn | error
+  dir: "./logs"
+
 # Client API keys allowed to call cerber (clients send one of these as
 # `Authorization: Bearer <key>` or `x-api-key: <key>`).
 access:
@@ -18,6 +23,10 @@ providers:
     # One or more upstream accounts; cerber rotates across them and sidelines
     # any that hit auth/rate-limit errors.
     credentials:
+      # Secrets can come from .env via ${VAR} (keeps them out of this file):
+      - type: api_key
+        name: playground
+        key: "${PLAYGROUND_API_KEY}"
       - type: api_key
         name: account-a
         key: "sk-ant-..."

@@ -35,7 +35,7 @@ func newStore(t *testing.T, n int) *credential.Store {
 
 func newServer(t *testing.T, store *credential.Store) (*Server, *mocks.Upstream) {
 	up := mocks.NewUpstream(t)
-	s := New(access.New([]string{clientKey}), store, up, nil)
+	s := New(access.New([]string{clientKey}), store, up, nil, nil)
 	return s, up
 }
 
@@ -91,7 +91,7 @@ func TestAuth_Rejected(t *testing.T) {
 
 func TestNative_Passthrough(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
-	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
 		Return(resp(200, "application/json", `{"id":"msg_1"}`), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/messages", `{"model":"claude","stream":false}`, clientKey)
 	if rec.Code != 200 {
@@ -108,8 +108,8 @@ func TestNative_Passthrough(t *testing.T) {
 func TestNative_StreamFlagDetected(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
 	var gotStream bool
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		RunAndReturn(func(_ context.Context, _ []byte, stream bool, _ *credential.Credential) (*http.Response, error) {
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, stream bool, _ *credential.Credential, _ http.Header) (*http.Response, error) {
 			gotStream = stream
 			return resp(200, "text/event-stream", "event: x\n"), nil
 		})
@@ -122,7 +122,7 @@ func TestNative_StreamFlagDetected(t *testing.T) {
 func TestOpenAI_NonStreamTranslated(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
 	anthropicResp := `{"id":"msg_9","model":"claude","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
-	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
 		Return(resp(200, "application/json", anthropicResp), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
 		`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`, clientKey)
@@ -148,7 +148,7 @@ func TestOpenAI_StreamTranslated(t *testing.T) {
 	stream := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\n" +
 		"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
-	up.EXPECT().Send(mock.Anything, mock.Anything, true, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, true, mock.Anything, mock.Anything).
 		Return(resp(200, "text/event-stream", stream), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
 		`{"model":"c","stream":true,"messages":[{"role":"user","content":"hi"}]}`, clientKey)
@@ -166,7 +166,7 @@ func TestOpenAI_StreamTranslated(t *testing.T) {
 
 func TestOpenAI_UpstreamErrorRelayed(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(resp(400, "application/json", `{"error":"bad model"}`), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
 		`{"model":"c","messages":[{"role":"user","content":"hi"}]}`, clientKey)
@@ -178,8 +178,8 @@ func TestOpenAI_UpstreamErrorRelayed(t *testing.T) {
 func TestDispatch_RotatesOnRateLimit(t *testing.T) {
 	s, up := newServer(t, newStore(t, 2))
 	calls := 0
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		RunAndReturn(func(_ context.Context, _ []byte, _ bool, _ *credential.Credential) (*http.Response, error) {
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, _ *credential.Credential, _ http.Header) (*http.Response, error) {
 			calls++
 			if calls == 1 {
 				return resp(429, "application/json", `{"error":"rate"}`), nil
@@ -197,7 +197,7 @@ func TestDispatch_RotatesOnRateLimit(t *testing.T) {
 
 func TestDispatch_AllCredsFail_502(t *testing.T) {
 	s, up := newServer(t, newStore(t, 2))
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(resp(401, "application/json", `{"error":"unauth"}`), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey)
 	if rec.Code != http.StatusBadGateway {
@@ -207,7 +207,7 @@ func TestDispatch_AllCredsFail_502(t *testing.T) {
 
 func TestDispatch_TransportError_502(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(nil, errors.New("dial fail"))
 	rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey)
 	if rec.Code != http.StatusBadGateway {
@@ -217,7 +217,7 @@ func TestDispatch_TransportError_502(t *testing.T) {
 
 func TestOpenAI_UpstreamUntranslatable_502(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
-	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
 		Return(resp(200, "application/json", `{not valid json`), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
 		`{"model":"c","messages":[{"role":"user","content":"hi"}]}`, clientKey)
@@ -255,15 +255,15 @@ func TestRefresh_BeforeSendWhenExpiring(t *testing.T) {
 	store := oauthStore(t, "stale", now.Add(10*time.Second)) // within skew -> needs refresh
 	up := mocks.NewUpstream(t)
 	ref := mocks.NewRefresher(t)
-	s := New(access.New([]string{clientKey}), store, up, ref)
+	s := New(access.New([]string{clientKey}), store, up, ref, nil)
 	s.now = func() time.Time { return now }
 
 	ref.EXPECT().Refresh(mock.Anything, "refresh-0").
 		Return(credential.OAuthTokens{AccessToken: "fresh", RefreshToken: "refresh-1", ExpiresAt: now.Add(time.Hour)}, nil)
 
 	var sentToken string
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		RunAndReturn(func(_ context.Context, _ []byte, _ bool, cred *credential.Credential) (*http.Response, error) {
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, cred *credential.Credential, _ http.Header) (*http.Response, error) {
 			sentToken = cred.AccessToken()
 			return resp(200, "application/json", `{"id":"ok"}`), nil
 		})
@@ -282,9 +282,9 @@ func TestRefresh_NotTriggeredWhenValid(t *testing.T) {
 	store := oauthStore(t, "valid", now.Add(time.Hour)) // far from expiry
 	up := mocks.NewUpstream(t)
 	ref := mocks.NewRefresher(t) // expects no Refresh call
-	s := New(access.New([]string{clientKey}), store, up, ref)
+	s := New(access.New([]string{clientKey}), store, up, ref, nil)
 	s.now = func() time.Time { return now }
-	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(resp(200, "application/json", `{"id":"ok"}`), nil)
 	if rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey); rec.Code != 200 {
 		t.Fatalf("code %d", rec.Code)
@@ -296,7 +296,7 @@ func TestRefresh_FailureSidelinesCredential_502(t *testing.T) {
 	store := oauthStore(t, "stale", now.Add(time.Second))
 	up := mocks.NewUpstream(t) // Send must never be called
 	ref := mocks.NewRefresher(t)
-	s := New(access.New([]string{clientKey}), store, up, ref)
+	s := New(access.New([]string{clientKey}), store, up, ref, nil)
 	s.now = func() time.Time { return now }
 	ref.EXPECT().Refresh(mock.Anything, mock.Anything).Return(credential.OAuthTokens{}, errors.New("refresh boom"))
 	if rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey); rec.Code != http.StatusBadGateway {

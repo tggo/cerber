@@ -40,7 +40,7 @@ func TestSend_APIKeyHeaders(t *testing.T) {
 	cred, _ := store.Next()
 	c := New("https://api.anthropic.com/", "2023-06-01", doer)
 
-	resp, err := c.Send(context.Background(), []byte(`{"model":"claude"}`), false, cred)
+	resp, err := c.Send(context.Background(), []byte(`{"model":"claude"}`), false, cred, http.Header{})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestSend_OAuthHeadersAndStream(t *testing.T) {
 	cred, _ := store.Next()
 	c := New("https://api.anthropic.com", "2023-06-01", doer)
 
-	resp, err := c.Send(context.Background(), []byte(`{}`), true, cred)
+	resp, err := c.Send(context.Background(), []byte(`{}`), true, cred, http.Header{})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestSend_APIKeyDoesNotInjectSystem(t *testing.T) {
 	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
 	cred, _ := store.Next()
 	c := New("https://api.anthropic.com", "v", doer)
-	resp, err := c.Send(context.Background(), []byte(`{"system":"hi"}`), false, cred)
+	resp, err := c.Send(context.Background(), []byte(`{"system":"hi"}`), false, cred, http.Header{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,14 +132,61 @@ func TestSend_OAuthInjectionErrorOnBadBody(t *testing.T) {
 	store := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
 	cred, _ := store.Next()
 	c := New("https://api.anthropic.com", "v", mocks.NewHTTPDoer(t))
-	if _, err := c.Send(context.Background(), []byte(`{bad json`), false, cred); err == nil {
+	if _, err := c.Send(context.Background(), []byte(`{bad json`), false, cred, http.Header{}); err == nil {
 		t.Fatal("expected injection error for malformed oauth body")
+	}
+}
+
+func TestSend_ForwardsClientBeta_APIKey(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return okResp(), nil
+	})
+	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
+	cred, _ := store.Next()
+	c := New("https://api.anthropic.com", "v", doer)
+
+	h := http.Header{}
+	h.Set("anthropic-beta", "context-management-2025-06-27,prompt-caching-2024-07-31")
+	resp, err := c.Send(context.Background(), []byte(`{}`), false, cred, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := captured.Header.Get("anthropic-beta"); got != "context-management-2025-06-27,prompt-caching-2024-07-31" {
+		t.Errorf("client beta not forwarded: %q", got)
+	}
+}
+
+func TestSend_MergesClientBeta_OAuth(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return okResp(), nil
+	})
+	store := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+	cred, _ := store.Next()
+	c := New("https://api.anthropic.com", "v", doer)
+
+	h := http.Header{}
+	h.Set("anthropic-beta", "context-management-2025-06-27,oauth-2025-04-20") // dup oauth beta
+	resp, err := c.Send(context.Background(), []byte(`{}`), false, cred, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := captured.Header.Get("anthropic-beta")
+	if got != "oauth-2025-04-20,context-management-2025-06-27" {
+		t.Errorf("merged beta = %q", got)
 	}
 }
 
 func TestSend_NilCredential(t *testing.T) {
 	c := New("https://api.anthropic.com", "v", mocks.NewHTTPDoer(t))
-	if _, err := c.Send(context.Background(), []byte(`{}`), false, nil); err == nil {
+	if _, err := c.Send(context.Background(), []byte(`{}`), false, nil, nil); err == nil {
 		t.Fatal("expected error for nil credential")
 	}
 }
@@ -150,7 +197,7 @@ func TestSend_UpstreamError(t *testing.T) {
 	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
 	cred, _ := store.Next()
 	c := New("https://api.anthropic.com", "v", doer)
-	if _, err := c.Send(context.Background(), []byte(`{}`), false, cred); err == nil {
+	if _, err := c.Send(context.Background(), []byte(`{}`), false, cred, http.Header{}); err == nil {
 		t.Fatal("expected error from upstream failure")
 	}
 }
@@ -160,7 +207,7 @@ func TestSend_BadURL(t *testing.T) {
 	cred, _ := store.Next()
 	// Control character in URL makes http.NewRequest fail.
 	c := New("http://\x7f", "v", mocks.NewHTTPDoer(t))
-	if _, err := c.Send(context.Background(), []byte(`{}`), false, cred); err == nil {
+	if _, err := c.Send(context.Background(), []byte(`{}`), false, cred, http.Header{}); err == nil {
 		t.Fatal("expected error for invalid URL")
 	}
 }

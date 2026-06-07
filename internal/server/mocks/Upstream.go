@@ -23,9 +23,9 @@ func (_m *Upstream) EXPECT() *Upstream_Expecter {
 	return &Upstream_Expecter{mock: &_m.Mock}
 }
 
-// Send provides a mock function with given fields: ctx, body, stream, cred
-func (_m *Upstream) Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential) (*http.Response, error) {
-	ret := _m.Called(ctx, body, stream, cred)
+// Send provides a mock function with given fields: ctx, body, stream, cred, clientHeader
+func (_m *Upstream) Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential, clientHeader http.Header) (*http.Response, error) {
+	ret := _m.Called(ctx, body, stream, cred, clientHeader)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Send")
@@ -33,19 +33,19 @@ func (_m *Upstream) Send(ctx context.Context, body []byte, stream bool, cred *cr
 
 	var r0 *http.Response
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, []byte, bool, *credential.Credential) (*http.Response, error)); ok {
-		return rf(ctx, body, stream, cred)
+	if rf, ok := ret.Get(0).(func(context.Context, []byte, bool, *credential.Credential, http.Header) (*http.Response, error)); ok {
+		return rf(ctx, body, stream, cred, clientHeader)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, []byte, bool, *credential.Credential) *http.Response); ok {
-		r0 = rf(ctx, body, stream, cred)
+	if rf, ok := ret.Get(0).(func(context.Context, []byte, bool, *credential.Credential, http.Header) *http.Response); ok {
+		r0 = rf(ctx, body, stream, cred, clientHeader)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*http.Response)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(context.Context, []byte, bool, *credential.Credential) error); ok {
-		r1 = rf(ctx, body, stream, cred)
+	if rf, ok := ret.Get(1).(func(context.Context, []byte, bool, *credential.Credential, http.Header) error); ok {
+		r1 = rf(ctx, body, stream, cred, clientHeader)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -63,13 +63,14 @@ type Upstream_Send_Call struct {
 //   - body []byte
 //   - stream bool
 //   - cred *credential.Credential
-func (_e *Upstream_Expecter) Send(ctx interface{}, body interface{}, stream interface{}, cred interface{}) *Upstream_Send_Call {
-	return &Upstream_Send_Call{Call: _e.mock.On("Send", ctx, body, stream, cred)}
+//   - clientHeader http.Header
+func (_e *Upstream_Expecter) Send(ctx interface{}, body interface{}, stream interface{}, cred interface{}, clientHeader interface{}) *Upstream_Send_Call {
+	return &Upstream_Send_Call{Call: _e.mock.On("Send", ctx, body, stream, cred, clientHeader)}
 }
 
-func (_c *Upstream_Send_Call) Run(run func(ctx context.Context, body []byte, stream bool, cred *credential.Credential)) *Upstream_Send_Call {
+func (_c *Upstream_Send_Call) Run(run func(ctx context.Context, body []byte, stream bool, cred *credential.Credential, clientHeader http.Header)) *Upstream_Send_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(context.Context), args[1].([]byte), args[2].(bool), args[3].(*credential.Credential))
+		run(args[0].(context.Context), args[1].([]byte), args[2].(bool), args[3].(*credential.Credential), args[4].(http.Header))
 	})
 	return _c
 }
@@ -79,7 +80,7 @@ func (_c *Upstream_Send_Call) Return(_a0 *http.Response, _a1 error) *Upstream_Se
 	return _c
 }
 
-func (_c *Upstream_Send_Call) RunAndReturn(run func(context.Context, []byte, bool, *credential.Credential) (*http.Response, error)) *Upstream_Send_Call {
+func (_c *Upstream_Send_Call) RunAndReturn(run func(context.Context, []byte, bool, *credential.Credential, http.Header) (*http.Response, error)) *Upstream_Send_Call {
 	_c.Call.Return(run)
 	return _c
 }

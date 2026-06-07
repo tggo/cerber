@@ -90,6 +90,37 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - On upstream 401/403/429 (or transport error), the credential is sidelined (cooldown) and the next is tried; all failing → 502; none available → 503.
 **Verified:** `internal/server` tests (92.9%) + live smoke test (healthz, 401, native passthrough, OpenAI translation against a fake upstream) — 2026-06-07.
 
+## Logging (zap)
+**What:** structured logging via zap to a dated file and stdout, at a configurable level.
+**DoD:**
+- Logs written to `<logging.dir>/<YYYY-MM-DD>.log` (JSON) and stdout (console), both at `logging.level` (debug/info/warn/error; default info, dir `./logs`).
+- One info line per HTTP request: method, path, status, latency (streaming still flushes).
+- Credential rotation, OAuth refresh, upstream send failures, and upstream error responses (status + body snippet) are logged; **secrets are never logged** (only credential names).
+- No stdlib `log` in the app; invalid log level fails startup with a clear error.
+**Verified:** `internal/logging` tests + live logs observed during integration — 2026-06-07.
+
+## Config — secrets via .env / ${ENV}
+**What:** secrets live outside config.yaml: a `.env` file is loaded and `${VAR}`/`$VAR` in the YAML are expanded from the environment.
+**DoD:**
+- `.env` (default `./.env`, `-env` flag) loaded at startup; `KEY=VALUE`, `export`, quotes, comments handled; real env wins; missing file is not an error.
+- `${PLAYGROUND_API_KEY}` in config.yaml resolves to the env value; a missing var → empty → validation error.
+- `.env`, `logs/`, `config.yaml` are gitignored.
+**Verified:** `internal/config` tests + live run with `.env` PLAYGROUND_API_KEY — 2026-06-07.
+
+## Header passthrough (Claude Code compatibility)
+**What:** cerber forwards the client's `anthropic-beta` header upstream so faithful clients (Claude Code) work.
+**DoD:**
+- Client `anthropic-beta` is forwarded to Anthropic (required for `context_management` etc.); for OAuth it is merged with `oauth-2025-04-20` (deduped).
+- Real `claude -p` pointed at cerber (`ANTHROPIC_BASE_URL`) completes a prompt through cerber to Anthropic.
+**Verified:** `internal/provider/anthropic` beta tests + `scripts/verify-claude.sh` (real `claude -p` → "pong") — 2026-06-07.
+
+## Live integration testing
+**What:** end-to-end tests against the real Anthropic API through a full cerber server.
+**DoD:**
+- `make integration` (build tag `integration`) runs native, OpenAI-compat, and streaming calls against real Anthropic using `PLAYGROUND_API_KEY`; skips (not fails) if the key is unset; excluded from the unit coverage gate.
+- `scripts/verify-claude.sh` verifies the real `claude -p` CLI through cerber.
+**Verified:** `make integration` → 3/3 PASS; verify-claude.sh → PASS — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

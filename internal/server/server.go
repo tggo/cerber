@@ -16,12 +16,14 @@ import (
 	"cerber/internal/access"
 	"cerber/internal/credential"
 	"cerber/internal/translator"
+
+	"go.uber.org/zap"
 )
 
 // Upstream issues Anthropic Messages requests. *anthropic.Client satisfies it;
 // it is an interface so the server can be unit-tested against a mock.
 type Upstream interface {
-	Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential) (*http.Response, error)
+	Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential, clientHeader http.Header) (*http.Response, error)
 }
 
 // Refresher renews an OAuth credential's access token. *anthropic.Refresher
@@ -37,6 +39,7 @@ type Server struct {
 	upstream    Upstream
 	refresher   Refresher
 	tr          *translator.Translator
+	log         *zap.Logger
 	cooldown    time.Duration
 	refreshSkew time.Duration
 	now         func() time.Time
@@ -49,14 +52,19 @@ const defaultCooldown = 60 * time.Second
 const defaultRefreshSkew = 60 * time.Second
 
 // New wires a Server. refresher may be nil to disable OAuth refresh (e.g.
-// api-key-only deployments). The translator is created with the default clock.
-func New(checker *access.Checker, creds *credential.Store, up Upstream, refresher Refresher) *Server {
+// api-key-only deployments). A nil logger is replaced with a no-op logger. The
+// translator is created with the default clock.
+func New(checker *access.Checker, creds *credential.Store, up Upstream, refresher Refresher, logger *zap.Logger) *Server {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Server{
 		access:      checker,
 		creds:       creds,
 		upstream:    up,
 		refresher:   refresher,
 		tr:          translator.New(),
+		log:         logger,
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
@@ -72,7 +80,48 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
-	return mux
+	return s.logRequests(mux)
+}
+
+// logRequests logs one line per request (method, path, status, latency).
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := s.now()
+		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.log.Info("request",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+			zap.Int("status", rec.status),
+			zap.Duration("latency", s.now().Sub(start)),
+		)
+	})
+}
+
+// recorder captures the response status while preserving streaming (Flush).
+type recorder struct {
+	http.ResponseWriter
+	status  int
+	written bool
+}
+
+func (r *recorder) WriteHeader(code int) {
+	r.status = code
+	r.written = true
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *recorder) Write(b []byte) (int, error) {
+	if !r.written {
+		r.written = true
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *recorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // handleNative passes an Anthropic Messages request straight through, injecting a
@@ -85,12 +134,16 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	resp, err := s.dispatch(r.Context(), body, wantsStream(body))
+	resp, err := s.dispatch(r.Context(), body, wantsStream(body), r.Header)
 	if err != nil {
 		writeUpstreamError(w, err)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		s.relayError(w, resp)
+		return
+	}
 	relay(w, resp)
 }
 
@@ -109,7 +162,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	resp, err := s.dispatch(r.Context(), anthropicBody, stream)
+	resp, err := s.dispatch(r.Context(), anthropicBody, stream, r.Header)
 	if err != nil {
 		writeUpstreamError(w, err)
 		return
@@ -118,7 +171,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	// Upstream errors are relayed as-is (already JSON).
 	if resp.StatusCode != http.StatusOK {
-		relay(w, resp)
+		s.relayError(w, resp)
 		return
 	}
 
@@ -150,7 +203,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 // dispatch sends body upstream, rotating credentials and sidelining any that
 // fail with auth/rate-limit errors. The returned response's Body must be closed.
-func (s *Server) dispatch(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
+func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*http.Response, error) {
 	var lastErr error
 	for i, n := 0, s.creds.Len(); i < n; i++ {
 		cred, err := s.creds.Next()
@@ -158,21 +211,27 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool) (*http.
 			return nil, err // ErrNoneAvailable
 		}
 		if s.refresher != nil && cred.NeedsRefresh(s.now(), s.refreshSkew) {
+			s.log.Debug("refreshing oauth credential", zap.String("credential", cred.Name()))
 			tok, rerr := s.refresher.Refresh(ctx, cred.RefreshToken())
 			if rerr != nil {
+				s.log.Warn("oauth refresh failed", zap.String("credential", cred.Name()), zap.Error(rerr))
 				s.creds.Cooldown(cred, s.cooldown)
 				lastErr = fmt.Errorf("refresh %s: %w", cred, rerr)
 				continue
 			}
 			s.creds.UpdateOAuth(cred, tok)
 		}
-		resp, err := s.upstream.Send(ctx, body, stream, cred)
+		s.log.Debug("dispatch", zap.String("credential", cred.Name()), zap.Bool("stream", stream), zap.Int("attempt", i+1))
+		resp, err := s.upstream.Send(ctx, body, stream, cred, clientHeader)
 		if err != nil {
+			s.log.Warn("upstream send failed", zap.String("credential", cred.Name()), zap.Error(err))
 			lastErr = err
 			s.creds.Cooldown(cred, s.cooldown)
 			continue
 		}
 		if isCredFailure(resp.StatusCode) {
+			s.log.Warn("upstream credential failure, rotating",
+				zap.String("credential", cred.Name()), zap.Int("status", resp.StatusCode))
 			_ = resp.Body.Close()
 			s.creds.Cooldown(cred, s.cooldown)
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", resp.StatusCode)
@@ -244,6 +303,21 @@ func relay(w http.ResponseWriter, resp *http.Response) {
 			return
 		}
 	}
+}
+
+// relayError buffers a small upstream error response, logs it (status + body
+// snippet, for diagnosing client/provider issues), and relays it to the client.
+func (s *Server) relayError(w http.ResponseWriter, resp *http.Response) {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	s.log.Warn("upstream error response",
+		zap.Int("status", resp.StatusCode),
+		zap.String("body", string(body)),
+	)
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
 }
 
 // flusher returns a flush function, or a no-op if w cannot flush.

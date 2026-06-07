@@ -23,6 +23,11 @@ test: cover
 cover:
 	go test -covermode=atomic -coverprofile=coverage.out ./...
 
+# Live integration tests against the real Anthropic API. Requires
+# PLAYGROUND_API_KEY (loaded from .env). Skips if unset. Not part of `make test`.
+integration:
+	go test -tags=integration -count=1 -v ./internal/integration/...
+
 # Per-package coverage breakdown.
 cover-report: cover
 	go tool cover -func=coverage.out

@@ -3,3 +3,6 @@ coverage.out
 coverage.gate.out
 *.test
 .DS_Store
+.env
+logs/
+config.yaml
