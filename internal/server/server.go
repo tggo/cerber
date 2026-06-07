@@ -15,6 +15,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -220,7 +222,9 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	}
 	model := extractModel(body)
 	stream := wantsStream(body)
-	s.log.Debug("native request", debugRequestFields(body, stream)...)
+	s.log.Debug("native request", append(debugRequestFields(body, stream),
+		zap.String("anthropic_beta", r.Header.Get("anthropic-beta")))...)
+	dumpRequest(body) // diagnostic: writes raw body if CERBER_DUMP_DIR is set
 	resp, cred, err := s.dispatch(r.Context(), body, stream, r.Header, credFilter(r))
 	if err != nil {
 		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
@@ -466,6 +470,18 @@ func debugRequestFields(body []byte, stream bool) []zap.Field {
 		zap.Int("system_bytes", len(probe.System)),
 		zap.Bool("context_management", len(probe.ContextMgmt) > 0),
 		zap.Bool("thinking", len(probe.Thinking) > 0),
+	}
+}
+
+// dumpRequest writes the raw request body to CERBER_DUMP_DIR/native-request.json
+// when that env var is set (diagnostics only; no-op otherwise).
+func dumpRequest(body []byte) {
+	dir := os.Getenv("CERBER_DUMP_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, "native-request.json"), body, 0o600)
 	}
 }
 

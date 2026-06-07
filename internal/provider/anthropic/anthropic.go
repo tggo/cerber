@@ -39,15 +39,20 @@ func New(baseURL, version string, doer provider.HTTPDoer) *Client {
 	}
 }
 
-// forwardedHeaders are client request headers passed through to Anthropic so
-// faithful clients (e.g. Claude Code) keep working. anthropic-beta is required
-// for features like context_management that the client also sets in the body.
-var forwardedHeaders = []string{"anthropic-beta"}
+// managedRequestHeaders are headers cerber sets itself; client copies of these
+// are not forwarded (auth is injected, the rest are connection-specific).
+var managedRequestHeaders = map[string]bool{
+	"authorization": true, "x-api-key": true, "host": true,
+	"content-length": true, "connection": true, "keep-alive": true,
+	"proxy-authenticate": true, "proxy-authorization": true, "te": true,
+	"trailer": true, "transfer-encoding": true, "upgrade": true,
+}
 
-// Send POSTs an Anthropic Messages request with the given raw JSON body, applying
-// cred's auth headers and forwarding a safelist of client headers. stream
-// controls the Accept header. clientHeader may be nil. The returned response's
-// Body is owned by the caller and must be closed.
+// Send POSTs an Anthropic Messages request with the given raw JSON body. cerber
+// is a transparent proxy: it forwards ALL client request headers (so Claude
+// Code's version/betas/user-agent reach Anthropic unchanged), then injects only
+// the credential auth. stream is informational; the client's own Accept is kept.
+// clientHeader may be nil. The returned response's Body must be closed.
 func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential, clientHeader http.Header) (*http.Response, error) {
 	if cred == nil {
 		return nil, fmt.Errorf("anthropic: nil credential")
@@ -63,40 +68,35 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("anthropic-version", c.version)
-	if stream {
-		req.Header.Set("Accept", "text/event-stream")
-	} else {
-		req.Header.Set("Accept", "application/json")
+
+	// Forward all client headers (except the ones cerber manages).
+	for k, vs := range clientHeader {
+		if managedRequestHeaders[strings.ToLower(k)] {
+			continue
+		}
+		req.Header[k] = append([]string(nil), vs...)
+	}
+	// Fill defaults only if the client didn't provide them.
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if req.Header.Get("anthropic-version") == "" {
+		req.Header.Set("anthropic-version", c.version)
+	}
+	if req.Header.Get("Accept") == "" {
+		if stream {
+			req.Header.Set("Accept", "text/event-stream")
+		} else {
+			req.Header.Set("Accept", "application/json")
+		}
 	}
 	applyAuth(req, cred)
-	forwardClientHeaders(req, clientHeader, cred)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: upstream request: %w", err)
 	}
 	return resp, nil
-}
-
-// forwardClientHeaders copies safelisted client headers onto the upstream
-// request. For OAuth, the required oauth beta is merged with any client betas.
-func forwardClientHeaders(req *http.Request, client http.Header, cred *credential.Credential) {
-	if client == nil {
-		return
-	}
-	for _, h := range forwardedHeaders {
-		v := client.Get(h)
-		if v == "" {
-			continue
-		}
-		if h == "anthropic-beta" && cred.Kind() == credential.KindOAuth {
-			req.Header.Set(h, mergeBetas(oauthBetas, v))
-		} else {
-			req.Header.Set(h, v)
-		}
-	}
 }
 
 // mergeBetas unions two comma-separated beta lists, preserving order and
@@ -117,13 +117,14 @@ func mergeBetas(a, b string) string {
 	return strings.Join(out, ",")
 }
 
-// applyAuth sets the credential-specific auth headers.
+// applyAuth sets the credential-specific auth headers, preserving any client
+// betas (merging the required oauth beta for OAuth credentials).
 func applyAuth(req *http.Request, cred *credential.Credential) {
 	switch cred.Kind() {
 	case credential.KindOAuth:
 		req.Header.Del("x-api-key")
 		req.Header.Set("Authorization", "Bearer "+cred.AccessToken())
-		req.Header.Set("anthropic-beta", oauthBetas)
+		req.Header.Set("anthropic-beta", mergeBetas(oauthBetas, req.Header.Get("anthropic-beta")))
 	default: // KindAPIKey
 		req.Header.Set("x-api-key", cred.APIKey())
 	}
