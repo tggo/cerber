@@ -250,17 +250,20 @@ func runSeedClaudeCreds(authDir, out string) {
 	if tok == nil {
 		fatal("seed-claude-creds: no oauth credential in %s (run: cerber --claude-login)", authDir)
 	}
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		fatal("seed-claude-creds: home dir: %v", herr)
+	}
 	if out == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			fatal("seed-claude-creds: home dir: %v", herr)
-		}
 		out = filepath.Join(home, ".claude", ".credentials.json")
 	}
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
 		fatal("seed-claude-creds: mkdir: %v", err)
 	}
-	payload := map[string]any{
+
+	// Credentials (.credentials.json): the OAuth token, with a far-future expiry so
+	// Claude Code never refreshes it (cerber is the sole token owner).
+	creds_payload := map[string]any{
 		"claudeAiOauth": map[string]any{
 			"accessToken":      tok.AccessToken,
 			"refreshToken":     tok.RefreshToken,
@@ -269,11 +272,26 @@ func runSeedClaudeCreds(authDir, out string) {
 			"subscriptionType": "max",
 		},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := json.Marshal(creds_payload)
 	if err := os.WriteFile(out, data, 0o600); err != nil {
-		fatal("seed-claude-creds: write: %v", err)
+		fatal("seed-claude-creds: write credentials: %v", err)
 	}
-	fmt.Printf("Seeded Claude Code credentials at %s (from %s)\n", out, tok.Name)
+
+	// State (~/.claude.json): mark onboarding complete so interactive Claude Code
+	// starts as a normal session instead of prompting login. Written only if
+	// missing, so Claude Code's own enriched state (account, projects) persists.
+	stateFile := filepath.Join(home, ".claude.json")
+	if _, statErr := os.Stat(stateFile); os.IsNotExist(statErr) {
+		state, _ := json.Marshal(map[string]any{
+			"hasCompletedOnboarding": true,
+			"numStartups":            1,
+			"firstStartTime":         time.Now().UTC().Format(time.RFC3339),
+		})
+		if err := os.WriteFile(stateFile, state, 0o644); err != nil {
+			fatal("seed-claude-creds: write state: %v", err)
+		}
+	}
+	fmt.Printf("Seeded Claude Code credentials at %s and state at %s (from %s)\n", out, stateFile, tok.Name)
 }
 
 // runClaudeLogin performs the interactive OAuth flow and saves the tokens.
