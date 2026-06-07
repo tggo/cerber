@@ -35,8 +35,20 @@ func newStore(t *testing.T, n int) *credential.Store {
 
 func newServer(t *testing.T, store *credential.Store) (*Server, *mocks.Upstream) {
 	up := mocks.NewUpstream(t)
-	s := New(access.New([]string{clientKey}), store, up)
+	s := New(access.New([]string{clientKey}), store, up, nil)
 	return s, up
+}
+
+func oauthStore(t *testing.T, accessToken string, expiresAt time.Time) *credential.Store {
+	t.Helper()
+	s, err := credential.NewStore([]config.Credential{{
+		Type: config.CredentialOAuth, Name: "o", AccessToken: accessToken,
+		RefreshToken: "refresh-0", ExpiresAt: expiresAt,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 func resp(status int, ct, body string) *http.Response {
@@ -236,6 +248,60 @@ func TestFlusher_NoopWhenUnsupported(t *testing.T) {
 	// nonFlusher embeds ResponseWriter but does not implement http.Flusher.
 	f := flusher(nonFlusher{httptest.NewRecorder()})
 	f() // must not panic
+}
+
+func TestRefresh_BeforeSendWhenExpiring(t *testing.T) {
+	now := time.Unix(1000, 0)
+	store := oauthStore(t, "stale", now.Add(10*time.Second)) // within skew -> needs refresh
+	up := mocks.NewUpstream(t)
+	ref := mocks.NewRefresher(t)
+	s := New(access.New([]string{clientKey}), store, up, ref)
+	s.now = func() time.Time { return now }
+
+	ref.EXPECT().Refresh(mock.Anything, "refresh-0").
+		Return(credential.OAuthTokens{AccessToken: "fresh", RefreshToken: "refresh-1", ExpiresAt: now.Add(time.Hour)}, nil)
+
+	var sentToken string
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, cred *credential.Credential) (*http.Response, error) {
+			sentToken = cred.AccessToken()
+			return resp(200, "application/json", `{"id":"ok"}`), nil
+		})
+
+	rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if sentToken != "fresh" {
+		t.Errorf("expected refreshed token to be used, got %q", sentToken)
+	}
+}
+
+func TestRefresh_NotTriggeredWhenValid(t *testing.T) {
+	now := time.Unix(1000, 0)
+	store := oauthStore(t, "valid", now.Add(time.Hour)) // far from expiry
+	up := mocks.NewUpstream(t)
+	ref := mocks.NewRefresher(t) // expects no Refresh call
+	s := New(access.New([]string{clientKey}), store, up, ref)
+	s.now = func() time.Time { return now }
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"ok"}`), nil)
+	if rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey); rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+}
+
+func TestRefresh_FailureSidelinesCredential_502(t *testing.T) {
+	now := time.Unix(1000, 0)
+	store := oauthStore(t, "stale", now.Add(time.Second))
+	up := mocks.NewUpstream(t) // Send must never be called
+	ref := mocks.NewRefresher(t)
+	s := New(access.New([]string{clientKey}), store, up, ref)
+	s.now = func() time.Time { return now }
+	ref.EXPECT().Refresh(mock.Anything, mock.Anything).Return(credential.OAuthTokens{}, errors.New("refresh boom"))
+	if rec := do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey); rec.Code != http.StatusBadGateway {
+		t.Errorf("code %d, want 502", rec.Code)
+	}
 }
 
 func TestDispatch_NoneAvailable_503(t *testing.T) {

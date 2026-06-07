@@ -38,8 +38,9 @@ func main() {
 
 	httpClient := &http.Client{Timeout: cfg.Providers.Anthropic.Timeout.Std()}
 	client := anthropic.New(cfg.Providers.Anthropic.BaseURL, cfg.Providers.Anthropic.Version, httpClient)
+	refresher := anthropic.NewRefresher(cfg.Providers.Anthropic.BaseURL, httpClient)
 
-	srv := server.New(access.New(cfg.Access.Keys), store, client)
+	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.Addr,

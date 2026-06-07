@@ -57,8 +57,18 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - oauth credential → `Authorization: Bearer …` + `anthropic-beta`, no x-api-key.
 - `Accept: text/event-stream` when streaming, else `application/json`.
 - Only ever contacts the configured Anthropic base URL.
-- Known gaps (slice #1): OAuth token refresh and Claude-Code system-prompt spoofing not yet implemented.
-**Verified:** `internal/provider/anthropic` tests (mockery HTTPDoer), 100% coverage — 2026-06-07.
+- OAuth requests carry the Claude Code system prefix (see OAuth entry below).
+**Verified:** `internal/provider/anthropic` tests (mockery HTTPDoer) + live OAuth smoke test — 2026-06-07.
+
+## OAuth — token refresh & Claude Code spoofing
+**What:** Claude Code OAuth credentials stay usable over time: their access token is refreshed before expiry, and requests carry the system prefix Anthropic requires for OAuth.
+**DoD:**
+- An OAuth credential within 60s of (or past) expiry is refreshed via `POST {base_url}/v1/oauth/token` (`grant_type=refresh_token`, client_id `9d1c250a-…`) before the request is sent; the rotated refresh_token and new expiry are stored.
+- A valid (not-near-expiry) token is not refreshed.
+- Refresh failure sidelines the credential (cooldown) and rotation continues; all failing → 502.
+- Every OAuth request's `system` begins with "You are Claude Code, Anthropic's official CLI for Claude." (idempotent; caller system content preserved); api_key requests are unmodified.
+- Known gaps: refreshed tokens are in-memory only (not persisted across restart); no reactive refresh on a 401 (only proactive-by-expiry); full Claude Code fingerprint (billing headers, static prompt, tool renaming) intentionally not replicated.
+**Verified:** `internal/provider/anthropic` (refresher+spoof) + `internal/server` refresh tests + live smoke test (expired token → Bearer REFRESHED-TOKEN, sysok=True) — 2026-06-07.
 
 ## Translator — OpenAI ↔ Anthropic
 **What:** converts OpenAI chat-completions requests/responses to and from Anthropic Messages, including streaming.

@@ -15,3 +15,4 @@ packages:
   cerber/internal/server:
     interfaces:
       Upstream:
+      Refresher:

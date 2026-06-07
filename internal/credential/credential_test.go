@@ -108,6 +108,63 @@ func TestCooldown_AllUnavailable(t *testing.T) {
 	}
 }
 
+func TestNeedsRefresh(t *testing.T) {
+	now := time.Unix(1000, 0)
+	skew := time.Minute
+
+	apiKey, _ := NewStore([]config.Credential{apiKeyCfg("a", "k")})
+	c, _ := apiKey.Next()
+	if c.NeedsRefresh(now, skew) {
+		t.Error("api_key credential never needs refresh")
+	}
+
+	oauthZero, _ := NewStore([]config.Credential{{Type: config.CredentialOAuth, AccessToken: "t"}})
+	oz, _ := oauthZero.Next()
+	if oz.NeedsRefresh(now, skew) {
+		t.Error("oauth with unknown expiry should not proactively refresh")
+	}
+
+	cases := []struct {
+		name    string
+		expires time.Time
+		want    bool
+	}{
+		{"far future", now.Add(time.Hour), false},
+		{"within skew", now.Add(30 * time.Second), true},
+		{"already expired", now.Add(-time.Second), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := NewStore([]config.Credential{{Type: config.CredentialOAuth, AccessToken: "t", ExpiresAt: tc.expires}})
+			cred, _ := s.Next()
+			if got := cred.NeedsRefresh(now, skew); got != tc.want {
+				t.Errorf("NeedsRefresh = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUpdateOAuth(t *testing.T) {
+	exp := time.Unix(5000, 0)
+	s, _ := NewStore([]config.Credential{{Type: config.CredentialOAuth, AccessToken: "old", RefreshToken: "r0", ExpiresAt: time.Unix(1, 0)}})
+	c, _ := s.Next()
+
+	s.UpdateOAuth(c, OAuthTokens{AccessToken: "new", RefreshToken: "r1", ExpiresAt: exp})
+	if c.AccessToken() != "new" || c.RefreshToken() != "r1" || !c.ExpiresAt().Equal(exp) {
+		t.Errorf("update failed: %s %s %v", c.AccessToken(), c.RefreshToken(), c.ExpiresAt())
+	}
+
+	// Empty refresh token preserves the existing one.
+	s.UpdateOAuth(c, OAuthTokens{AccessToken: "newer", RefreshToken: "", ExpiresAt: exp})
+	if c.RefreshToken() != "r1" {
+		t.Errorf("empty refresh should preserve, got %q", c.RefreshToken())
+	}
+
+	// Nil / unknown credentials are ignored (no panic).
+	s.UpdateOAuth(nil, OAuthTokens{})
+	s.UpdateOAuth(&Credential{}, OAuthTokens{AccessToken: "x"})
+}
+
 func TestCooldown_NoopCases(t *testing.T) {
 	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1")})
 	s.Cooldown(nil, time.Minute)           // nil credential

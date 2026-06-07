@@ -27,13 +27,26 @@ const (
 // ErrNoneAvailable is returned when every credential is in cooldown.
 var ErrNoneAvailable = errors.New("credential: no credential available")
 
+// OAuthTokens is the result of refreshing an OAuth credential.
+type OAuthTokens struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    time.Time
+}
+
 // Credential is a single upstream account credential. Secret material is
-// unexported; read it only via the accessor methods.
+// unexported; read it only via the accessor methods. OAuth token fields are
+// mutable (refreshed in place) and guarded by an internal mutex, so a Credential
+// must always be used via pointer and never copied.
 type Credential struct {
-	name        string
-	kind        Kind
-	apiKey      string
-	accessToken string
+	name   string
+	kind   Kind
+	apiKey string // immutable
+
+	mu           sync.RWMutex
+	accessToken  string
+	refreshToken string
+	expiresAt    time.Time
 }
 
 // Name returns the human label for this credential (safe to log).
@@ -45,8 +58,52 @@ func (c *Credential) Kind() Kind { return c.kind }
 // APIKey returns the x-api-key secret (empty unless KindAPIKey).
 func (c *Credential) APIKey() string { return c.apiKey }
 
-// AccessToken returns the OAuth bearer token (empty unless KindOAuth).
-func (c *Credential) AccessToken() string { return c.accessToken }
+// AccessToken returns the current OAuth bearer token (empty unless KindOAuth).
+func (c *Credential) AccessToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.accessToken
+}
+
+// RefreshToken returns the current OAuth refresh token.
+func (c *Credential) RefreshToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.refreshToken
+}
+
+// ExpiresAt returns the OAuth access-token expiry (zero if unknown).
+func (c *Credential) ExpiresAt() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.expiresAt
+}
+
+// NeedsRefresh reports whether this OAuth credential's access token is expired or
+// within skew of expiring at now. API-key credentials and OAuth credentials with
+// an unknown (zero) expiry never need a proactive refresh.
+func (c *Credential) NeedsRefresh(now time.Time, skew time.Duration) bool {
+	if c.kind != KindOAuth {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.expiresAt.IsZero() {
+		return false
+	}
+	return !now.Before(c.expiresAt.Add(-skew))
+}
+
+// updateOAuth replaces the mutable OAuth token state.
+func (c *Credential) updateOAuth(tok OAuthTokens) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accessToken = tok.AccessToken
+	if tok.RefreshToken != "" {
+		c.refreshToken = tok.RefreshToken
+	}
+	c.expiresAt = tok.ExpiresAt
+}
 
 // String is a redacted identifier — it never contains secret material.
 func (c *Credential) String() string {
@@ -63,7 +120,13 @@ func newCredential(cc config.Credential, idx int) (*Credential, error) {
 	case config.CredentialAPIKey:
 		return &Credential{name: name, kind: KindAPIKey, apiKey: cc.Key}, nil
 	case config.CredentialOAuth:
-		return &Credential{name: name, kind: KindOAuth, accessToken: cc.AccessToken}, nil
+		return &Credential{
+			name:         name,
+			kind:         KindOAuth,
+			accessToken:  cc.AccessToken,
+			refreshToken: cc.RefreshToken,
+			expiresAt:    cc.ExpiresAt,
+		}, nil
 	default:
 		return nil, fmt.Errorf("credential %q: unsupported type %q", name, cc.Type)
 	}
@@ -145,5 +208,25 @@ func (s *Store) Cooldown(c *Credential, d time.Duration) {
 			e.cooldownUntil = until
 			return
 		}
+	}
+}
+
+// UpdateOAuth replaces a credential's OAuth token state after a refresh. Unknown
+// credentials are ignored.
+func (s *Store) UpdateOAuth(c *Credential, tok OAuthTokens) {
+	if c == nil {
+		return
+	}
+	s.mu.Lock()
+	known := false
+	for _, e := range s.entries {
+		if e.cred == c {
+			known = true
+			break
+		}
+	}
+	s.mu.Unlock()
+	if known {
+		c.updateOAuth(tok)
 	}
 }

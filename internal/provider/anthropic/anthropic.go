@@ -46,6 +46,13 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 	if cred == nil {
 		return nil, fmt.Errorf("anthropic: nil credential")
 	}
+	if cred.Kind() == credential.KindOAuth {
+		injected, err := injectClaudeCodeSystem(body)
+		if err != nil {
+			return nil, fmt.Errorf("anthropic: inject claude code system: %w", err)
+		}
+		body = injected
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+MessagesPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: build request: %w", err)

@@ -100,6 +100,41 @@ func TestSend_OAuthHeadersAndStream(t *testing.T) {
 	if got := captured.Header.Get("Accept"); got != "text/event-stream" {
 		t.Errorf("accept = %q, want text/event-stream (stream)", got)
 	}
+	// OAuth requests must carry the Claude Code agent system prefix.
+	body, _ := io.ReadAll(captured.Body)
+	if !strings.Contains(string(body), claudeCodeAgentPrompt) {
+		t.Errorf("oauth request missing claude code system prefix: %s", body)
+	}
+}
+
+func TestSend_APIKeyDoesNotInjectSystem(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return okResp(), nil
+	})
+	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
+	cred, _ := store.Next()
+	c := New("https://api.anthropic.com", "v", doer)
+	resp, err := c.Send(context.Background(), []byte(`{"system":"hi"}`), false, cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	body, _ := io.ReadAll(captured.Body)
+	if strings.Contains(string(body), claudeCodeAgentPrompt) {
+		t.Errorf("api_key request must not be modified: %s", body)
+	}
+}
+
+func TestSend_OAuthInjectionErrorOnBadBody(t *testing.T) {
+	store := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+	cred, _ := store.Next()
+	c := New("https://api.anthropic.com", "v", mocks.NewHTTPDoer(t))
+	if _, err := c.Send(context.Background(), []byte(`{bad json`), false, cred); err == nil {
+		t.Fatal("expected injection error for malformed oauth body")
+	}
 }
 
 func TestSend_NilCredential(t *testing.T) {

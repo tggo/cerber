@@ -24,26 +24,42 @@ type Upstream interface {
 	Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential) (*http.Response, error)
 }
 
+// Refresher renews an OAuth credential's access token. *anthropic.Refresher
+// satisfies it; it is an interface so the server can be tested against a mock.
+type Refresher interface {
+	Refresh(ctx context.Context, refreshToken string) (credential.OAuthTokens, error)
+}
+
 // Server holds the wired dependencies for the HTTP API.
 type Server struct {
-	access   *access.Checker
-	creds    *credential.Store
-	upstream Upstream
-	tr       *translator.Translator
-	cooldown time.Duration
+	access      *access.Checker
+	creds       *credential.Store
+	upstream    Upstream
+	refresher   Refresher
+	tr          *translator.Translator
+	cooldown    time.Duration
+	refreshSkew time.Duration
+	now         func() time.Time
 }
 
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
 const defaultCooldown = 60 * time.Second
 
-// New wires a Server. The translator is created with the default clock.
-func New(checker *access.Checker, creds *credential.Store, up Upstream) *Server {
+// defaultRefreshSkew refreshes an OAuth token this long before it expires.
+const defaultRefreshSkew = 60 * time.Second
+
+// New wires a Server. refresher may be nil to disable OAuth refresh (e.g.
+// api-key-only deployments). The translator is created with the default clock.
+func New(checker *access.Checker, creds *credential.Store, up Upstream, refresher Refresher) *Server {
 	return &Server{
-		access:   checker,
-		creds:    creds,
-		upstream: up,
-		tr:       translator.New(),
-		cooldown: defaultCooldown,
+		access:      checker,
+		creds:       creds,
+		upstream:    up,
+		refresher:   refresher,
+		tr:          translator.New(),
+		cooldown:    defaultCooldown,
+		refreshSkew: defaultRefreshSkew,
+		now:         time.Now,
 	}
 }
 
@@ -140,6 +156,15 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool) (*http.
 		cred, err := s.creds.Next()
 		if err != nil {
 			return nil, err // ErrNoneAvailable
+		}
+		if s.refresher != nil && cred.NeedsRefresh(s.now(), s.refreshSkew) {
+			tok, rerr := s.refresher.Refresh(ctx, cred.RefreshToken())
+			if rerr != nil {
+				s.creds.Cooldown(cred, s.cooldown)
+				lastErr = fmt.Errorf("refresh %s: %w", cred, rerr)
+				continue
+			}
+			s.creds.UpdateOAuth(cred, tok)
 		}
 		resp, err := s.upstream.Send(ctx, body, stream, cred)
 		if err != nil {
