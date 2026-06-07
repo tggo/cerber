@@ -176,6 +176,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
+	mux.HandleFunc("GET /admin/accounts", s.handleAccounts)
+	mux.HandleFunc("POST /admin/accounts/{name}/enable", s.handleSetAccount(true))
+	mux.HandleFunc("POST /admin/accounts/{name}/disable", s.handleSetAccount(false))
 	// /metrics is unauthenticated (standard for Prometheus scraping); it exposes
 	// counts and credential names, never secrets.
 	mux.Handle("GET /metrics", metrics.Handler(s.usage))
@@ -248,6 +251,55 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(s.usage.Snapshot())
+}
+
+// accountView is one credential's state plus its usage, for orchestration.
+type accountView struct {
+	credential.Info
+	Requests     int64 `json:"requests"`
+	Errors       int64 `json:"errors"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+// handleAccounts lists credentials with their state and usage (orchestration view).
+func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	use := map[string]usage.Stat{}
+	for _, e := range s.usage.Snapshot().ByCredential {
+		use[e.Name] = e.Stat
+	}
+	var out []accountView
+	for _, info := range s.creds.List() {
+		st := use[info.Name]
+		out = append(out, accountView{
+			Info: info, Requests: st.Requests, Errors: st.Errors,
+			InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"accounts": out})
+}
+
+// handleSetAccount enables/disables a credential at runtime.
+func (s *Server) handleSetAccount(enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(w, r) {
+			return
+		}
+		name := r.PathValue("name")
+		if !s.creds.SetEnabled(name, enabled) {
+			writeError(w, http.StatusNotFound, "no credential named "+name)
+			return
+		}
+		s.log.Info("account state changed", zap.String("credential", name), zap.Bool("enabled", enabled))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "enabled": enabled})
+	}
 }
 
 // handleNative passes an Anthropic Messages request straight through, injecting a

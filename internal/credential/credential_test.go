@@ -192,6 +192,54 @@ func TestNextOf_FiltersByKind(t *testing.T) {
 	}
 }
 
+func TestSetEnabledAndList(t *testing.T) {
+	now := time.Unix(1000, 0)
+	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1"), apiKeyCfg("b", "2")}, WithClock(func() time.Time { return now }))
+
+	if !s.SetEnabled("a", false) {
+		t.Fatal("SetEnabled should find 'a'")
+	}
+	if s.SetEnabled("nope", false) {
+		t.Fatal("SetEnabled should not match unknown")
+	}
+	// disabled 'a' is skipped; only 'b' returned
+	for i := 0; i < 3; i++ {
+		c, err := s.Next()
+		if err != nil || c.Name() != "b" {
+			t.Fatalf("got %v %v, want b", c, err)
+		}
+	}
+	// list reflects state
+	list := s.List()
+	byName := map[string]Info{}
+	for _, in := range list {
+		byName[in.Name] = in
+	}
+	if byName["a"].Enabled || !byName["b"].Enabled {
+		t.Errorf("list enabled wrong: %+v", list)
+	}
+	// re-enable
+	s.SetEnabled("a", true)
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		c, _ := s.Next()
+		seen[c.Name()] = true
+	}
+	if !seen["a"] {
+		t.Error("a should be back after enable")
+	}
+}
+
+func TestList_CoolingDown(t *testing.T) {
+	now := time.Unix(1000, 0)
+	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1")}, WithClock(func() time.Time { return now }))
+	c, _ := s.Next()
+	s.Cooldown(c, time.Minute)
+	if !s.List()[0].CoolingDown {
+		t.Error("expected cooling_down true")
+	}
+}
+
 func TestNextOf_NoMatch(t *testing.T) {
 	s, _ := NewStore([]config.Credential{apiKeyCfg("k", "x")})
 	_, err := s.NextOf(func(c *Credential) bool { return c.Kind() == KindOAuth })

@@ -135,6 +135,15 @@ func newCredential(cc config.Credential, idx int) (*Credential, error) {
 type entry struct {
 	cred          *Credential
 	cooldownUntil time.Time
+	disabled      bool
+}
+
+// Info is a redacted snapshot of a credential's state for orchestration/listing.
+type Info struct {
+	Name        string `json:"name"`
+	Kind        Kind   `json:"kind"`
+	Enabled     bool   `json:"enabled"`
+	CoolingDown bool   `json:"cooling_down"`
 }
 
 // Store holds a provider's credentials and hands them out round-robin, skipping
@@ -193,7 +202,7 @@ func (s *Store) NextOf(match func(*Credential) bool) (*Credential, error) {
 	for i := 0; i < n; i++ {
 		e := s.entries[s.idx]
 		s.idx = (s.idx + 1) % n
-		if now.Before(e.cooldownUntil) {
+		if e.disabled || now.Before(e.cooldownUntil) {
 			continue
 		}
 		if match != nil && !match(e.cred) {
@@ -202,6 +211,37 @@ func (s *Store) NextOf(match func(*Credential) bool) (*Credential, error) {
 		return e.cred, nil
 	}
 	return nil, ErrNoneAvailable
+}
+
+// SetEnabled enables or disables the named credential at runtime (disabled
+// credentials are skipped by Next/NextOf). Reports whether a credential matched.
+func (s *Store) SetEnabled(name string, enabled bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.cred.Name() == name {
+			e.disabled = !enabled
+			return true
+		}
+	}
+	return false
+}
+
+// List returns a redacted snapshot of all credentials and their state.
+func (s *Store) List() []Info {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	out := make([]Info, 0, len(s.entries))
+	for _, e := range s.entries {
+		out = append(out, Info{
+			Name:        e.cred.Name(),
+			Kind:        e.cred.Kind(),
+			Enabled:     !e.disabled,
+			CoolingDown: now.Before(e.cooldownUntil),
+		})
+	}
+	return out
 }
 
 // Cooldown sidelines a credential for the given duration (e.g. after a 429 or

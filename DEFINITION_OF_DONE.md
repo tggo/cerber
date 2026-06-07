@@ -198,6 +198,14 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - 1M context + tool-search require Claude Code logged into Max in the container (mount `~/.claude`).
 **Verified:** `internal/tlscert` + `internal/upstreamdial` tests + live in-container: `https://api.anthropic.com/healthz`→ok via cerber, real `/v1/messages`→Anthropic via DoH, `claude -p`→"pong" through the impersonation — 2026-06-08.
 
+## Account orchestration (management API)
+**What:** list and enable/disable upstream accounts at runtime, without editing files or restarting.
+**DoD:**
+- `GET /admin/accounts` (authed) lists each credential: name, kind, enabled, cooling_down, and its usage (requests/errors/tokens).
+- `POST /admin/accounts/{name}/disable` removes it from rotation; `…/enable` restores it; unknown name → 404.
+- Disabled credentials are skipped by selection (`Next`/`NextOf`); change takes effect immediately.
+**Verified:** `internal/credential` (SetEnabled/List, 100%) + `internal/server` accounts tests — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

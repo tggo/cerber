@@ -510,6 +510,45 @@ func TestMetricsAndDashboardServed(t *testing.T) {
 	}
 }
 
+func TestAccounts_ListEnableDisable(t *testing.T) {
+	store, err := credential.NewStore([]config.Credential{
+		{Type: config.CredentialAPIKey, Name: "acct-a", Key: "a"},
+		{Type: config.CredentialOAuth, Name: "acct-b", AccessToken: "t"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(access.New([]string{clientKey}), store, mocks.NewUpstream(t), nil, nil)
+	h := s.Handler()
+
+	// list
+	rec := do(t, h, "GET", "/admin/accounts", "", clientKey)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "acct-a") || !strings.Contains(rec.Body.String(), `"kind":"oauth"`) {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+	// disable
+	if rec := do(t, h, "POST", "/admin/accounts/acct-a/disable", "", clientKey); rec.Code != 200 {
+		t.Fatalf("disable = %d", rec.Code)
+	}
+	// reflected in list
+	rec = do(t, h, "GET", "/admin/accounts", "", clientKey)
+	if !strings.Contains(rec.Body.String(), `"name":"acct-a","kind":"api_key","enabled":false`) {
+		t.Errorf("disable not reflected: %s", rec.Body.String())
+	}
+	// enable back
+	if rec := do(t, h, "POST", "/admin/accounts/acct-a/enable", "", clientKey); rec.Code != 200 {
+		t.Fatalf("enable = %d", rec.Code)
+	}
+	// unknown -> 404
+	if rec := do(t, h, "POST", "/admin/accounts/nope/disable", "", clientKey); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown = %d, want 404", rec.Code)
+	}
+	// auth required
+	if rec := do(t, h, "GET", "/admin/accounts", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
 func TestStats_RequiresAuth(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
 	if rec := do(t, s.Handler(), "GET", "/admin/stats", "", ""); rec.Code != http.StatusUnauthorized {
