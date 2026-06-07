@@ -12,3 +12,6 @@ packages:
   cerber/internal/provider:
     interfaces:
       HTTPDoer:
+  cerber/internal/server:
+    interfaces:
+      Upstream:

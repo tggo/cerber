@@ -70,6 +70,16 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Known gaps (slice #1): OpenAI `tools`/function-calling not translated (use native endpoint).
 **Verified:** `internal/translator` tests, 94.8% coverage — 2026-06-07.
 
+## HTTP API — endpoints, auth, rotation (Anthropic slice)
+**What:** cerber serves a native Anthropic passthrough and an OpenAI-compatible endpoint, authenticating clients and rotating across upstream credentials.
+**DoD:**
+- `GET /healthz` → 200 `ok`.
+- Missing/invalid client key on any provider endpoint → 401.
+- `POST /v1/messages` → relays the Anthropic request/response verbatim (streaming preserved), injecting a credential.
+- `POST /v1/chat/completions` → translates OpenAI→Anthropic→OpenAI (stream and non-stream); malformed OpenAI request → 400; upstream non-200 relayed as-is; untranslatable upstream body → 502.
+- On upstream 401/403/429 (or transport error), the credential is sidelined (cooldown) and the next is tried; all failing → 502; none available → 503.
+**Verified:** `internal/server` tests (92.9%) + live smoke test (healthz, 401, native passthrough, OpenAI translation against a fake upstream) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**
