@@ -241,6 +241,23 @@ func TestParse_NilAnthropicWithOtherProvider(t *testing.T) {
 	}
 }
 
+func TestParse_TLSDefaults(t *testing.T) {
+	y := "access: {keys: [k]}\ntls: {enabled: true, use_doh: true}\nproviders: {anthropic: {credentials: [{type: api_key, key: k}]}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !c.TLS.Enabled || c.TLS.Addr != ":443" || c.TLS.CertDir != "./certs" ||
+		len(c.TLS.Hosts) != 1 || c.TLS.Hosts[0] != "api.anthropic.com" || !c.TLS.UseDoH {
+		t.Errorf("tls defaults = %+v", c.TLS)
+	}
+	// disabled -> no defaults applied
+	c2, _ := Parse([]byte("access: {keys: [k]}\nproviders: {anthropic: {credentials: [{type: api_key, key: k}]}}"))
+	if c2.TLS.Enabled || c2.TLS.Addr != "" {
+		t.Errorf("tls should stay zero when disabled: %+v", c2.TLS)
+	}
+}
+
 func TestLoad_FileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")

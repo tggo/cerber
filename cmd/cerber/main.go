@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"cerber/internal/access"
@@ -20,7 +22,9 @@ import (
 	"cerber/internal/provider/gemini"
 	"cerber/internal/provider/openai"
 	"cerber/internal/server"
+	"cerber/internal/tlscert"
 	"cerber/internal/tokenstore"
+	"cerber/internal/upstreamdial"
 	"cerber/internal/version"
 
 	"go.uber.org/zap"
@@ -34,10 +38,18 @@ func main() {
 	claudeLogin := flag.Bool("claude-login", false, "run the Claude Code OAuth login and save tokens, then exit")
 	noBrowser := flag.Bool("no-browser", false, "with --claude-login: print the URL instead of opening a browser")
 	loginPort := flag.Int("login-port", claude.DefaultCallbackPort, "with --claude-login: local OAuth callback port")
+	genCert := flag.Bool("gen-cert", false, "generate a CA + cert for TLS impersonation (DOCKER ONLY), then exit")
+	certDir := flag.String("cert-dir", "./certs", "with --gen-cert: output directory")
+	impersonate := flag.String("impersonate", "api.anthropic.com", "with --gen-cert: comma-separated hostnames")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("cerber %s\n", version.String())
+		return
+	}
+
+	if *genCert {
+		runGenCert(*certDir, *impersonate)
 		return
 	}
 
@@ -86,6 +98,17 @@ func main() {
 	}
 
 	httpClient := &http.Client{Timeout: a.Timeout.Std()}
+	if cfg.TLS.UseDoH {
+		// Resolve the upstream via DoH so we bypass the /etc/hosts redirect that
+		// points api.anthropic.com at cerber itself (TLS impersonation).
+		res := upstreamdial.NewResolver()
+		httpClient.Transport = &http.Transport{
+			DialContext:       res.DialContext,
+			ForceAttemptHTTP2: true,
+			Proxy:             http.ProxyFromEnvironment,
+		}
+		logger.Info("upstream DoH resolution enabled")
+	}
 	client := anthropic.New(a.BaseURL, a.Version, httpClient)
 	refresher := anthropic.NewRefresher(a.BaseURL, httpClient)
 
@@ -128,21 +151,52 @@ func main() {
 		logger.Info("gemini provider enabled", zap.Int("credentials", gstore.Len()))
 	}
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Server.Addr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
+	handler := srv.Handler()
 	logger.Info("cerber starting",
 		zap.String("version", version.String()),
 		zap.String("addr", cfg.Server.Addr),
 		zap.Int("credentials", store.Len()),
 		zap.String("log_level", cfg.Logging.Level),
+		zap.Bool("tls", cfg.TLS.Enabled),
 	)
+
+	// Optional HTTPS impersonation listener (Docker only).
+	if cfg.TLS.Enabled {
+		certFile := filepath.Join(cfg.TLS.CertDir, "cert.pem")
+		keyFile := filepath.Join(cfg.TLS.CertDir, "key.pem")
+		tlsSrv := &http.Server{Addr: cfg.TLS.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			logger.Info("cerber TLS listening", zap.String("addr", cfg.TLS.Addr), zap.Strings("hosts", cfg.TLS.Hosts))
+			if err := tlsSrv.ListenAndServeTLS(certFile, keyFile); err != nil {
+				logger.Fatal("tls server", zap.Error(err))
+			}
+		}()
+	}
+
+	httpSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	if err := httpSrv.ListenAndServe(); err != nil {
 		logger.Fatal("server", zap.Error(err))
 	}
+}
+
+// runGenCert generates a CA + leaf cert for TLS impersonation and prints setup.
+func runGenCert(dir, impersonate string) {
+	var hosts []string
+	for _, h := range strings.Split(impersonate, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	f, err := tlscert.Generate(dir, hosts, time.Now())
+	if err != nil {
+		fatal("gen-cert: %v", err)
+	}
+	fmt.Printf("Generated TLS impersonation certs in %s:\n", dir)
+	fmt.Printf("  CA   (trust this): %s\n", f.CA)
+	fmt.Printf("  cert (server):     %s\n", f.Cert)
+	fmt.Printf("  key  (server):     %s\n\n", f.Key)
+	fmt.Printf("In the container: export NODE_EXTRA_CA_CERTS=%s and map %s -> 127.0.0.1.\n",
+		f.CA, strings.Join(hosts, ", "))
 }
 
 // runClaudeLogin performs the interactive OAuth flow and saves the tokens.

@@ -20,6 +20,7 @@ type Config struct {
 	Server    Server    `yaml:"server"`
 	Access    Access    `yaml:"access"`
 	Logging   Logging   `yaml:"logging"`
+	TLS       TLS       `yaml:"tls"`
 	AuthDir   string    `yaml:"auth_dir"` // dir for OAuth tokens written by --claude-login
 	Providers Providers `yaml:"providers"`
 }
@@ -33,6 +34,18 @@ type Server struct {
 type Logging struct {
 	Level string `yaml:"level"` // debug|info|warn|error
 	Dir   string `yaml:"dir"`   // log directory; dated files ./logs/<date>.log
+}
+
+// TLS configures the HTTPS impersonation listener. DOCKER ONLY: trusting the CA
+// and redirecting api.anthropic.com via /etc/hosts on a real machine would
+// hijack all Anthropic traffic. With this, Claude Code (no ANTHROPIC_BASE_URL)
+// believes it talks to api.anthropic.com and enables 1M context + tool-search.
+type TLS struct {
+	Enabled bool     `yaml:"enabled"`
+	Addr    string   `yaml:"addr"`     // HTTPS listen address (e.g. ":443")
+	CertDir string   `yaml:"cert_dir"` // dir holding cert.pem/key.pem/ca.pem
+	Hosts   []string `yaml:"hosts"`    // hostnames to impersonate (cert SANs)
+	UseDoH  bool     `yaml:"use_doh"`  // resolve upstream via DoH (bypass /etc/hosts)
 }
 
 // Access controls who may call cerber. Keys are the API keys clients present.
@@ -176,6 +189,17 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AuthDir == "" {
 		c.AuthDir = defaultAuthDir
+	}
+	if c.TLS.Enabled {
+		if c.TLS.Addr == "" {
+			c.TLS.Addr = ":443"
+		}
+		if c.TLS.CertDir == "" {
+			c.TLS.CertDir = "./certs"
+		}
+		if len(c.TLS.Hosts) == 0 {
+			c.TLS.Hosts = []string{"api.anthropic.com"}
+		}
 	}
 	if a := c.Providers.Anthropic; a != nil {
 		if a.BaseURL == "" {
