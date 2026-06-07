@@ -8,3 +8,4 @@ logs/
 config.yaml
 auths/
 certs/
+data/

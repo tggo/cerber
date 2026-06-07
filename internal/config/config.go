@@ -21,8 +21,21 @@ type Config struct {
 	Access    Access    `yaml:"access"`
 	Logging   Logging   `yaml:"logging"`
 	TLS       TLS       `yaml:"tls"`
+	Usage     Usage     `yaml:"usage"`
 	AuthDir   string    `yaml:"auth_dir"` // dir for OAuth tokens written by --claude-login
 	Providers Providers `yaml:"providers"`
+}
+
+// Usage configures usage persistence and per-model pricing (for cost reporting).
+type Usage struct {
+	File    string           `yaml:"file"`    // where to persist aggregates (empty = in-memory only)
+	Pricing map[string]Price `yaml:"pricing"` // model -> cost per 1M tokens
+}
+
+// Price is per-model cost per 1,000,000 tokens.
+type Price struct {
+	Input  float64 `yaml:"input"`
+	Output float64 `yaml:"output"`
 }
 
 // Server holds HTTP listener settings.
@@ -130,6 +143,7 @@ const (
 	defaultLogLevel        = "info"
 	defaultLogDir          = "./logs"
 	defaultAuthDir         = "./auths"
+	defaultUsageFile       = "./data/usage.json"
 	defaultAnthropicBase   = "https://api.anthropic.com"
 	defaultAnthropicVer    = "2023-06-01"
 	defaultAnthropicWaitNS = 120 * time.Second
@@ -189,6 +203,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AuthDir == "" {
 		c.AuthDir = defaultAuthDir
+	}
+	if c.Usage.File == "" {
+		c.Usage.File = defaultUsageFile
 	}
 	if c.TLS.Enabled {
 		if c.TLS.Addr == "" {

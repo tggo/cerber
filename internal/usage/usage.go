@@ -5,6 +5,12 @@
 package usage
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -19,19 +25,28 @@ type Stat struct {
 	LastUsed     time.Time `json:"last_used"`
 }
 
-// Entry is a named Stat for JSON output.
+// Entry is a named Stat for JSON output. Cost is set for model entries when
+// pricing is configured.
 type Entry struct {
-	Name string `json:"name"`
+	Name string  `json:"name"`
+	Cost float64 `json:"cost,omitempty"`
 	Stat
 }
 
 // Report is a point-in-time snapshot.
 type Report struct {
 	Totals        Stat    `json:"totals"`
+	TotalCost     float64 `json:"total_cost"`
 	ByCredential  []Entry `json:"by_credential"`
 	ByModel       []Entry `json:"by_model"`
 	SinceUnix     int64   `json:"since_unix"`
 	GeneratedUnix int64   `json:"generated_unix"`
+}
+
+// Price is per-model pricing in cost units per 1,000,000 tokens.
+type Price struct {
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
 }
 
 // Event is one recorded request outcome.
@@ -51,6 +66,7 @@ type Tracker struct {
 	totals       Stat
 	since        time.Time
 	now          func() time.Time
+	pricing      map[string]Price
 }
 
 // Option customizes a Tracker.
@@ -66,6 +82,7 @@ func New(opts ...Option) *Tracker {
 	t := &Tracker{
 		byCredential: map[string]*Stat{},
 		byModel:      map[string]*Stat{},
+		pricing:      map[string]Price{},
 		now:          time.Now,
 	}
 	for _, o := range opts {
@@ -73,6 +90,25 @@ func New(opts ...Option) *Tracker {
 	}
 	t.since = t.now()
 	return t
+}
+
+// SetPricing installs per-model pricing (cost per 1M tokens) for cost reporting.
+func (t *Tracker) SetPricing(p map[string]Price) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pricing = map[string]Price{}
+	for k, v := range p {
+		t.pricing[k] = v
+	}
+}
+
+// modelCost computes the cost for a model's tokens (0 if no pricing).
+func (t *Tracker) modelCost(model string, s Stat) float64 {
+	p, ok := t.pricing[model]
+	if !ok {
+		return 0
+	}
+	return float64(s.InputTokens)/1e6*p.Input + float64(s.OutputTokens)/1e6*p.Output
 }
 
 // Record adds one event to the aggregates.
@@ -113,17 +149,83 @@ func apply(s *Stat, e Event, now time.Time) {
 	s.LastUsed = now
 }
 
-// Snapshot returns a sorted, immutable view of the current aggregates.
+// Snapshot returns a sorted, immutable view of the current aggregates, with
+// per-model and total cost computed from configured pricing.
 func (t *Tracker) Snapshot() Report {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	byModel := entries(t.byModel)
+	var total float64
+	for i := range byModel {
+		byModel[i].Cost = t.modelCost(byModel[i].Name, byModel[i].Stat)
+		total += byModel[i].Cost
+	}
 	return Report{
 		Totals:        t.totals,
+		TotalCost:     total,
 		ByCredential:  entries(t.byCredential),
-		ByModel:       entries(t.byModel),
+		ByModel:       byModel,
 		SinceUnix:     t.since.Unix(),
 		GeneratedUnix: t.now().Unix(),
 	}
+}
+
+// persisted is the on-disk shape of a tracker's aggregates.
+type persisted struct {
+	Totals       Stat             `json:"totals"`
+	ByCredential map[string]*Stat `json:"by_credential"`
+	ByModel      map[string]*Stat `json:"by_model"`
+	SinceUnix    int64            `json:"since_unix"`
+}
+
+// Save writes the aggregates to path (atomic via temp+rename) so usage survives
+// restarts. Pricing is config-driven and not persisted.
+func (t *Tracker) Save(path string) error {
+	t.mu.Lock()
+	data, err := json.Marshal(persisted{
+		Totals: t.totals, ByCredential: t.byCredential, ByModel: t.byModel, SinceUnix: t.since.Unix(),
+	})
+	t.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("usage: marshal: %w", err)
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("usage: mkdir: %w", err)
+		}
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("usage: write: %w", err)
+	}
+	return os.Rename(tmp, path)
+}
+
+// Load builds a Tracker from a saved file (missing file -> empty tracker).
+func Load(path string, opts ...Option) (*Tracker, error) {
+	t := New(opts...)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return t, nil
+		}
+		return nil, fmt.Errorf("usage: read: %w", err)
+	}
+	var p persisted
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("usage: parse: %w", err)
+	}
+	if p.ByCredential != nil {
+		t.byCredential = p.ByCredential
+	}
+	if p.ByModel != nil {
+		t.byModel = p.ByModel
+	}
+	t.totals = p.Totals
+	if p.SinceUnix > 0 {
+		t.since = time.Unix(p.SinceUnix, 0)
+	}
+	return t, nil
 }
 
 // entries returns map contents sorted by request count (desc), then name.

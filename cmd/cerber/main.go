@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"cerber/internal/access"
@@ -27,6 +29,7 @@ import (
 	"cerber/internal/tlscert"
 	"cerber/internal/tokenstore"
 	"cerber/internal/upstreamdial"
+	"cerber/internal/usage"
 	"cerber/internal/version"
 
 	"go.uber.org/zap"
@@ -129,6 +132,22 @@ func main() {
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 
+	// Persistent usage + per-model pricing (cost). Loaded from disk, saved
+	// periodically and on shutdown.
+	tracker, terr := usage.Load(cfg.Usage.File)
+	if terr != nil {
+		logger.Warn("load usage", zap.Error(terr))
+		tracker = usage.New()
+	}
+	if len(cfg.Usage.Pricing) > 0 {
+		pricing := map[string]usage.Price{}
+		for m, p := range cfg.Usage.Pricing {
+			pricing[m] = usage.Price{Input: p.Input, Output: p.Output}
+		}
+		tracker.SetPricing(pricing)
+	}
+	srv.SetUsageTracker(tracker)
+
 	// TLS impersonation: transparently proxy non-/v1 paths (Claude Code console/
 	// bootstrap calls) to the real upstream, reusing the (DoH) transport.
 	if cfg.TLS.Enabled {
@@ -204,10 +223,43 @@ func main() {
 		}()
 	}
 
-	httpSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	if err := httpSrv.ListenAndServe(); err != nil {
-		logger.Fatal("server", zap.Error(err))
+	// Persist usage periodically and on shutdown.
+	saveUsage := func() {
+		if err := tracker.Save(cfg.Usage.File); err != nil {
+			logger.Warn("save usage", zap.Error(err))
+		}
 	}
+	stopSave := make(chan struct{})
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				saveUsage()
+			case <-stopSave:
+				return
+			}
+		}
+	}()
+
+	httpSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("server", zap.Error(err))
+		}
+	}()
+
+	// Wait for SIGINT/SIGTERM, then persist usage and shut down gracefully.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+	close(stopSave)
+	saveUsage()
+	logger.Info("shutting down")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutCtx)
 }
 
 // runGenCert generates a CA + leaf cert for TLS impersonation and prints setup.

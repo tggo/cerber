@@ -98,6 +98,10 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 // Usage returns the usage tracker (for metrics and the dashboard).
 func (s *Server) Usage() *usage.Tracker { return s.usage }
 
+// SetUsageTracker replaces the usage tracker (e.g. one loaded from disk with
+// pricing). Call before Handler().
+func (s *Server) SetUsageTracker(t *usage.Tracker) { s.usage = t }
+
 // RegisterChatter adds an extra provider reachable from the OpenAI-compatible
 // endpoint, keyed by its Name (e.g. "openai", "gemini").
 func (s *Server) RegisterChatter(c provider.Chatter) { s.chatters[c.Name()] = c }
