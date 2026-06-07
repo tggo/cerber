@@ -160,6 +160,23 @@ func TestNative_StreamFlagDetected(t *testing.T) {
 	}
 }
 
+func TestNative_ForwardsUpstreamHeaders(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.15")
+	h.Set("Transfer-Encoding", "chunked") // hop-by-hop, must be dropped
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(&http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(`{"id":"x"}`))}, nil)
+	rec := do(t, s.Handler(), "POST", "/v1/messages", `{"model":"c"}`, clientKey)
+	if got := rec.Header().Get("Anthropic-Ratelimit-Unified-5h-Utilization"); got != "0.15" {
+		t.Errorf("ratelimit header not forwarded: %q", got)
+	}
+	if rec.Header().Get("Transfer-Encoding") != "" {
+		t.Error("hop-by-hop Transfer-Encoding should be dropped")
+	}
+}
+
 func TestNative_StreamRecordsUsage(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
 	stream := "event: message_start\n" +

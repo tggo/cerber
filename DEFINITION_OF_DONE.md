@@ -85,7 +85,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **DoD:**
 - `GET /healthz` → 200 `ok`.
 - Missing/invalid client key on any provider endpoint → 401.
-- `POST /v1/messages` → relays the Anthropic request/response verbatim (streaming preserved), injecting a credential.
+- `POST /v1/messages` → relays the Anthropic request/response verbatim (streaming preserved), injecting a credential; upstream response headers (incl. `Anthropic-Ratelimit-Unified-*`) are forwarded to the client, hop-by-hop headers dropped.
 - `POST /v1/chat/completions` → translates OpenAI→Anthropic→OpenAI (stream and non-stream); malformed OpenAI request → 400; upstream non-200 relayed as-is; untranslatable upstream body → 502.
 - On upstream 401/403/429 (or transport error), the credential is sidelined (cooldown) and the next is tried; all failing → 502; none available → 503.
 **Verified:** `internal/server` tests (92.9%) + live smoke test (healthz, 401, native passthrough, OpenAI translation against a fake upstream) — 2026-06-07.

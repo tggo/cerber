@@ -242,18 +242,14 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 		}
 		in, out := anthropicUsage(body)
 		s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
-		if ct := resp.Header.Get("Content-Type"); ct != "" {
-			w.Header().Set("Content-Type", ct)
-		}
+		copyUpstreamHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
 		return
 	}
 	// Streaming: relay the SSE through while parsing Anthropic usage events so
 	// token counts are recorded (Claude Code streams).
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
+	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	in, out := streamRelayAnthropicUsage(w, resp.Body)
 	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
@@ -535,12 +531,29 @@ func wantsStream(body []byte) bool {
 	return probe.Stream
 }
 
-// relay copies an upstream response (status, content-type, body) to the client,
+// hopByHop headers are connection-specific and must not be forwarded.
+var hopByHop = map[string]bool{
+	"connection": true, "keep-alive": true, "proxy-authenticate": true,
+	"proxy-authorization": true, "te": true, "trailer": true,
+	"transfer-encoding": true, "upgrade": true, "content-length": true,
+}
+
+// copyUpstreamHeaders forwards an upstream response's headers to the client,
+// dropping hop-by-hop ones, so faithful clients (e.g. Claude Code) see the
+// provider's rate-limit and metadata headers.
+func copyUpstreamHeaders(dst http.Header, src http.Header) {
+	for k, vs := range src {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		dst[k] = append([]string(nil), vs...)
+	}
+}
+
+// relay copies an upstream response (status, headers, body) to the client,
 // flushing as data arrives so streaming works.
 func relay(w http.ResponseWriter, resp *http.Response) {
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
+	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	streamCopy(w, resp.Body)
 }
@@ -640,9 +653,7 @@ func (s *Server) relayError(w http.ResponseWriter, resp *http.Response) {
 		zap.Int("status", resp.StatusCode),
 		zap.String("body", string(body)),
 	)
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
+	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
