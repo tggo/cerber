@@ -42,8 +42,28 @@ make lint     # gofmt + go vet
 See [`CLAUDE.md`](CLAUDE.md) for engineering conventions and
 [`DEFINITION_OF_DONE.md`](DEFINITION_OF_DONE.md) for the living spec.
 
+## Providers
+
+On `/v1/chat/completions`, cerber routes by model name:
+
+| Model prefix | Provider | How |
+|---|---|---|
+| `claude*` (default) | Anthropic | OpenAI↔Anthropic translation; also native `/v1/messages` |
+| `gpt* o1* o3* o4* chatgpt*` | OpenAI | passthrough |
+| `gemini*` | Gemini | OpenAI↔Gemini translation |
+
+Override routing with `providers.routing` in the config. Each provider pools
+multiple credentials with rotation; Anthropic adds OAuth refresh + Claude Code spoofing.
+
+## Observability
+
+- `GET /admin/stats` — JSON usage (requests/errors/tokens per credential + model)
+- `GET /metrics` — Prometheus counters
+- `GET /dashboard` — self-contained usage UI
+- Structured zap logs to `./logs/<date>.log` + stdout
+
 ## Status
 
-Anthropic provider is complete (both dialects, streaming, OAuth refresh + Claude
-Code spoofing). Planned: interactive `--claude-login`, token persistence, more
-providers (OpenAI/Gemini/Grok), usage tracking, and a web UI.
+All three providers work end-to-end (live-tested). Planned: interactive
+`--claude-login`, OAuth token persistence across restart, Grok, and tools/function
+calling on the OpenAI-compatible endpoint for non-OpenAI providers.

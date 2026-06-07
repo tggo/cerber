@@ -8,8 +8,9 @@ Assume cerber runs at `http://localhost:8080` and a client key `my-client-key`.
 ## OpenAI-compatible (`/v1/chat/completions`)
 
 Works with any OpenAI-style client. Set the base URL to cerber and the API key to
-a cerber access key. Use an **Anthropic model id** (cerber routes to Anthropic and
-does not map OpenAI model names).
+a cerber access key. cerber **routes by model name**: `gpt*/o1*/o3*/o4*/chatgpt*` →
+OpenAI, `gemini*` → Gemini, everything else (e.g. `claude*`) → Anthropic. Override
+with `providers.routing` in the config. The target provider must be configured.
 
 ### curl
 

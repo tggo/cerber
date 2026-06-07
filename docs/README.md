@@ -43,6 +43,11 @@ curl -s localhost:8080/v1/chat/completions \
 |---|---|---|
 | `GET /healthz` | — | Liveness probe, returns `ok`. |
 | `POST /v1/messages` | Anthropic native | Pass-through to Anthropic Messages (streaming preserved). |
-| `POST /v1/chat/completions` | OpenAI-compatible | Translated to/from Anthropic (stream + non-stream). |
+| `POST /v1/chat/completions` | OpenAI-compatible | Routed by model to Anthropic/OpenAI/Gemini (stream + non-stream). |
+| `GET /admin/stats` | — | Usage JSON (requires client key). |
+| `GET /metrics` | — | Prometheus metrics (unauthenticated). |
+| `GET /dashboard` | — | Self-contained usage dashboard. |
 
-All provider endpoints require a client API key — see [Configuration](configuration.md#access).
+Provider endpoints require a client API key — see [Configuration](configuration.md#access).
+Model routing on `/v1/chat/completions`: `gpt*/o1*/o3*/o4*/chatgpt*` → OpenAI,
+`gemini*` → Gemini, else Anthropic (override via `providers.routing`).
