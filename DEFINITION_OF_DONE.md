@@ -158,6 +158,16 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Untranslatable request → 400; Gemini upstream errors relayed.
 **Verified:** `internal/translator` Gemini tests (93%) + `internal/provider/gemini` (92%) + live `make integration` (Gemini route → "pong" via real generativelanguage API) — 2026-06-07.
 
+## Claude Code login (`--claude-login`) + token persistence
+**What:** an interactive OAuth flow that logs into Claude Code and saves the tokens to disk, loaded at startup and refreshed in place.
+**DoD:**
+- `cerber --claude-login` runs the PKCE flow: starts a local callback server (default port `54545`, `--login-port` overrides), opens the browser (or prints the URL with `--no-browser`), and exchanges the code for tokens.
+- State is verified (CSRF); auth errors / timeout / port-in-use produce clear errors.
+- Tokens are written to `<auth_dir>/<name>.json` (mode `0600`, dir `0700`; default `./auths`, gitignored).
+- On startup, tokens in `auth_dir` are loaded and merged with config Anthropic credentials; an empty merged set fails with a hint to run `--claude-login`.
+- Refreshed OAuth tokens are persisted back to `auth_dir`, so logins survive restarts.
+**Verified:** `internal/auth/claude` + `internal/auth/login` + `internal/tokenstore` tests + server persister test + live smoke (`--claude-login --no-browser` prints the real claude.ai authorize URL and serves the callback) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

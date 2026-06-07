@@ -52,21 +52,28 @@ How cerber uses it:
   `9d1c250a-e61b-44d9-88ed-5944d1962f5e`) and uses the fresh token. Anthropic
   rotates the refresh token on each refresh.
 
-### Obtaining the OAuth tokens
+### Obtaining the OAuth tokens — `cerber --claude-login`
 
-The OAuth values come from a Claude Code authorization (`claude.ai/oauth/authorize`
-→ `api.anthropic.com/v1/oauth/token`, PKCE). For now, supply tokens you already
-have (e.g. from an existing Claude Code login) in the config.
+Run the interactive login; it performs the OAuth PKCE flow and saves the tokens:
 
-> **Planned:** an interactive `cerber --claude-login` command that runs the OAuth
-> PKCE flow (local callback on port `54545`, with a `--no-browser` option to print
-> the URL) and writes the tokens for you. Until then, OAuth is configured by hand.
+```bash
+cerber --claude-login                 # opens your browser, callback on :54545
+cerber --claude-login --no-browser    # prints the URL instead of opening a browser
+cerber --claude-login --login-port 5555   # use a different callback port
+cerber --claude-login --auth-dir ./auths   # where tokens are written (default ./auths)
+```
+
+After you authorize in the browser, tokens are written to `<auth_dir>/<email>.json`
+(file mode `0600`). On the next `cerber` start they are **loaded automatically** and
+merged with any credentials in `config.yaml` — you do not need to paste them into
+the config. Refreshed tokens are written back to the same file, so logins survive
+restarts.
+
+You can also still supply OAuth tokens by hand in `config.yaml` (above) if you
+obtained them elsewhere.
 
 ### Known limitations (current)
 
-- Refreshed tokens are kept **in memory only** — they are not yet written back to
-  disk, so after a restart cerber refreshes again from the `refresh_token` in your
-  config. If that token has since been rotated away, re-supply a current one.
 - Refresh is **proactive (by expiry)** only; there is no reactive refresh on a
   `401` yet.
 - cerber sends the **minimal** Claude Code system prefix, not the full Claude Code

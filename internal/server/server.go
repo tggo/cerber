@@ -52,6 +52,7 @@ type Server struct {
 	usage       *usage.Tracker
 	chatters    map[string]provider.Chatter
 	routes      []config.Route
+	persist     func(name string, tok credential.OAuthTokens)
 	cooldown    time.Duration
 	refreshSkew time.Duration
 	now         func() time.Time
@@ -94,6 +95,10 @@ func (s *Server) RegisterChatter(c provider.Chatter) { s.chatters[c.Name()] = c 
 
 // SetRoutes installs model-prefix routing overrides.
 func (s *Server) SetRoutes(routes []config.Route) { s.routes = routes }
+
+// SetTokenPersister installs a callback invoked with refreshed OAuth tokens so
+// they can be persisted to disk (keyed by credential name).
+func (s *Server) SetTokenPersister(f func(name string, tok credential.OAuthTokens)) { s.persist = f }
 
 // route returns the provider name a model should go to on the OpenAI endpoint.
 // Configured prefixes win; otherwise built-in defaults; default is "anthropic".
@@ -330,6 +335,9 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 				continue
 			}
 			s.creds.UpdateOAuth(cred, tok)
+			if s.persist != nil {
+				s.persist(cred.Name(), tok)
+			}
 		}
 		s.log.Debug("dispatch", zap.String("credential", cred.Name()), zap.Bool("stream", stream), zap.Int("attempt", i+1))
 		resp, err := s.upstream.Send(ctx, body, stream, cred, clientHeader)

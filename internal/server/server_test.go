@@ -280,6 +280,30 @@ func TestRefresh_BeforeSendWhenExpiring(t *testing.T) {
 	}
 }
 
+func TestRefresh_PersistsTokens(t *testing.T) {
+	now := time.Unix(1000, 0)
+	store := oauthStore(t, "stale", now.Add(time.Second))
+	up := mocks.NewUpstream(t)
+	ref := mocks.NewRefresher(t)
+	s := New(access.New([]string{clientKey}), store, up, ref, nil)
+	s.now = func() time.Time { return now }
+
+	var persistedName string
+	var persistedTok credential.OAuthTokens
+	s.SetTokenPersister(func(name string, tok credential.OAuthTokens) {
+		persistedName, persistedTok = name, tok
+	})
+	ref.EXPECT().Refresh(mock.Anything, mock.Anything).
+		Return(credential.OAuthTokens{AccessToken: "fresh", RefreshToken: "r1", ExpiresAt: now.Add(time.Hour)}, nil)
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"ok"}`), nil)
+
+	do(t, s.Handler(), "POST", "/v1/messages", `{}`, clientKey)
+	if persistedName != "o" || persistedTok.AccessToken != "fresh" {
+		t.Errorf("persist = %q %+v", persistedName, persistedTok)
+	}
+}
+
 func TestRefresh_NotTriggeredWhenValid(t *testing.T) {
 	now := time.Unix(1000, 0)
 	store := oauthStore(t, "valid", now.Add(time.Hour)) // far from expiry

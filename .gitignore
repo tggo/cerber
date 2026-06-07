@@ -6,3 +6,4 @@ coverage.gate.out
 .env
 logs/
 config.yaml
+auths/

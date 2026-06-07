@@ -9,6 +9,11 @@ logging:
   level: "info"   # debug | info | warn | error
   dir: "./logs"
 
+# Directory where `cerber --claude-login` writes OAuth tokens; loaded at startup
+# and merged with the Anthropic credentials below. Refreshed tokens are written
+# back here, so OAuth logins survive restarts.
+auth_dir: "./auths"
+
 # Client API keys allowed to call cerber (clients send one of these as
 # `Authorization: Bearer <key>` or `x-api-key: <key>`).
 access:

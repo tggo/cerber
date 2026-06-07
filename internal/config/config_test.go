@@ -91,7 +91,6 @@ func TestParse_Errors(t *testing.T) {
 		"empty access key":  "access: {keys: [\"  \"]}\nproviders: {anthropic: {credentials: [{type: api_key, key: k}]}}",
 		"no providers":      "access: {keys: [k]}",
 		"bad base_url":      "access: {keys: [k]}\nproviders: {anthropic: {base_url: \"ftp://x\", credentials: [{type: api_key, key: k}]}}",
-		"no creds":          "access: {keys: [k]}\nproviders: {anthropic: {credentials: []}}",
 		"apikey no key":     "access: {keys: [k]}\nproviders: {anthropic: {credentials: [{type: api_key}]}}",
 		"oauth no token":    "access: {keys: [k]}\nproviders: {anthropic: {credentials: [{type: oauth}]}}",
 		"missing cred type": "access: {keys: [k]}\nproviders: {anthropic: {credentials: [{key: k}]}}",

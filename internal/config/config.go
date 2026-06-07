@@ -20,6 +20,7 @@ type Config struct {
 	Server    Server    `yaml:"server"`
 	Access    Access    `yaml:"access"`
 	Logging   Logging   `yaml:"logging"`
+	AuthDir   string    `yaml:"auth_dir"` // dir for OAuth tokens written by --claude-login
 	Providers Providers `yaml:"providers"`
 }
 
@@ -103,6 +104,7 @@ const (
 	defaultAddr            = ":8080"
 	defaultLogLevel        = "info"
 	defaultLogDir          = "./logs"
+	defaultAuthDir         = "./auths"
 	defaultAnthropicBase   = "https://api.anthropic.com"
 	defaultAnthropicVer    = "2023-06-01"
 	defaultAnthropicWaitNS = 120 * time.Second
@@ -148,6 +150,9 @@ func (c *Config) applyDefaults() {
 	if c.Logging.Dir == "" {
 		c.Logging.Dir = defaultLogDir
 	}
+	if c.AuthDir == "" {
+		c.AuthDir = defaultAuthDir
+	}
 	if a := c.Providers.Anthropic; a != nil {
 		if a.BaseURL == "" {
 			a.BaseURL = defaultAnthropicBase
@@ -192,17 +197,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: no providers configured")
 	}
 	if p.Anthropic != nil {
-		if err := validateCreds("anthropic", p.Anthropic.BaseURL, p.Anthropic.Credentials); err != nil {
+		// Anthropic credentials may be empty here: --claude-login writes OAuth
+		// tokens to auth_dir which are merged in at startup. main enforces a
+		// non-empty merged set.
+		if err := validateCreds("anthropic", p.Anthropic.BaseURL, p.Anthropic.Credentials, false); err != nil {
 			return err
 		}
 	}
 	if p.OpenAI != nil {
-		if err := validateCreds("openai", p.OpenAI.BaseURL, p.OpenAI.Credentials); err != nil {
+		if err := validateCreds("openai", p.OpenAI.BaseURL, p.OpenAI.Credentials, true); err != nil {
 			return err
 		}
 	}
 	if p.Gemini != nil {
-		if err := validateCreds("gemini", p.Gemini.BaseURL, p.Gemini.Credentials); err != nil {
+		if err := validateCreds("gemini", p.Gemini.BaseURL, p.Gemini.Credentials, true); err != nil {
 			return err
 		}
 	}
@@ -219,13 +227,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateCreds checks a provider's base URL and credentials.
-func validateCreds(name, baseURL string, creds []Credential) error {
+// validateCreds checks a provider's base URL and credentials. If requireCred is
+// false, an empty credential list is allowed (credentials may come from disk).
+func validateCreds(name, baseURL string, creds []Credential, requireCred bool) error {
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("config: providers.%s.base_url must be an http(s) URL, got %q", name, baseURL)
 	}
-	if len(creds) == 0 {
+	if requireCred && len(creds) == 0 {
 		return fmt.Errorf("config: providers.%s.credentials must list at least one credential", name)
 	}
 	for i := range creds {
