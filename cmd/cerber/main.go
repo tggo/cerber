@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -42,6 +43,8 @@ func main() {
 	genCert := flag.Bool("gen-cert", false, "generate a CA + cert for TLS impersonation (DOCKER ONLY), then exit")
 	certDir := flag.String("cert-dir", "./certs", "with --gen-cert: output directory")
 	impersonate := flag.String("impersonate", "api.anthropic.com", "with --gen-cert: comma-separated hostnames")
+	seedCreds := flag.Bool("seed-claude-creds", false, "write ~/.claude/.credentials.json from auth_dir (impersonation), then exit")
+	credsOut := flag.String("creds-out", "", "with --seed-claude-creds: output path (default ~/.claude/.credentials.json)")
 	flag.Parse()
 
 	if *showVersion {
@@ -51,6 +54,15 @@ func main() {
 
 	if *genCert {
 		runGenCert(*certDir, *impersonate)
+		return
+	}
+
+	if *seedCreds {
+		dir := *authDir
+		if dir == "" {
+			dir = "./auths"
+		}
+		runSeedClaudeCreds(dir, *credsOut)
 		return
 	}
 
@@ -121,7 +133,16 @@ func main() {
 	// bootstrap calls) to the real upstream, reusing the (DoH) transport.
 	if cfg.TLS.Enabled {
 		if target, perr := url.Parse(a.BaseURL); perr == nil {
-			srv.SetUpstreamProxy(target, httpClient.Transport)
+			// Inject cerber's pooled OAuth credential into proxied console calls so
+			// the client never needs valid auth (cerber is the sole token owner).
+			authToken := func() string {
+				c, cerr := store.NextOf(func(c *credential.Credential) bool { return c.Kind() == credential.KindOAuth })
+				if cerr != nil {
+					return ""
+				}
+				return c.AccessToken()
+			}
+			srv.SetUpstreamProxy(target, httpClient.Transport, authToken)
 			logger.Info("upstream reverse-proxy enabled for unhandled paths", zap.String("target", a.BaseURL))
 		}
 	}
@@ -207,6 +228,52 @@ func runGenCert(dir, impersonate string) {
 	fmt.Printf("  key  (server):     %s\n\n", f.Key)
 	fmt.Printf("In the container: export NODE_EXTRA_CA_CERTS=%s and map %s -> 127.0.0.1.\n",
 		f.CA, strings.Join(hosts, ", "))
+}
+
+// runSeedClaudeCreds writes a Claude Code credentials file from an OAuth token in
+// auth_dir, so Claude Code in the impersonation container believes it has a normal
+// Max login (no API key, no prompt). The token is given a far-future expiry so
+// Claude Code never refreshes it — cerber is the sole token owner and injects its
+// own pooled credential upstream.
+func runSeedClaudeCreds(authDir, out string) {
+	creds, err := tokenstore.Load(authDir)
+	if err != nil {
+		fatal("seed-claude-creds: %v", err)
+	}
+	var tok *config.Credential
+	for i := range creds {
+		if creds[i].Type == config.CredentialOAuth {
+			tok = &creds[i]
+			break
+		}
+	}
+	if tok == nil {
+		fatal("seed-claude-creds: no oauth credential in %s (run: cerber --claude-login)", authDir)
+	}
+	if out == "" {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			fatal("seed-claude-creds: home dir: %v", herr)
+		}
+		out = filepath.Join(home, ".claude", ".credentials.json")
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
+		fatal("seed-claude-creds: mkdir: %v", err)
+	}
+	payload := map[string]any{
+		"claudeAiOauth": map[string]any{
+			"accessToken":      tok.AccessToken,
+			"refreshToken":     tok.RefreshToken,
+			"expiresAt":        time.Now().AddDate(10, 0, 0).UnixMilli(),
+			"scopes":           []string{"user:inference", "user:profile"},
+			"subscriptionType": "max",
+		},
+	}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(out, data, 0o600); err != nil {
+		fatal("seed-claude-creds: write: %v", err)
+	}
+	fmt.Printf("Seeded Claude Code credentials at %s (from %s)\n", out, tok.Name)
 }
 
 // runClaudeLogin performs the interactive OAuth flow and saves the tokens.

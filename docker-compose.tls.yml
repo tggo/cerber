@@ -15,20 +15,21 @@ services:
     extra_hosts:
       - "api.anthropic.com:127.0.0.1"
     environment:
+      # Claude Code trusts cerber's CA. No ANTHROPIC_API_KEY — Claude Code is
+      # seeded from auth_dir at startup and behaves like a normal Max login, so it
+      # sees no key and no changes; cerber injects its pooled credential upstream.
       - NODE_EXTRA_CA_CERTS=/work/certs/ca.pem
-      # Gives Claude Code a token to send; cerber ignores it (allow_localhost) and
-      # uses its own credentials upstream. For 1M context via a Max subscription,
-      # mount your host login instead (see the ~/.claude volume below).
-      - ANTHROPIC_API_KEY=local
     volumes:
       - ./.env:/work/.env:ro
       - ./config.tls.yaml:/work/config.tls.yaml:ro
       - ./auths:/work/auths
       - ./certs:/work/certs
       - ./logs:/work/logs
-      # Optional: reuse your host Claude Code login (Max) so 1M context activates.
-      # - ${HOME}/.claude:/root/.claude
+      - claude-home:/root/.claude   # Claude Code home (seeded creds + sessions)
     ports:
       - "127.0.0.1:8088:8080"   # dashboard/stats/metrics on the host
     tty: true
     stdin_open: true
+
+volumes:
+  claude-home:

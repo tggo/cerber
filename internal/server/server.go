@@ -114,14 +114,23 @@ func (s *Server) SetAllowLocalhost(v bool) { s.allowLocalhost = v }
 
 // SetUpstreamProxy makes cerber a transparent reverse proxy for any path it does
 // not specifically handle (e.g. /api/claude_code/*). Used by TLS impersonation so
-// Claude Code's console/bootstrap calls reach the real upstream with the client's
-// own auth. transport should resolve the upstream (e.g. via DoH).
-func (s *Server) SetUpstreamProxy(target *url.URL, transport http.RoundTripper) {
+// Claude Code's console/bootstrap calls reach the real upstream. transport should
+// resolve the upstream (e.g. via DoH). If authToken is non-nil and returns a
+// token, it replaces the client's Authorization (so console calls run on cerber's
+// pooled credential, not whatever the client sent) — keeping cerber the sole
+// token owner.
+func (s *Server) SetUpstreamProxy(target *url.URL, transport http.RoundTripper, authToken func() string) {
 	s.upstreamProxy = &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
 			r.URL.Scheme = target.Scheme
 			r.URL.Host = target.Host
 			r.Host = target.Host
+			if authToken != nil {
+				if tok := authToken(); tok != "" {
+					r.Header.Del("x-api-key")
+					r.Header.Set("Authorization", "Bearer "+tok)
+				}
+			}
 		},
 		Transport: transport,
 	}

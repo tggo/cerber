@@ -474,7 +474,7 @@ func TestCatchAll(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
-	s.SetUpstreamProxy(target, nil)
+	s.SetUpstreamProxy(target, nil, nil)
 	rec := do(t, s.Handler(), "GET", "/api/claude_code/settings", "", "")
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "proxied:/api/claude_code/settings") {
 		t.Errorf("proxied = %d %q", rec.Code, rec.Body.String())
