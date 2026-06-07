@@ -220,6 +220,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	}
 	model := extractModel(body)
 	stream := wantsStream(body)
+	s.log.Debug("native request", debugRequestFields(body, stream)...)
 	resp, cred, err := s.dispatch(r.Context(), body, stream, r.Header, credFilter(r))
 	if err != nil {
 		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
@@ -252,6 +253,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	in, out := streamRelayAnthropicUsage(w, resp.Body)
+	s.log.Debug("native usage", zap.String("credential", cred), zap.Int64("input", in), zap.Int64("output", out), zap.Bool("stream", true))
 	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
 }
 
@@ -442,6 +444,32 @@ func credFilter(r *http.Request) func(*credential.Credential) bool {
 		return func(c *credential.Credential) bool { return c.Kind() == credential.KindAPIKey }
 	default:
 		return nil
+	}
+}
+
+// debugRequestFields inspects an Anthropic request body for debug logging,
+// without dumping message content (which may be large/sensitive).
+func debugRequestFields(body []byte, stream bool) []zap.Field {
+	var probe struct {
+		Model       string            `json:"model"`
+		MaxTokens   int               `json:"max_tokens"`
+		System      json.RawMessage   `json:"system"`
+		Messages    []json.RawMessage `json:"messages"`
+		Tools       []json.RawMessage `json:"tools"`
+		ContextMgmt json.RawMessage   `json:"context_management"`
+		Thinking    json.RawMessage   `json:"thinking"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	return []zap.Field{
+		zap.String("model", probe.Model),
+		zap.Bool("stream", stream),
+		zap.Int("body_bytes", len(body)),
+		zap.Int("max_tokens", probe.MaxTokens),
+		zap.Int("messages", len(probe.Messages)),
+		zap.Int("tools", len(probe.Tools)),
+		zap.Int("system_bytes", len(probe.System)),
+		zap.Bool("context_management", len(probe.ContextMgmt) > 0),
+		zap.Bool("thinking", len(probe.Thinking) > 0),
 	}
 }
 
