@@ -15,7 +15,7 @@ build:
 # Unit tests + coverage gate. Excludes integration-tagged tests and the thin
 # cmd/ wiring layer (which is exercised by integration/e2e, not unit tests).
 test: cover
-	@grep -vE '^cerber/cmd/|/mocks/' coverage.out > coverage.gate.out; \
+	@grep -vE '/cmd/|/mocks/' coverage.out > coverage.gate.out; \
 	total=$$(go tool cover -func=coverage.gate.out | awk '/^total:/ {print $$3}' | tr -d '%'); \
 	echo "total coverage: $$total% (min $(COVERAGE_MIN)%)"; \
 	awk "BEGIN { exit !($$total >= $(COVERAGE_MIN)) }" || { echo "FAIL: coverage below $(COVERAGE_MIN)%"; exit 1; }

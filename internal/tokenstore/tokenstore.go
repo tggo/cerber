@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"cerber/internal/config"
+	"github.com/tggo/cerber/internal/config"
 )
 
 // Record is one persisted OAuth credential.

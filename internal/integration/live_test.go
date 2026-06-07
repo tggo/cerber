@@ -19,13 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"cerber/internal/access"
-	"cerber/internal/config"
-	"cerber/internal/credential"
-	"cerber/internal/provider/anthropic"
-	"cerber/internal/provider/gemini"
-	"cerber/internal/provider/openai"
-	"cerber/internal/server"
+	"github.com/tggo/cerber/internal/access"
+	"github.com/tggo/cerber/internal/config"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider/anthropic"
+	"github.com/tggo/cerber/internal/provider/gemini"
+	"github.com/tggo/cerber/internal/provider/openai"
+	"github.com/tggo/cerber/internal/server"
 
 	"go.uber.org/zap"
 )

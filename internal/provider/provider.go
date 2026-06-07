@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"cerber/internal/credential"
+	"github.com/tggo/cerber/internal/credential"
 )
 
 // HTTPDoer is the minimal HTTP client surface a provider needs. It is an

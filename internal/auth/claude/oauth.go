@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"cerber/internal/provider"
+	"github.com/tggo/cerber/internal/provider"
 )
 
 // OAuth endpoints and the public Claude Code client id (not a secret).

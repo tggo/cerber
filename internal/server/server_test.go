@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"cerber/internal/access"
-	"cerber/internal/config"
-	"cerber/internal/credential"
-	"cerber/internal/provider"
-	providermocks "cerber/internal/provider/mocks"
-	"cerber/internal/server/mocks"
+	"github.com/tggo/cerber/internal/access"
+	"github.com/tggo/cerber/internal/config"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
+	providermocks "github.com/tggo/cerber/internal/provider/mocks"
+	"github.com/tggo/cerber/internal/server/mocks"
 
 	"github.com/stretchr/testify/mock"
 )

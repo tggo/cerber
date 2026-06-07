@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cerber/internal/config"
+	"github.com/tggo/cerber/internal/config"
 )
 
 func apiKeyCfg(name, key string) config.Credential {

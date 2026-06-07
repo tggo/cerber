@@ -6,7 +6,7 @@ package metrics
 import (
 	"net/http"
 
-	"cerber/internal/usage"
+	"github.com/tggo/cerber/internal/usage"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"

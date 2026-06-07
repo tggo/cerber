@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"cerber/internal/credential"
-	"cerber/internal/provider"
-	"cerber/internal/translator"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
+	"github.com/tggo/cerber/internal/translator"
 )
 
 const defaultCooldown = 60 * time.Second

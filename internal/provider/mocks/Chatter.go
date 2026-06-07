@@ -3,7 +3,7 @@
 package mocks
 
 import (
-	provider "cerber/internal/provider"
+	provider "github.com/tggo/cerber/internal/provider"
 	context "context"
 	http "net/http"
 

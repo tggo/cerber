@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"cerber/internal/config"
+	"github.com/tggo/cerber/internal/config"
 )
 
 // Kind is the auth mechanism a credential uses.

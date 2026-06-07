@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"cerber/internal/config"
+	"github.com/tggo/cerber/internal/config"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {

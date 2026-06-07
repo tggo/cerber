@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"cerber/internal/usage"
+	"github.com/tggo/cerber/internal/usage"
 
 	"github.com/prometheus/client_golang/prometheus"
 )

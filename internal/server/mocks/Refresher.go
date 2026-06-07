@@ -3,7 +3,7 @@
 package mocks
 
 import (
-	credential "cerber/internal/credential"
+	credential "github.com/tggo/cerber/internal/credential"
 	context "context"
 
 	mock "github.com/stretchr/testify/mock"

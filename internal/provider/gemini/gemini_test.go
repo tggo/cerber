@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"cerber/internal/config"
-	"cerber/internal/credential"
-	"cerber/internal/provider"
-	"cerber/internal/provider/mocks"
+	"github.com/tggo/cerber/internal/config"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
+	"github.com/tggo/cerber/internal/provider/mocks"
 
 	"github.com/stretchr/testify/mock"
 )

@@ -22,14 +22,14 @@ import (
 	"strings"
 	"time"
 
-	"cerber/internal/access"
-	"cerber/internal/config"
-	"cerber/internal/credential"
-	"cerber/internal/metrics"
-	"cerber/internal/provider"
-	"cerber/internal/quota"
-	"cerber/internal/translator"
-	"cerber/internal/usage"
+	"github.com/tggo/cerber/internal/access"
+	"github.com/tggo/cerber/internal/config"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/metrics"
+	"github.com/tggo/cerber/internal/provider"
+	"github.com/tggo/cerber/internal/quota"
+	"github.com/tggo/cerber/internal/translator"
+	"github.com/tggo/cerber/internal/usage"
 
 	"go.uber.org/zap"
 )

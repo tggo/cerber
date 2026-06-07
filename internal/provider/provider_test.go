@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"cerber/internal/config"
-	"cerber/internal/credential"
+	"github.com/tggo/cerber/internal/config"
+	"github.com/tggo/cerber/internal/credential"
 )
 
 func store(t *testing.T, n int) *credential.Store {

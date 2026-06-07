@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"cerber/internal/credential"
-	"cerber/internal/provider"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
 )
 
 // ClaudeCodeClientID is the public OAuth client id used by the Claude Code CLI.

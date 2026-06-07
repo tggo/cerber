@@ -1,4 +1,4 @@
-module cerber
+module github.com/tggo/cerber
 
 go 1.25
 

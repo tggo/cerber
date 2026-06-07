@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"cerber/internal/provider/mocks"
+	"github.com/tggo/cerber/internal/provider/mocks"
 
 	"github.com/stretchr/testify/mock"
 )

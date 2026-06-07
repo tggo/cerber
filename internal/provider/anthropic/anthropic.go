@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"cerber/internal/credential"
-	"cerber/internal/provider"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
 )
 
 // MessagesPath is the Anthropic Messages endpoint.

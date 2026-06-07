@@ -13,8 +13,8 @@ import (
 	"runtime"
 	"time"
 
-	"cerber/internal/auth/claude"
-	"cerber/internal/provider"
+	"github.com/tggo/cerber/internal/auth/claude"
+	"github.com/tggo/cerber/internal/provider"
 )
 
 // Options configures a Claude login.

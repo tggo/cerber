@@ -9,11 +9,11 @@ outpkg: "mocks"
 mockname: "{{.InterfaceName}}"
 filename: "{{.InterfaceName}}.go"
 packages:
-  cerber/internal/provider:
+  github.com/tggo/cerber/internal/provider:
     interfaces:
       HTTPDoer:
       Chatter:
-  cerber/internal/server:
+  github.com/tggo/cerber/internal/server:
     interfaces:
       Upstream:
       Refresher:

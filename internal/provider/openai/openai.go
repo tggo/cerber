@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"cerber/internal/credential"
-	"cerber/internal/provider"
+	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
 )
 
 // ChatPath is the OpenAI chat-completions endpoint.
