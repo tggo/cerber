@@ -123,6 +123,14 @@ func (s *Server) route(model string) string {
 // Handler returns the HTTP handler for the API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Root responds 200 to clients (e.g. Claude Code) that probe the base URL
+	// with GET/HEAD "/" for connectivity. {$} matches only the exact path, so
+	// unknown paths still 404. A GET handler also serves HEAD.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "cerber\n")
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")

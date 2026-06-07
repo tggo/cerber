@@ -364,6 +364,22 @@ func TestStats_RecordsAndServes(t *testing.T) {
 	}
 }
 
+func TestRoot(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	h := s.Handler()
+	// GET / and HEAD / (clients like Claude Code probe the base URL) -> 200
+	if rec := do(t, h, "GET", "/", "", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "cerber") {
+		t.Errorf("GET / = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, h, "HEAD", "/", "", ""); rec.Code != 200 {
+		t.Errorf("HEAD / = %d", rec.Code)
+	}
+	// Unknown paths still 404 (root handler is exact-match only).
+	if rec := do(t, h, "GET", "/nope", "", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /nope = %d, want 404", rec.Code)
+	}
+}
+
 func TestMetricsAndDashboardServed(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
 	h := s.Handler()
