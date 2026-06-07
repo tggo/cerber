@@ -49,6 +49,17 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Key comparison is constant-time and scans all keys (no timing/which-key leak).
 **Verified:** `internal/access` tests, 100% coverage — 2026-06-07.
 
+## Anthropic upstream client
+**What:** sends Anthropic Messages requests to the configured base URL with correct per-credential auth headers.
+**DoD:**
+- POSTs to `{base_url}/v1/messages` with `anthropic-version` and JSON body intact.
+- api_key credential → `x-api-key` header, no Authorization.
+- oauth credential → `Authorization: Bearer …` + `anthropic-beta`, no x-api-key.
+- `Accept: text/event-stream` when streaming, else `application/json`.
+- Only ever contacts the configured Anthropic base URL.
+- Known gaps (slice #1): OAuth token refresh and Claude-Code system-prompt spoofing not yet implemented.
+**Verified:** `internal/provider/anthropic` tests (mockery HTTPDoer), 100% coverage — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

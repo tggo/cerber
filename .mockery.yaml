@@ -1,13 +1,14 @@
 # mockery v2 config. Mocks are generated, never hand-written (see CLAUDE.md).
 # Run `make mocks` after adding/changing any mocked interface.
 with-expecter: true
+resolve-type-alias: False
+disable-version-string: True
+issue-845-fix: True
 dir: "{{.InterfaceDir}}/mocks"
 outpkg: "mocks"
 mockname: "{{.InterfaceName}}"
 filename: "{{.InterfaceName}}.go"
 packages:
-  # Add packages whose interfaces need mocking as slices are built, e.g.:
-  # cerber/internal/provider:
-  #   interfaces:
-  #     Provider:
-  #     HTTPDoer:
+  cerber/internal/provider:
+    interfaces:
+      HTTPDoer:
