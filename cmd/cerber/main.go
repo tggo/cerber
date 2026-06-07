@@ -263,13 +263,14 @@ func runSeedClaudeCreds(authDir, out string) {
 
 	// Credentials (.credentials.json): the OAuth token, with a far-future expiry so
 	// Claude Code never refreshes it (cerber is the sole token owner).
+	// No subscriptionType: Claude Code fetches the real account type from the API
+	// (faking it here misreports Team accounts as Max).
 	creds_payload := map[string]any{
 		"claudeAiOauth": map[string]any{
-			"accessToken":      tok.AccessToken,
-			"refreshToken":     tok.RefreshToken,
-			"expiresAt":        time.Now().AddDate(10, 0, 0).UnixMilli(),
-			"scopes":           []string{"user:inference", "user:profile"},
-			"subscriptionType": "max",
+			"accessToken":  tok.AccessToken,
+			"refreshToken": tok.RefreshToken,
+			"expiresAt":    time.Now().AddDate(10, 0, 0).UnixMilli(),
+			"scopes":       []string{"user:inference", "user:profile"},
 		},
 	}
 	data, _ := json.Marshal(creds_payload)
@@ -305,7 +306,15 @@ func runClaudeLogin(authDir string, port int, noBrowser bool) {
 	if err != nil {
 		fatal("claude login: %v", err)
 	}
+	// Name uniquely per account so multiple orgs on the same email don't collide.
 	name := tok.Email
+	if tok.OrgName != "" {
+		if name != "" {
+			name += "-" + tok.OrgName
+		} else {
+			name = tok.OrgName
+		}
+	}
 	if name == "" {
 		name = "claude"
 	}

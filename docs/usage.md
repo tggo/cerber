@@ -92,6 +92,7 @@ clients can pick which to use per request:
 |---|---|
 | `X-Cerber-Cred: oauth` | use only OAuth (Claude Code) credentials |
 | `X-Cerber-Cred: key` | use only API-key credentials |
+| `X-Cerber-Cred: <name>` | use the credential with that exact name (pick a specific account) |
 | (absent) | any credential, round-robin |
 
 ```bash

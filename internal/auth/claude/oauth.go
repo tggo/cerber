@@ -88,6 +88,8 @@ type Tokens struct {
 	AccessToken  string
 	RefreshToken string
 	Email        string
+	OrgName      string
+	OrgUUID      string
 	ExpiresAt    time.Time
 }
 
@@ -98,6 +100,10 @@ type tokenResponse struct {
 	Account      struct {
 		EmailAddress string `json:"email_address"`
 	} `json:"account"`
+	Organization struct {
+		UUID string `json:"uuid"`
+		Name string `json:"name"`
+	} `json:"organization"`
 }
 
 // Exchange swaps an authorization code (plus the PKCE verifier) for tokens. The
@@ -148,6 +154,8 @@ func Exchange(ctx context.Context, doer provider.HTTPDoer, code, state, verifier
 		AccessToken:  tr.AccessToken,
 		RefreshToken: tr.RefreshToken,
 		Email:        tr.Account.EmailAddress,
+		OrgName:      tr.Organization.Name,
+		OrgUUID:      tr.Organization.UUID,
 		ExpiresAt:    now().Add(time.Duration(tr.ExpiresIn) * time.Second),
 	}, nil
 }

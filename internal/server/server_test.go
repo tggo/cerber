@@ -658,6 +658,32 @@ func TestCredFilter_HeaderRoutesByKind(t *testing.T) {
 	}
 }
 
+func TestCredFilter_ByName(t *testing.T) {
+	store, err := credential.NewStore([]config.Credential{
+		{Type: config.CredentialAPIKey, Name: "acct-a", Key: "a"},
+		{Type: config.CredentialAPIKey, Name: "acct-b", Key: "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := mocks.NewUpstream(t)
+	s := New(access.New([]string{clientKey}), store, up, nil, nil)
+	var gotName string
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, cred *credential.Credential, _ http.Header) (*http.Response, error) {
+			gotName = cred.Name()
+			return resp(200, "application/json", `{"id":"ok"}`), nil
+		})
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+	r.Header.Set("Authorization", "Bearer "+clientKey)
+	r.Header.Set("X-Cerber-Cred", "acct-b")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+	if rec.Code != 200 || gotName != "acct-b" {
+		t.Errorf("name select = %d %q", rec.Code, gotName)
+	}
+}
+
 func TestCredFilter_OAuthRequestedButNone_503(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1)) // api_key only
 	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))

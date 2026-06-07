@@ -475,15 +475,19 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 
 // credFilter returns a credential matcher from the X-Cerber-Cred header:
 // "oauth" -> OAuth credentials only, "key"/"api_key" -> API-key credentials only,
-// anything else (or absent) -> any credential.
+// "" -> any; anything else selects a credential by exact name (for picking a
+// specific account when several are pooled).
 func credFilter(r *http.Request) func(*credential.Credential) bool {
-	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Cerber-Cred"))) {
+	v := strings.TrimSpace(r.Header.Get("X-Cerber-Cred"))
+	switch strings.ToLower(v) {
+	case "":
+		return nil
 	case "oauth":
 		return func(c *credential.Credential) bool { return c.Kind() == credential.KindOAuth }
 	case "key", "api_key", "apikey":
 		return func(c *credential.Credential) bool { return c.Kind() == credential.KindAPIKey }
 	default:
-		return nil
+		return func(c *credential.Credential) bool { return c.Name() == v }
 	}
 }
 
