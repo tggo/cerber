@@ -23,6 +23,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `make mocks` regenerates all mocks via mockery; no hand-written mocks exist.
 **Verified:** scaffold builds, coverage gate green at 100% — 2026-06-07.
 
+## Config — YAML load & validation
+**What:** cerber loads a YAML config (server addr, client access keys, Anthropic provider + credentials) with defaults and strict validation.
+**DoD:**
+- Missing file or malformed YAML → clear error, no panic.
+- Unknown YAML fields are rejected.
+- Defaults applied: addr `:8080`, base_url `https://api.anthropic.com`, version `2023-06-01`, timeout `120s`.
+- Rejects: no access keys, empty key, no providers, non-http(s) base_url, no credentials, api_key without key, oauth without access_token, unknown/missing credential type, bad duration.
+**Verified:** `internal/config` tests, 98.2% coverage — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**
