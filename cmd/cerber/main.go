@@ -91,6 +91,7 @@ func main() {
 
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
 	srv.SetRoutes(cfg.Providers.Routing)
+	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 	srv.SetTokenPersister(func(name string, tok credential.OAuthTokens) {
 		if _, perr := tokenstore.Save(cfg.AuthDir, name, tokenstore.Record{
 			Name: name, AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, ExpiresAt: tok.ExpiresAt,

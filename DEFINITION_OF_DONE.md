@@ -182,6 +182,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `providers.grok` config (base_url default `https://api.x.ai`); `grok` valid in `routing`.
 **Verified:** reuses `internal/provider/openai` (93%) + config grok tests + live `make integration` (grok route → "pong" via real api.x.ai, model grok-4.3) — 2026-06-07.
 
+## Access — allow_localhost
+**What:** optional open access for loopback clients, so a local Claude Code (which sends its own token) can use cerber without a matching key.
+**DoD:**
+- `access.allow_localhost: true` → requests from `127.0.0.1`/`::1` are accepted with any or no key; non-loopback clients still require a configured key.
+- Config validation allows empty `access.keys` when `allow_localhost` is true.
+**Verified:** `internal/server` allow-localhost + isLoopback tests + live (no-key/any-key localhost → 200) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

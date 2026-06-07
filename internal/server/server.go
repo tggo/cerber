@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -43,19 +44,20 @@ type Refresher interface {
 
 // Server holds the wired dependencies for the HTTP API.
 type Server struct {
-	access      *access.Checker
-	creds       *credential.Store
-	upstream    Upstream
-	refresher   Refresher
-	tr          *translator.Translator
-	log         *zap.Logger
-	usage       *usage.Tracker
-	chatters    map[string]provider.Chatter
-	routes      []config.Route
-	persist     func(name string, tok credential.OAuthTokens)
-	cooldown    time.Duration
-	refreshSkew time.Duration
-	now         func() time.Time
+	access         *access.Checker
+	creds          *credential.Store
+	upstream       Upstream
+	refresher      Refresher
+	tr             *translator.Translator
+	log            *zap.Logger
+	usage          *usage.Tracker
+	chatters       map[string]provider.Chatter
+	routes         []config.Route
+	persist        func(name string, tok credential.OAuthTokens)
+	allowLocalhost bool
+	cooldown       time.Duration
+	refreshSkew    time.Duration
+	now            func() time.Time
 }
 
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
@@ -99,6 +101,9 @@ func (s *Server) SetRoutes(routes []config.Route) { s.routes = routes }
 // SetTokenPersister installs a callback invoked with refreshed OAuth tokens so
 // they can be persisted to disk (keyed by credential name).
 func (s *Server) SetTokenPersister(f func(name string, tok credential.OAuthTokens)) { s.persist = f }
+
+// SetAllowLocalhost lets loopback clients call cerber without a valid key.
+func (s *Server) SetAllowLocalhost(v bool) { s.allowLocalhost = v }
 
 // route returns the provider name a model should go to on the OpenAI endpoint.
 // Configured prefixes win; otherwise built-in defaults; default is "anthropic".
@@ -422,11 +427,37 @@ func isCredFailure(status int) bool {
 }
 
 func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
+	if s.allowLocalhost && isLoopback(r.RemoteAddr) {
+		return true
+	}
 	if s.access.Allow(access.FromRequest(r)) {
 		return true
 	}
+	// Diagnostic without leaking secrets: which auth the client sent and how long
+	// the presented key is (helps tell an OAuth bearer from a short gateway key).
+	auth := r.Header.Get("Authorization")
+	scheme := ""
+	if i := strings.IndexByte(auth, ' '); i > 0 {
+		scheme = auth[:i]
+	}
+	s.log.Warn("unauthorized client",
+		zap.Bool("authorization", auth != ""),
+		zap.String("auth_scheme", scheme),
+		zap.Bool("x_api_key", r.Header.Get("x-api-key") != ""),
+		zap.Int("presented_len", len(access.FromRequest(r))),
+	)
 	writeError(w, http.StatusUnauthorized, "invalid or missing client API key")
 	return false
+}
+
+// isLoopback reports whether a "host:port" remote address is a loopback IP.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {

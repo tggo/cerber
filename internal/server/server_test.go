@@ -92,6 +92,44 @@ func TestAuth_Rejected(t *testing.T) {
 	}
 }
 
+func TestAllowLocalhost(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	s.SetAllowLocalhost(true)
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"ok"}`), nil)
+	h := s.Handler()
+
+	// loopback with NO key -> allowed
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+	r.RemoteAddr = "127.0.0.1:5555"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Errorf("loopback no-key = %d, want 200", rec.Code)
+	}
+
+	// non-loopback with NO key -> still 401
+	r2 := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`))
+	r2.RemoteAddr = "8.8.8.8:5555"
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, r2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("remote no-key = %d, want 401", rec2.Code)
+	}
+}
+
+func TestIsLoopback(t *testing.T) {
+	cases := map[string]bool{
+		"127.0.0.1:80": true, "[::1]:80": true, "8.8.8.8:80": false,
+		"192.0.2.1:1234": false, "garbage": false,
+	}
+	for in, want := range cases {
+		if got := isLoopback(in); got != want {
+			t.Errorf("isLoopback(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestNative_Passthrough(t *testing.T) {
 	s, up := newServer(t, newStore(t, 1))
 	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).

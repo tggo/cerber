@@ -36,8 +36,12 @@ type Logging struct {
 }
 
 // Access controls who may call cerber. Keys are the API keys clients present.
+// AllowLocalhost, when true, accepts any (or no) key from loopback addresses
+// (127.0.0.1/::1) — convenient for local single-user setups; remote clients still
+// need a valid key.
 type Access struct {
-	Keys []string `yaml:"keys"`
+	Keys           []string `yaml:"keys"`
+	AllowLocalhost bool     `yaml:"allow_localhost"`
 }
 
 // Providers groups upstream provider configuration. Only configured providers
@@ -212,8 +216,8 @@ func (c *Config) applyDefaults() {
 
 // Validate reports the first configuration error found.
 func (c *Config) Validate() error {
-	if len(c.Access.Keys) == 0 {
-		return fmt.Errorf("config: access.keys must list at least one client key")
+	if len(c.Access.Keys) == 0 && !c.Access.AllowLocalhost {
+		return fmt.Errorf("config: access.keys must list at least one client key (or set access.allow_localhost: true)")
 	}
 	for i, k := range c.Access.Keys {
 		if strings.TrimSpace(k) == "" {

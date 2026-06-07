@@ -17,6 +17,9 @@ auth_dir: "./auths"
 # Client API keys allowed to call cerber (clients send one of these as
 # `Authorization: Bearer <key>` or `x-api-key: <key>`).
 access:
+  # allow_localhost: accept any (or no) key from 127.0.0.1/::1 — handy for a local
+  # Claude Code that sends its own token. Remote clients still need a key below.
+  allow_localhost: true
   keys:
     - "change-me-client-key"
 
