@@ -113,6 +113,17 @@ const (
 	defaultProviderWaitNS  = 120 * time.Second
 )
 
+// DefaultAnthropic returns an Anthropic provider config with defaults applied and
+// no credentials. Used when the config omits the anthropic block but OAuth tokens
+// are present on disk (auth_dir).
+func DefaultAnthropic() *Anthropic {
+	return &Anthropic{
+		BaseURL: defaultAnthropicBase,
+		Version: defaultAnthropicVer,
+		Timeout: Duration(defaultAnthropicWaitNS),
+	}
+}
+
 // Load reads, parses, defaults and validates the config at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

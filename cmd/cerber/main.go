@@ -63,15 +63,18 @@ func main() {
 	}
 	defer func() { _ = closeLog() }()
 
-	a := cfg.Providers.Anthropic
-	if a == nil {
-		logger.Fatal("anthropic provider is currently required (it backs /v1/messages and the default route)")
-	}
-
 	// Merge OAuth tokens written by --claude-login with config credentials.
 	diskCreds, err := tokenstore.Load(cfg.AuthDir)
 	if err != nil {
 		logger.Fatal("load tokens", zap.Error(err))
+	}
+	a := cfg.Providers.Anthropic
+	if a == nil {
+		// No anthropic block: allow OAuth-only operation if tokens exist on disk.
+		if len(diskCreds) == 0 {
+			logger.Fatal("no anthropic provider configured; add one to config or run: cerber --claude-login")
+		}
+		a = config.DefaultAnthropic()
 	}
 	merged := append(append([]config.Credential{}, a.Credentials...), diskCreds...)
 	if len(merged) == 0 {

@@ -208,6 +208,24 @@ func TestParse_ProviderErrors(t *testing.T) {
 	}
 }
 
+func TestDefaultAnthropic(t *testing.T) {
+	a := DefaultAnthropic()
+	if a.BaseURL != defaultAnthropicBase || a.Version != defaultAnthropicVer || a.Timeout.Std() != defaultAnthropicWaitNS {
+		t.Errorf("DefaultAnthropic = %+v", a)
+	}
+	if len(a.Credentials) != 0 {
+		t.Errorf("expected no credentials, got %d", len(a.Credentials))
+	}
+}
+
+func TestParse_NilAnthropicWithOtherProvider(t *testing.T) {
+	// anthropic omitted, openai present -> valid (anthropic may be filled from auth_dir at runtime)
+	y := "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key, key: k}]}}"
+	if _, err := Parse([]byte(y)); err != nil {
+		t.Fatalf("expected valid config, got %v", err)
+	}
+}
+
 func TestLoad_FileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
