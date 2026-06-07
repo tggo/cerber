@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# commit-msg hook (skill git-dod):
+#  1) commits must use a known conventional type — no divergence (typos like
+#     "update:"/"feature:" are rejected);
+#  2) feat/fix must carry "Why:" and "Expected:" lines — the git log IS our
+#     work-log, so rationale + expected outcome live in the commit.
+# Merges/reverts/fixups are skipped. Bypass once with [skip-checks] in the message.
+set -u
+
+# Canonical commit types. KEEP IN SYNC with skill git-dod + CLAUDE.md.
+TYPES="feat fix refactor perf docs test chore style build ci revert"
+
+msgfile="${1:?commit-msg: missing message file arg}"
+body="$(grep -v '^#' "$msgfile" 2>/dev/null)"
+subject="$(printf '%s\n' "$body" | sed '/^[[:space:]]*$/d' | head -1)"
+
+# Skip auto-generated / non-authored commits.
+case "$subject" in
+  Merge*|Revert*|"fixup!"*|"squash!"*|"") exit 0 ;;
+esac
+
+# Explicit bypass.
+printf '%s' "$body" | grep -q '\[skip-checks\]' && exit 0
+
+fail() { { printf '✗ commit-msg: %s\n' "$1"; shift; for l in "$@"; do printf '  %s\n' "$l"; done; \
+           printf '  Bypass once: add [skip-checks] to the message.\n'; } >&2; exit 1; }
+
+# Require a conventional "type(scope): summary" prefix.
+type="$(printf '%s' "$subject" | sed -nE 's/^([a-z]+)(\([^)]*\))?!?:.*/\1/p')"
+[ -n "$type" ] || fail "use a conventional prefix 'type(scope): summary'." "Allowed types: $TYPES"
+
+# Type must be known (catches divergence / typos).
+case " $TYPES " in
+  *" $type "*) : ;;
+  *) fail "unknown commit type '$type'." "Allowed types: $TYPES" ;;
+esac
+
+# Behaviour types must explain themselves.
+case "$type" in
+  feat|fix)
+    ok=1
+    printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Why:[[:space:]]*\S'      || ok=0
+    printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Expected:[[:space:]]*\S' || ok=0
+    [ "$ok" = 1 ] || fail "'$type' commits must include 'Why:' and 'Expected:' lines." \
+      "Example:" \
+      "  fix(comic/parallax): keep snap stage inside the PWA safe area" \
+      "" \
+      "  Why: in standalone PWA the top of the image / bubbles hid under the island." \
+      "  Expected: no panel or bubble is clipped by the island; desktop unchanged."
+    ;;
+esac
+exit 0

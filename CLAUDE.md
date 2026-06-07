@@ -42,9 +42,22 @@ web/                   management UI (final phase)
 - Prefer table-driven tests. Test behavior through the package's public interface, not internals.
 - Network is never hit in unit tests — provider HTTP clients sit behind an interface and are mocked. Integration tests that hit real providers are build-tagged `//go:build integration` and excluded from the coverage gate run.
 
+## Definition of Done + git-as-log
+
+Two artifacts, never conflated: `DEFINITION_OF_DONE.md` = the living SPEC ("how it must
+behave now", one entry per feature, edited in place); **git history = the LOG** — per-file
+"why" via `git log --follow -- <file>` (no separate worklog).
+
+- Behaviour change → update the feature's `DEFINITION_OF_DONE.md` entry **in the same commit**. **Never invent a DoD — if criteria are unclear, ASK.**
+- `feat`/`fix` commit messages MUST carry `Why:` and `Expected:` lines; use only the
+  canonical types `feat fix refactor perf docs test chore style build ci revert`
+  (enforced by the `commit-msg` hook — `make hooks` installs it).
+- Refactor/test/chore with no behaviour change may skip the DoD entry — say so.
+
 ## Commands
 
 ```
+make hooks      # install git commit-msg hook (run once per clone)
 make mocks      # regenerate all mocks via mockery (run after changing any mocked interface)
 make test       # unit tests + coverage gate (>85%)
 make cover      # write coverage.out and print per-package coverage

@@ -1,6 +1,13 @@
 COVERAGE_MIN ?= 85.0
 
-.PHONY: build test cover mocks lint fmt vet tidy
+.PHONY: build test cover mocks lint fmt vet tidy hooks
+
+# Install git hooks (commit-msg). Pins a local hooksPath to defeat a global one.
+hooks:
+	@hd="$$(git rev-parse --absolute-git-dir)/hooks"; \
+	git config --local core.hooksPath "$$hd"; \
+	ln -sf "$$(pwd)/.githooks/commit-msg" "$$hd/commit-msg"; \
+	echo "installed commit-msg -> $$hd"
 
 build:
 	go build -o bin/cerber ./cmd/cerber
