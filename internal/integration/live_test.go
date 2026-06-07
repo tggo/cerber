@@ -23,6 +23,7 @@ import (
 	"cerber/internal/config"
 	"cerber/internal/credential"
 	"cerber/internal/provider/anthropic"
+	"cerber/internal/provider/gemini"
 	"cerber/internal/provider/openai"
 	"cerber/internal/server"
 
@@ -139,6 +140,54 @@ func TestLive_OpenAIRoute(t *testing.T) {
 		t.Fatalf("unexpected openai response: %s", raw)
 	}
 	t.Logf("openai route OK: %q", r.Choices[0].Message.Content)
+}
+
+func geminiKey(t *testing.T) string {
+	t.Helper()
+	_ = config.LoadEnvFile("../../.env")
+	k := os.Getenv("GEMINI_KEY")
+	if k == "" {
+		t.Skip("GEMINI_KEY not set; skipping live Gemini integration test")
+	}
+	return k
+}
+
+func TestLive_GeminiRoute(t *testing.T) {
+	store, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "playground", Key: apiKey(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Timeout: 60 * time.Second}
+	srv := server.New(access.New([]string{clientKey}), store,
+		anthropic.New(baseURL, "2023-06-01", hc), anthropic.NewRefresher(baseURL, hc), zap.NewNop())
+	gstore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "g", Key: geminiKey(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.RegisterChatter(gemini.New("https://generativelanguage.googleapis.com", gstore, &http.Client{Timeout: 60 * time.Second}))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	body := `{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Reply with exactly the word: pong"}]}`
+	status, raw := post(t, ts.URL+"/v1/chat/completions", body)
+	if status != http.StatusOK {
+		t.Fatalf("status %d: %s", status, raw)
+	}
+	var r struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("parse: %v (%s)", err, raw)
+	}
+	if r.Object != "chat.completion" || len(r.Choices) == 0 || strings.TrimSpace(r.Choices[0].Message.Content) == "" {
+		t.Fatalf("unexpected gemini response: %s", raw)
+	}
+	t.Logf("gemini route OK: %q", r.Choices[0].Message.Content)
 }
 
 func TestLive_NativeMessages(t *testing.T) {

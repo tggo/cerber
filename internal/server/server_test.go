@@ -448,6 +448,19 @@ func TestChatter_ErrorRelayed(t *testing.T) {
 	}
 }
 
+func TestChatter_BadRequest_400(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	ch := providermocks.NewChatter(t)
+	ch.EXPECT().Name().Return("gemini").Maybe()
+	s.RegisterChatter(ch)
+	ch.EXPECT().Chat(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, &provider.BadRequestError{Err: errors.New("missing model")})
+	rec := do(t, s.Handler(), "POST", "/v1/chat/completions", `{"model":"gemini-x","messages":[{"role":"user","content":"x"}]}`, clientKey)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("code %d, want 400", rec.Code)
+	}
+}
+
 func TestDispatch_NoneAvailable_503(t *testing.T) {
 	store := newStore(t, 1)
 	// Put the only credential into cooldown so Next() returns ErrNoneAvailable.

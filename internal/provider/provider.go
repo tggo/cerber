@@ -37,6 +37,13 @@ type Chatter interface {
 	Chat(ctx context.Context, openaiBody []byte, stream bool, clientHeader http.Header) (*Response, error)
 }
 
+// BadRequestError marks a client-side error (e.g. an untranslatable request) so
+// callers can map it to HTTP 400 instead of a 502 upstream error.
+type BadRequestError struct{ Err error }
+
+func (e *BadRequestError) Error() string { return e.Err.Error() }
+func (e *BadRequestError) Unwrap() error { return e.Err }
+
 // Rotate sends through each credential in turn, sidelining (cooldown) any that
 // fail with a transport error or an auth/rate-limit status, until one succeeds.
 // It returns the successful response, the credential name used, and an error.

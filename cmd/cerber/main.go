@@ -14,6 +14,7 @@ import (
 	"cerber/internal/credential"
 	"cerber/internal/logging"
 	"cerber/internal/provider/anthropic"
+	"cerber/internal/provider/gemini"
 	"cerber/internal/provider/openai"
 	"cerber/internal/server"
 	"cerber/internal/version"
@@ -69,6 +70,15 @@ func main() {
 		}
 		srv.RegisterChatter(openai.New(o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
+	}
+
+	if g := cfg.Providers.Gemini; g != nil {
+		gstore, err := credential.NewStore(g.Credentials)
+		if err != nil {
+			logger.Fatal("gemini credentials", zap.Error(err))
+		}
+		srv.RegisterChatter(gemini.New(g.BaseURL, gstore, &http.Client{Timeout: g.Timeout.Std()}))
+		logger.Info("gemini provider enabled", zap.Int("credentials", gstore.Len()))
 	}
 
 	httpSrv := &http.Server{

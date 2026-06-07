@@ -150,6 +150,14 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Anthropic is currently required as the base provider; OpenAI/Gemini are optional.
 **Verified:** `internal/provider/openai` (93%) + `internal/provider` Rotate (96%) + server routing tests + live `make integration` (OpenAI route → "pong" via real api.openai.com) — 2026-06-07.
 
+## Gemini provider
+**What:** Gemini supported as an upstream on the OpenAI-compatible endpoint via OpenAI↔Gemini translation.
+**DoD:**
+- `/v1/chat/completions` with a `gemini*` model → translated to Gemini generateContent (`x-goog-api-key`, credential rotation), response translated back to OpenAI (text, finish_reason, usage); stream → `:streamGenerateContent?alt=sse` translated to OpenAI chunks + `[DONE]`.
+- System messages → `systemInstruction`; user/assistant → `user`/`model`; text + base64(data:) images supported; http image URLs/tools rejected (400).
+- Untranslatable request → 400; Gemini upstream errors relayed.
+**Verified:** `internal/translator` Gemini tests (93%) + `internal/provider/gemini` (92%) + live `make integration` (Gemini route → "pong" via real generativelanguage API) — 2026-06-07.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

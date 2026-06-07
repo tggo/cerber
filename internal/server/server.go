@@ -449,6 +449,11 @@ func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider
 	resp, err := c.Chat(r.Context(), body, stream, r.Header)
 	if err != nil {
 		s.usage.Record(usage.Event{Model: model, IsError: true})
+		var bad *provider.BadRequestError
+		if errors.As(err, &bad) {
+			writeError(w, http.StatusBadRequest, bad.Error())
+			return
+		}
 		writeUpstreamError(w, err)
 		return
 	}
