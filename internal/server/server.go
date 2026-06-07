@@ -27,6 +27,7 @@ import (
 	"cerber/internal/credential"
 	"cerber/internal/metrics"
 	"cerber/internal/provider"
+	"cerber/internal/quota"
 	"cerber/internal/translator"
 	"cerber/internal/usage"
 
@@ -57,6 +58,7 @@ type Server struct {
 	tr             *translator.Translator
 	log            *zap.Logger
 	usage          *usage.Tracker
+	quota          *quota.Tracker
 	chatters       map[string]provider.Chatter
 	routes         []config.Route
 	persist        func(name string, tok credential.OAuthTokens)
@@ -88,6 +90,7 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		tr:          translator.New(),
 		log:         logger,
 		usage:       usage.New(),
+		quota:       quota.New(),
 		chatters:    map[string]provider.Chatter{},
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
@@ -257,13 +260,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.usage.Snapshot())
 }
 
-// accountView is one credential's state plus its usage, for orchestration.
+// accountView is one credential's state plus its usage and quota, for orchestration.
 type accountView struct {
 	credential.Info
-	Requests     int64 `json:"requests"`
-	Errors       int64 `json:"errors"`
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	Requests     int64           `json:"requests"`
+	Errors       int64           `json:"errors"`
+	InputTokens  int64           `json:"input_tokens"`
+	OutputTokens int64           `json:"output_tokens"`
+	Quota        *quota.Snapshot `json:"quota,omitempty"`
 }
 
 // handleAccounts lists credentials with their state and usage (orchestration view).
@@ -278,10 +282,14 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	var out []accountView
 	for _, info := range s.creds.List() {
 		st := use[info.Name]
-		out = append(out, accountView{
+		av := accountView{
 			Info: info, Requests: st.Requests, Errors: st.Errors,
 			InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
-		})
+		}
+		if q, ok := s.quota.Get(info.Name); ok {
+			av.Quota = &q
+		}
+		out = append(out, av)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -521,6 +529,7 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", resp.StatusCode)
 			continue
 		}
+		s.quota.Record(cred.Name(), resp.Header) // passive Anthropic quota capture
 		return resp, cred.Name(), nil
 	}
 	if lastErr == nil {
