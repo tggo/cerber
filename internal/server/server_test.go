@@ -1193,3 +1193,57 @@ func TestUsageCSV(t *testing.T) {
 		t.Errorf("no key = %d, want 401", rec.Code)
 	}
 }
+
+// fakeImager is a Chatter that also generates images (provider.ImageGenerator).
+type fakeImager struct {
+	name string
+	body string
+	code int
+}
+
+func (f *fakeImager) Name() string { return f.name }
+func (f *fakeImager) Chat(context.Context, []byte, bool, http.Header) (*provider.Response, error) {
+	return nil, errors.New("not used")
+}
+func (f *fakeImager) Images(context.Context, []byte, http.Header) (*provider.Response, error) {
+	return &provider.Response{
+		Status: f.code, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader(f.body)), Credential: f.name,
+	}, nil
+}
+
+func TestImages_RoutedToProvider(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.RegisterChatter(&fakeImager{name: "grok", body: `{"data":[{"url":"https://img/x.jpg"}]}`, code: 200})
+	h := s.Handler()
+
+	// grok-imagine-* routes to grok by prefix
+	rec := do(t, h, "POST", "/v1/images/generations", `{"model":"grok-imagine-image","prompt":"cat"}`, clientKey)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "https://img/x.jpg") {
+		t.Fatalf("images = %d %s", rec.Code, rec.Body.String())
+	}
+	// anthropic / unknown model -> 400 (no image generation)
+	if rec := do(t, h, "POST", "/v1/images/generations", `{"model":"claude-sonnet-4-6","prompt":"x"}`, clientKey); rec.Code != http.StatusBadRequest {
+		t.Errorf("claude image = %d, want 400", rec.Code)
+	}
+	if rec := do(t, h, "POST", "/v1/images/generations", `{"model":"nope","prompt":"x"}`, clientKey); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown image = %d, want 400", rec.Code)
+	}
+	// auth required
+	if rec := do(t, h, "POST", "/v1/images/generations", `{}`, ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
+func TestImages_ProviderWithoutImageSupport(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	// a chatter that is NOT an ImageGenerator, routed via config prefix
+	s.SetRoutes([]config.Route{{Prefix: "img-", Provider: "plainchat"}})
+	ch := providermocks.NewChatter(t)
+	ch.EXPECT().Name().Return("plainchat").Maybe()
+	s.RegisterChatter(ch)
+	rec := do(t, s.Handler(), "POST", "/v1/images/generations", `{"model":"img-x","prompt":"y"}`, clientKey)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("non-imager = %d, want 501", rec.Code)
+	}
+}

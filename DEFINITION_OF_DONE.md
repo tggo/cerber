@@ -263,6 +263,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `GET /admin/usage.csv` (admin-authed) exports a section-tagged CSV: total, per-credential, per-model (requests/errors/tokens/cost) and the hourly series (RFC3339 UTC).
 **Verified:** `internal/server` TestModelsEndpoint / TestCountTokens / TestUsageCSV; mocks regenerated (Upstream.CountTokens) — 2026-06-08.
 
+## Image generation (`/v1/images/generations`)
+**What:** OpenAI-compatible image-generation passthrough to the provider that serves the model (xAI/Grok `grok-imagine-*`, OpenAI `gpt-image-*`/`dall-e-*`).
+**DoD:**
+- `POST /v1/images/generations` (authed like the API) routes by model via `route()`; the target provider must implement `provider.ImageGenerator` (the OpenAI provider does — grok/openai/ollama). The request body is forwarded unchanged with the provider's Bearer credential (rotation/cooldown via `provider.Rotate`); the response (e.g. `{"data":[{"url"}],"usage"}`) is relayed unchanged.
+- Unknown model or `anthropic` (no image gen) → 400; a routed provider that can't generate images → 501. Usage records request/error counts (no token cost for images).
+**Verified:** `internal/provider/openai` TestImages_Passthrough + `internal/server` TestImages_RoutedToProvider / ProviderWithoutImageSupport; live grok image via cerber — 2026-06-09.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

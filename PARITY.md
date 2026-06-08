@@ -14,11 +14,12 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Anthropic native `/v1/messages` (stream) | ✅ | transparent passthrough |
 | `/v1/models` (list models) | ✅ | aggregated from per-provider discovery |
 | `/v1/messages/count_tokens` | ✅ | proxied to Anthropic via pooled creds |
-| `/v1/completions`, `/v1/responses`, images, videos | ❌ | |
+| `/v1/images/generations` (image gen) | ✅ | passthrough (grok-imagine-*, openai gpt-image/dall-e) |
+| `/v1/completions`, `/v1/responses`, video gen | ❌ | |
 | Streaming SSE + flush | ✅ | |
 | Request/response header passthrough | ✅ | incl. anthropic-ratelimit-* |
 | Tools / function calling | 🟡 | native passthrough yes; OpenAI→Anthropic translate no |
-| Multimodal (images) | 🟡 | text+image in translators; no image/video gen |
+| Multimodal (images) | 🟡 | text+image in translators; image GEN via /v1/images/generations (grok); no video |
 
 ## Providers
 

@@ -24,6 +24,10 @@ const ChatPath = "/v1/chat/completions"
 // and vLLM too), used by Probe for liveness + model discovery.
 const ModelsPath = "/v1/models"
 
+// ImagesPath is the OpenAI-compatible image-generation endpoint (xAI/Grok serves
+// it too: grok-imagine-image*).
+const ImagesPath = "/v1/images/generations"
+
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
 const defaultCooldown = 60 * time.Second
 
@@ -55,6 +59,30 @@ func (p *Provider) Name() string { return p.name }
 
 // BaseURL returns the configured upstream base URL (safe to display).
 func (p *Provider) BaseURL() string { return p.baseURL }
+
+// Images forwards an OpenAI-format image-generation request upstream (rotating
+// credentials) and returns the response unchanged. Non-streaming.
+func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.Header) (*provider.Response, error) {
+	resp, credName, err := provider.Rotate(ctx, p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ImagesPath, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("openai: build image request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Bearer "+cred.APIKey())
+		return p.http.Do(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &provider.Response{
+		Status:     resp.StatusCode,
+		Header:     resp.Header,
+		Body:       resp.Body,
+		Credential: credName,
+	}, nil
+}
 
 // ProbeCredential validates a single credential by calling GET /v1/models with
 // its key and returns the model IDs it can access. A 401/403 yields

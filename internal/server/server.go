@@ -247,6 +247,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
+	mux.HandleFunc("POST /v1/images/generations", s.handleImages)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
 	mux.HandleFunc("GET /admin/usage.csv", s.handleUsageCSV)
@@ -901,6 +902,50 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+// handleImages proxies an OpenAI-format image-generation request to the provider
+// that serves the model (e.g. grok-imagine-image → grok). Anthropic has no image
+// generation. Token cost isn't applicable; only request/error counts are recorded.
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	model := extractModel(body)
+	target := s.route(model)
+	if target == "" || target == "anthropic" {
+		s.usage.Record(usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("no image-generation provider for model %q", model))
+		return
+	}
+	gen, ok := s.chatters[target].(provider.ImageGenerator)
+	if !ok {
+		s.usage.Record(usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusNotImplemented, "provider "+target+" does not support image generation")
+		return
+	}
+	resp, err := gen.Images(r.Context(), body, r.Header)
+	if err != nil {
+		s.usage.Record(usage.Event{Model: model, IsError: true})
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.Status >= 400 {
+		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, IsError: true})
+		copyUpstreamHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.Status)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	s.usage.Record(usage.Event{Credential: resp.Credential, Model: model})
+	copyUpstreamHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.Status)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleCountTokens proxies Anthropic's /v1/messages/count_tokens through the

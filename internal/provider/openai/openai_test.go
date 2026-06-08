@@ -165,3 +165,29 @@ func TestProbeCredential_InvalidAndError(t *testing.T) {
 		t.Errorf("transport err = %v, want plain error", err)
 	}
 }
+
+func TestImages_Passthrough(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var gotURL, gotAuth string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		gotURL = r.URL.String()
+		gotAuth = r.Header.Get("Authorization")
+		return resp(200, `{"data":[{"url":"https://img/x.jpg","mime_type":"image/jpeg"}]}`), nil
+	})
+	p := New("grok", "https://api.x.ai", store(t, "xai-key"), doer)
+	out, err := p.Images(context.Background(), []byte(`{"model":"grok-imagine-image","prompt":"cat"}`), nil)
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	defer out.Body.Close()
+	if gotURL != "https://api.x.ai/v1/images/generations" {
+		t.Errorf("url = %s", gotURL)
+	}
+	if gotAuth != "Bearer xai-key" {
+		t.Errorf("auth = %q", gotAuth)
+	}
+	b, _ := io.ReadAll(out.Body)
+	if out.Status != 200 || !strings.Contains(string(b), "https://img/x.jpg") {
+		t.Errorf("relay = %d %s", out.Status, b)
+	}
+}

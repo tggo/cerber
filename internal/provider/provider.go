@@ -57,6 +57,12 @@ type BaseURLer interface {
 	BaseURL() string
 }
 
+// ImageGenerator is an optional capability: a provider that can serve the
+// OpenAI-compatible /v1/images/generations endpoint (e.g. xAI/Grok, OpenAI).
+type ImageGenerator interface {
+	Images(ctx context.Context, openaiBody []byte, clientHeader http.Header) (*Response, error)
+}
+
 // BadRequestError marks a client-side error (e.g. an untranslatable request) so
 // callers can map it to HTTP 400 instead of a 502 upstream error.
 type BadRequestError struct{ Err error }
