@@ -426,13 +426,12 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLLMDoc serves a live, self-describing usage guide (markdown) so an agent
-// given only the base URL + a key can learn how to connect: endpoints, auth,
-// model routing, and the actual models each provider serves. Gated like the API
-// (LAN keyless; public needs a key), since it lists the model inventory.
+// or browser given only the base URL can learn how to connect: endpoints, auth,
+// model routing, and the actual models each provider serves. Public (no key) by
+// design — it exposes no secrets, just how to use the API (which still needs a
+// key from the public side). Being unauthenticated also lets a plain browser GET
+// it (browsers can't attach an Authorization header to a navigation).
 func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(w, r) {
-		return
-	}
 	scheme := "https"
 	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
 		scheme = xf

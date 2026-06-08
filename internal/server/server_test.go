@@ -1009,9 +1009,9 @@ func TestLLMDoc(t *testing.T) {
 	s.RegisterChatter(&fakeOllama{models: []string{"llama3.1:8b", "supergemma4-26b:latest"}, alive: true})
 	h := s.Handler()
 
-	// auth required (public path with no key)
-	if rec := do(t, h, "GET", "/llm.md", "", ""); rec.Code != http.StatusUnauthorized {
-		t.Errorf("no key = %d, want 401", rec.Code)
+	// public: readable with no key (so a browser/agent can discover usage)
+	if rec := do(t, h, "GET", "/llm.md", "", ""); rec.Code != 200 {
+		t.Errorf("no key = %d, want 200 (public)", rec.Code)
 	}
 
 	rec := do(t, h, "GET", "/llm.md", "", clientKey)

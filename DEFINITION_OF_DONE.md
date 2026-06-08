@@ -250,7 +250,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 ## Self-describing usage doc (`GET /llm.md`)
 **What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
 **DoD:**
-- `GET /llm.md` (alias `GET /llms.txt`) returns `text/markdown`, gated like the API (LAN keyless; public needs a key).
+- `GET /llm.md` (alias `GET /llms.txt`) returns `text/markdown`, **public** (no key) so a plain browser/agent can read it — it exposes no secrets, only how to use the API (which still needs a key from the public side).
 - Content is dynamic: base URL is derived from the request host/scheme (honours `X-Forwarded-Proto`); the model list reflects discovered models per provider (e.g. ollama), with routing rules and curl/SDK examples.
 **Verified:** `internal/server` TestLLMDoc (auth, content-type, endpoints, discovered models, host) — 2026-06-08.
 
