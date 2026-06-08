@@ -107,9 +107,11 @@
   }
 
   async function load() {
-    if (!key.value) { $("status").textContent = "enter client key →"; return; }
+    // Try anyway with no key: on the LAN, nginx injects the key for us (keyless).
+    // Only prompt for a key if the server actually rejects us (401).
     try {
-      const r = await fetch("/admin/stats", { headers: { Authorization: "Bearer " + key.value } });
+      const r = await fetch("/admin/stats", { headers: authHeaders() });
+      if (r.status === 401) { $("status").textContent = "enter client key →"; return; }
       if (!r.ok) { $("status").innerHTML = `<span class="err">HTTP ${r.status}</span>`; return; }
       const d = await r.json();
       const t = d.totals || {};
