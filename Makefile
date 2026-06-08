@@ -1,6 +1,6 @@
 COVERAGE_MIN ?= 85.0
 
-.PHONY: build test cover mocks lint fmt vet tidy hooks
+.PHONY: build test cover mocks lint fmt vet tidy hooks deploy
 
 # Install git hooks (commit-msg). Pins a local hooksPath to defeat a global one.
 hooks:
@@ -11,6 +11,11 @@ hooks:
 
 build:
 	go build -o bin/cerber ./cmd/cerber
+
+# Build for linux/amd64 and ship to firebat as a Docker stack (see deploy/deploy.sh).
+# Reads DEPLOY_HOST/DEPLOY_USER/DEPLOY_DIR + secrets from .env.
+deploy:
+	@bash deploy/deploy.sh
 
 # Unit tests + coverage gate. Excludes integration-tagged tests and the thin
 # cmd/ wiring layer (which is exercised by integration/e2e, not unit tests).

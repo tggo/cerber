@@ -6,6 +6,7 @@ coverage.gate.out
 .env
 logs/
 config.yaml
+dist/
 auths/
 certs/
 data/

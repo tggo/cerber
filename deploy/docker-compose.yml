@@ -1,0 +1,27 @@
+# cerber — production proxy stack for firebat.
+#
+#   docker compose up -d --build
+#
+# The container listens on 0.0.0.0:8080 *inside* the container and publishes only
+# to 127.0.0.1:8080 on the host — the host nginx (cerber.ihatebot.com vhost) is
+# the sole front door. Config, secrets, OAuth tokens, logs and usage state are
+# bind-mounted so they live on the host and survive image rebuilds.
+services:
+  cerber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cerber:local
+    container_name: cerber
+    restart: unless-stopped
+    # Run as host uid:gid 1000 so bind-mounted dirs (owned by ruslan) are writable.
+    user: "1000:1000"
+    command: ["-config", "/work/config.yaml", "-env", "/work/.env"]
+    volumes:
+      - ./config.firebat.yaml:/work/config.yaml:ro
+      - ./.env:/work/.env:ro
+      - ./auths:/work/auths
+      - ./logs:/work/logs
+      - ./data:/work/data
+    ports:
+      - "127.0.0.1:18080:8080"

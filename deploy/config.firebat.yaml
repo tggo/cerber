@@ -1,0 +1,52 @@
+# cerber production config for firebat (mounted at /work/config.yaml in the container).
+# Secrets come from /work/.env (${VAR} expansion); never hard-code keys here.
+server:
+  # Listen on all interfaces *inside* the container; compose publishes this only
+  # to 127.0.0.1:8080 on the host, so the host nginx is the only reachable front.
+  addr: "0.0.0.0:8080"
+
+logging:
+  level: "info"
+  dir: "/work/logs"
+
+# OAuth tokens (Claude Max + Team) shipped by `make deploy` live here and are
+# merged into the anthropic credential pool automatically.
+auth_dir: "/work/auths"
+
+usage:
+  file: "/work/data/usage.json"
+  # Optional per-model pricing for the cost column (per 1M tokens). Fill in if wanted.
+
+access:
+  # No keyless localhost: the nginx vhost injects the client key for LAN/WG
+  # source IPs (keyless from the LAN), and requires it from the public/CF side.
+  allow_localhost: false
+  keys:
+    - "${CERBER_CLIENT_KEY}"
+
+providers:
+  # /v1/chat/completions routes by model: gpt*/o1*/o3*/o4*/chatgpt* -> openai,
+  # gemini* -> gemini, grok* -> grok, configured prefixes below -> ollama,
+  # everything else -> anthropic.
+  anthropic: {}        # credentials come from auth_dir (OAuth)
+
+  openai:
+    credentials:
+      - { type: api_key, name: openai, key: "${OPENAI_KEY}" }
+
+  gemini:
+    credentials:
+      - { type: api_key, name: gemini, key: "${GEMINI_KEY}" }
+
+  grok:
+    credentials:
+      - { type: api_key, name: grok, key: "${GROK_API_KEY}" }
+
+  ollama:                                   # local models on gpu0 (HomeOffice, via WG)
+    base_url: "http://192.168.89.233:11434"
+  routing:
+    - { prefix: "llama",   provider: ollama }
+    - { prefix: "qwen",    provider: ollama }
+    - { prefix: "gemma",   provider: ollama }
+    - { prefix: "mistral", provider: ollama }
+    - { prefix: "deepseek", provider: ollama }
