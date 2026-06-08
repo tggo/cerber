@@ -216,6 +216,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Dashboard shows a cost card + accounts table with enable/disable buttons and 5h quota.
 **Verified:** `internal/usage` (Save/Load/cost), `internal/quota` (100%), `internal/credential` (fill-first), `internal/server` (management key) tests — 2026-06-08.
 
+## Analytics (time-series) + embedded UI
+**What:** usage over time (hourly) with a chart in the binary-embedded dashboard.
+**DoD:**
+- The usage tracker keeps hourly buckets (~30-day retention, persisted with the rest); `/admin/stats` returns `series` (chronological hourly requests/errors/tokens).
+- The embedded dashboard (`go:embed`, no external/CDN assets) renders a requests/hour SVG chart (last 48h, errors overlaid, hover details) plus cost card and accounts table.
+**Verified:** `internal/usage` series test + live (`series` populated, cost computed, dashboard 200) — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

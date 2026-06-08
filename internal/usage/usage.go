@@ -33,15 +33,25 @@ type Entry struct {
 	Stat
 }
 
+// Bucket is one hour of usage (Unix = hour start), for time-series analytics.
+type Bucket struct {
+	Unix int64 `json:"unix"`
+	Stat
+}
+
 // Report is a point-in-time snapshot.
 type Report struct {
-	Totals        Stat    `json:"totals"`
-	TotalCost     float64 `json:"total_cost"`
-	ByCredential  []Entry `json:"by_credential"`
-	ByModel       []Entry `json:"by_model"`
-	SinceUnix     int64   `json:"since_unix"`
-	GeneratedUnix int64   `json:"generated_unix"`
+	Totals        Stat     `json:"totals"`
+	TotalCost     float64  `json:"total_cost"`
+	ByCredential  []Entry  `json:"by_credential"`
+	ByModel       []Entry  `json:"by_model"`
+	Series        []Bucket `json:"series"` // hourly, chronological
+	SinceUnix     int64    `json:"since_unix"`
+	GeneratedUnix int64    `json:"generated_unix"`
 }
+
+// retentionHours bounds how much hourly history is kept (~30 days).
+const retentionHours = 24 * 30
 
 // Price is per-model pricing in cost units per 1,000,000 tokens.
 type Price struct {
@@ -63,6 +73,7 @@ type Tracker struct {
 	mu           sync.Mutex
 	byCredential map[string]*Stat
 	byModel      map[string]*Stat
+	buckets      map[int64]*Stat // hour-start unix -> stat
 	totals       Stat
 	since        time.Time
 	now          func() time.Time
@@ -82,6 +93,7 @@ func New(opts ...Option) *Tracker {
 	t := &Tracker{
 		byCredential: map[string]*Stat{},
 		byModel:      map[string]*Stat{},
+		buckets:      map[int64]*Stat{},
 		pricing:      map[string]Price{},
 		now:          time.Now,
 	}
@@ -123,11 +135,31 @@ func (t *Tracker) Record(e Event) {
 	}
 	now := t.now()
 
+	hour := now.Truncate(time.Hour).Unix()
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	apply(&t.totals, e, now)
 	apply(get(t.byCredential, cred), e, now)
 	apply(get(t.byModel, model), e, now)
+
+	b, ok := t.buckets[hour]
+	if !ok {
+		b = &Stat{}
+		t.buckets[hour] = b
+		t.pruneBuckets(now)
+	}
+	apply(b, e, now)
+}
+
+// pruneBuckets drops hourly buckets older than the retention window.
+func (t *Tracker) pruneBuckets(now time.Time) {
+	cutoff := now.Add(-retentionHours * time.Hour).Unix()
+	for k := range t.buckets {
+		if k < cutoff {
+			delete(t.buckets, k)
+		}
+	}
 }
 
 func get(m map[string]*Stat, k string) *Stat {
@@ -160,11 +192,18 @@ func (t *Tracker) Snapshot() Report {
 		byModel[i].Cost = t.modelCost(byModel[i].Name, byModel[i].Stat)
 		total += byModel[i].Cost
 	}
+	series := make([]Bucket, 0, len(t.buckets))
+	for hour, st := range t.buckets {
+		series = append(series, Bucket{Unix: hour, Stat: *st})
+	}
+	sort.Slice(series, func(i, j int) bool { return series[i].Unix < series[j].Unix })
+
 	return Report{
 		Totals:        t.totals,
 		TotalCost:     total,
 		ByCredential:  entries(t.byCredential),
 		ByModel:       byModel,
+		Series:        series,
 		SinceUnix:     t.since.Unix(),
 		GeneratedUnix: t.now().Unix(),
 	}
@@ -175,6 +214,7 @@ type persisted struct {
 	Totals       Stat             `json:"totals"`
 	ByCredential map[string]*Stat `json:"by_credential"`
 	ByModel      map[string]*Stat `json:"by_model"`
+	Buckets      map[int64]*Stat  `json:"buckets"`
 	SinceUnix    int64            `json:"since_unix"`
 }
 
@@ -183,7 +223,8 @@ type persisted struct {
 func (t *Tracker) Save(path string) error {
 	t.mu.Lock()
 	data, err := json.Marshal(persisted{
-		Totals: t.totals, ByCredential: t.byCredential, ByModel: t.byModel, SinceUnix: t.since.Unix(),
+		Totals: t.totals, ByCredential: t.byCredential, ByModel: t.byModel,
+		Buckets: t.buckets, SinceUnix: t.since.Unix(),
 	})
 	t.mu.Unlock()
 	if err != nil {
@@ -220,6 +261,9 @@ func Load(path string, opts ...Option) (*Tracker, error) {
 	}
 	if p.ByModel != nil {
 		t.byModel = p.ByModel
+	}
+	if p.Buckets != nil {
+		t.buckets = p.Buckets
 	}
 	t.totals = p.Totals
 	if p.SinceUnix > 0 {

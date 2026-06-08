@@ -38,6 +38,11 @@
   .err { color:var(--err); }
   .muted { color:var(--muted); }
   #status { font-size:12px; }
+  .chart { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .chart svg { width:100%; height:130px; display:block; }
+  .chart rect.req { fill:var(--accent); }
+  .chart rect.err { fill:var(--err); }
+  .chart text { fill:var(--muted); font-size:10px; }
 </style>
 </head>
 <body>
@@ -51,6 +56,7 @@
 </header>
 <main>
   <div class="cards" id="cards"></div>
+  <section><h2>requests / hour (last 48h)</h2><div id="chart" class="chart"></div></section>
   <section><h2>accounts</h2><table id="accounts"></table></section>
   <section><h2>by credential</h2><table id="byCred"></table></section>
   <section><h2>by model</h2><table id="byModel"></table></section>
@@ -100,11 +106,39 @@
       const head = ["name","requests","errors","input","output","last"];
       rows($("byCred"), d.by_credential || [], head);
       rows($("byModel"), d.by_model || [], head);
+      renderChart(d.series || []);
       loadAccounts();
       $("status").innerHTML = `<span class="ok" style="color:var(--ok)">●</span> updated ${new Date().toLocaleTimeString()}`;
     } catch (e) {
       $("status").innerHTML = `<span class="err">${e}</span>`;
     }
+  }
+
+  function renderChart(series) {
+    const data = series.slice(-48);
+    if (!data.length) { $("chart").innerHTML = `<div class="muted">no data yet</div>`; return; }
+    const W = 1000, H = 130, pad = 16, n = data.length;
+    const max = Math.max(1, ...data.map(b => b.requests || 0));
+    const bw = (W - 2*pad) / n;
+    const bars = data.map((b, i) => {
+      const x = pad + i*bw;
+      const h = (b.requests || 0) / max * (H - 2*pad);
+      const eh = (b.errors || 0) / max * (H - 2*pad);
+      const d = new Date(b.unix*1000);
+      const t = d.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit"});
+      const title = `${t}\n${b.requests||0} req, ${b.errors||0} err\nin ${fmt(b.input_tokens)} / out ${fmt(b.output_tokens)} tok`;
+      return `<g><title>${title}</title>`
+        + `<rect class="req" x="${x+1}" y="${H-pad-h}" width="${Math.max(1,bw-2)}" height="${h}"/>`
+        + (eh>0?`<rect class="err" x="${x+1}" y="${H-pad-eh}" width="${Math.max(1,bw-2)}" height="${eh}"/>`:"")
+        + `</g>`;
+    }).join("");
+    const first = new Date(data[0].unix*1000).toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit"});
+    const last = new Date(data[n-1].unix*1000).toLocaleString(undefined,{hour:"2-digit"});
+    $("chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
+      + bars
+      + `<text x="${pad}" y="${H-2}">${first}</text>`
+      + `<text x="${W-pad}" y="${H-2}" text-anchor="end">${last} · peak ${max}</text>`
+      + `</svg>`;
   }
 
   async function loadAccounts() {

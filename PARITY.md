@@ -64,12 +64,12 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Per-credential + per-model usage (requests/errors/tokens) | ✅ | in-memory |
 | `/admin/stats` JSON | ✅ | |
 | Prometheus `/metrics` | ✅ | |
-| Web dashboard | ✅ | usage view; no accounts/quota view yet |
+| Web dashboard | ✅ | embedded; usage + accounts + hourly chart + cost |
 | **Persistent usage (survives restart)** | ✅ | JSON aggregates (not per-event SQLite) |
 | **Quota inspection per account** (5h/7d windows) | ✅ | passive, from Anthropic rate-limit headers |
 | **Cost calculation** (per-model pricing) | ✅ | `usage.pricing` |
 | Usage event log / export / filtering | ❌ | |
-| Cost/usage history & analytics | ❌ | |
+| Cost/usage history & analytics | 🟡 | hourly time-series + chart (no per-event) |
 
 ## Management UI (CPA-Manager-Plus territory)
 
@@ -78,7 +78,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Usage dashboard | ✅ (basic) |
 | Account management UI (enable/disable) | ✅ | dashboard accounts table |
 | Config editing via UI/API | ❌ |
-| Quota/cost dashboard | 🟡 | cost + 5h quota in dashboard |
+| Quota/cost dashboard | ✅ | cost card + requests/hour chart + 5h quota |
 
 ## Deployment & ops
 

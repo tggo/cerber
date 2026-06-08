@@ -134,3 +134,27 @@ func TestConcurrentRecord(t *testing.T) {
 		t.Errorf("concurrent totals = %+v", r.Totals)
 	}
 }
+
+func TestSeriesBuckets(t *testing.T) {
+	base := time.Date(2026, 6, 8, 10, 30, 0, 0, time.UTC)
+	now := base
+	tr := New(WithClock(func() time.Time { return now }))
+	tr.Record(Event{Credential: "a", Model: "m", InputTokens: 5})
+	now = base.Add(70 * time.Minute) // next hour bucket
+	tr.Record(Event{Credential: "a", Model: "m", InputTokens: 3})
+	tr.Record(Event{Credential: "a", Model: "m"})
+
+	r := tr.Snapshot()
+	if len(r.Series) != 2 {
+		t.Fatalf("series = %d buckets, want 2", len(r.Series))
+	}
+	if r.Series[0].Unix >= r.Series[1].Unix {
+		t.Error("series not chronological")
+	}
+	if r.Series[0].Requests != 1 || r.Series[1].Requests != 2 {
+		t.Errorf("bucket requests = %d, %d", r.Series[0].Requests, r.Series[1].Requests)
+	}
+	if r.Series[0].Unix != base.Truncate(time.Hour).Unix() {
+		t.Error("bucket key should be hour start")
+	}
+}
