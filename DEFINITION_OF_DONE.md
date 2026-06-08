@@ -230,6 +230,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `providers.routing` prefixes select it (local model names are arbitrary); `ollama` is a valid routing provider.
 **Verified:** `internal/config` (defaults/no-creds/bad-url) + `internal/server` route tests; live against gpu0 ollama — 2026-06-08.
 
+## Ollama health-probe + model discovery + providers view
+**What:** cerber periodically checks the local ollama/vLLM upstream's liveness and the models it serves, routes by those discovered models, and surfaces every provider's health/models/credentials in the dashboard.
+**DoD:**
+- The ollama provider is probed at startup and every `providers.ollama.probe_interval` (default 30s) via `GET /v1/models`, recording alive/checked-at/error and the served model-ID set; a failed probe records an unhealthy state (does not crash).
+- Routing: after configured prefixes, a request whose model exactly matches a discovered model goes to that provider — so arbitrary ollama names (`supergemma4-…`, `hf.co/…`, `mdq100/…`) route to ollama with no prefix config; unknown models still fall back to anthropic.
+- `GET /admin/accounts` covers **every** provider's credentials (each tagged with `provider`), and enable/disable works across all provider stores; `GET /admin/providers` lists each provider with base_url, credential count, probed/alive/checked-at/error, and discovered models.
+- The embedded dashboard shows a providers section (status + model count) and a provider column in the accounts table.
+**Verified:** `internal/provider/openai` (probe/health/discovery) + `internal/server` (discovery routing, providers view, cross-provider accounts) tests; live against gpu0 — 2026-06-08.
+
 ## Client keys — dashboard-managed (dynamic, persisted)
 **What:** client API keys can be minted, enabled/disabled and deleted at runtime from the dashboard, in addition to the static config keys.
 **DoD:**

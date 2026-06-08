@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +61,7 @@ type Server struct {
 	usage          *usage.Tracker
 	quota          *quota.Tracker
 	chatters       map[string]provider.Chatter
+	provStores     map[string]*credential.Store // provider name -> its credential store (for the accounts view)
 	routes         []config.Route
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
@@ -94,6 +96,7 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		usage:       usage.New(),
 		quota:       quota.New(),
 		chatters:    map[string]provider.Chatter{},
+		provStores:  map[string]*credential.Store{},
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
@@ -110,6 +113,14 @@ func (s *Server) SetUsageTracker(t *usage.Tracker) { s.usage = t }
 // RegisterChatter adds an extra provider reachable from the OpenAI-compatible
 // endpoint, keyed by its Name (e.g. "openai", "gemini").
 func (s *Server) RegisterChatter(c provider.Chatter) { s.chatters[c.Name()] = c }
+
+// RegisterProviderStore records a provider's credential store under a name so the
+// accounts view and enable/disable cover every provider, not just Anthropic.
+func (s *Server) RegisterProviderStore(name string, store *credential.Store) {
+	if store != nil {
+		s.provStores[name] = store
+	}
+}
 
 // SetRoutes installs model-prefix routing overrides.
 func (s *Server) SetRoutes(routes []config.Route) { s.routes = routes }
@@ -179,6 +190,18 @@ func (s *Server) route(model string) string {
 			return r.Provider
 		}
 	}
+	// Discovery: route to whichever provider actually advertises this exact model
+	// (e.g. a local ollama serving "supergemma4-…" or "hf.co/…" names that no
+	// prefix would match). Probed providers only.
+	for name, c := range s.chatters {
+		if ml, ok := c.(provider.ModelLister); ok {
+			for _, m := range ml.Models() {
+				if m == model {
+					return name
+				}
+			}
+		}
+	}
 	switch {
 	case strings.HasPrefix(model, "gpt"), strings.HasPrefix(model, "o1"),
 		strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"),
@@ -212,6 +235,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
 	mux.HandleFunc("GET /admin/accounts", s.handleAccounts)
+	mux.HandleFunc("GET /admin/providers", s.handleProviders)
 	mux.HandleFunc("POST /admin/accounts/{name}/enable", s.handleSetAccount(true))
 	mux.HandleFunc("POST /admin/accounts/{name}/disable", s.handleSetAccount(false))
 	mux.HandleFunc("GET /admin/keys", s.handleKeysList)
@@ -297,6 +321,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // accountView is one credential's state plus its usage and quota, for orchestration.
 type accountView struct {
 	credential.Info
+	Provider     string          `json:"provider"`
 	Requests     int64           `json:"requests"`
 	Errors       int64           `json:"errors"`
 	InputTokens  int64           `json:"input_tokens"`
@@ -304,7 +329,18 @@ type accountView struct {
 	Quota        *quota.Snapshot `json:"quota,omitempty"`
 }
 
-// handleAccounts lists credentials with their state and usage (orchestration view).
+// accountStores returns every provider credential store keyed by provider name.
+// The Anthropic store (s.creds) is always included under "anthropic"; additional
+// providers are whatever was registered via RegisterProviderStore.
+func (s *Server) accountStores() map[string]*credential.Store {
+	stores := map[string]*credential.Store{"anthropic": s.creds}
+	for name, st := range s.provStores {
+		stores[name] = st
+	}
+	return stores
+}
+
+// handleAccounts lists every provider's credentials with state and usage.
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	if !s.adminAuthorized(w, r) {
 		return
@@ -313,21 +349,73 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	for _, e := range s.usage.Snapshot().ByCredential {
 		use[e.Name] = e.Stat
 	}
+	// Stable order: by provider name, then credential name within a provider.
+	stores := s.accountStores()
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var out []accountView
-	for _, info := range s.creds.List() {
-		st := use[info.Name]
-		av := accountView{
-			Info: info, Requests: st.Requests, Errors: st.Errors,
-			InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
+	for _, prov := range names {
+		for _, info := range stores[prov].List() {
+			st := use[info.Name]
+			av := accountView{
+				Info: info, Provider: prov, Requests: st.Requests, Errors: st.Errors,
+				InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
+			}
+			if q, ok := s.quota.Get(info.Name); ok {
+				av.Quota = &q
+			}
+			out = append(out, av)
 		}
-		if q, ok := s.quota.Get(info.Name); ok {
-			av.Quota = &q
-		}
-		out = append(out, av)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"accounts": out})
+}
+
+// providerView is a provider's health + discovered models for the management UI.
+type providerView struct {
+	Name        string    `json:"name"`
+	BaseURL     string    `json:"base_url,omitempty"`
+	Credentials int       `json:"credentials"`
+	Probed      bool      `json:"probed"`
+	Alive       bool      `json:"alive"`
+	CheckedAt   time.Time `json:"checked_at,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	Models      []string  `json:"models,omitempty"`
+}
+
+// handleProviders lists each configured provider with its liveness (if probed)
+// and the models it advertises (for ollama/vLLM discovery).
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	stores := s.accountStores()
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]providerView, 0, len(names))
+	for _, name := range names {
+		pv := providerView{Name: name, Credentials: stores[name].Len()}
+		if c, ok := s.chatters[name]; ok {
+			if insp, ok := c.(provider.Inspectable); ok {
+				pv.BaseURL = insp.BaseURL()
+				pv.Models = insp.Models()
+				alive, checkedAt, errMsg := insp.Health()
+				pv.Alive, pv.CheckedAt, pv.Error = alive, checkedAt, errMsg
+				pv.Probed = !checkedAt.IsZero()
+			}
+		}
+		out = append(out, pv)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"providers": out})
 }
 
 // handleSetAccount enables/disables a credential at runtime.
@@ -337,7 +425,14 @@ func (s *Server) handleSetAccount(enabled bool) http.HandlerFunc {
 			return
 		}
 		name := r.PathValue("name")
-		if !s.creds.SetEnabled(name, enabled) {
+		found := false
+		for _, st := range s.accountStores() {
+			if st.SetEnabled(name, enabled) {
+				found = true
+				break
+			}
+		}
+		if !found {
 			writeError(w, http.StatusNotFound, "no credential named "+name)
 			return
 		}

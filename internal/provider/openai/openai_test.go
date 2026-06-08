@@ -121,3 +121,60 @@ func TestName(t *testing.T) {
 		t.Error("name")
 	}
 }
+
+func TestProbe_DiscoversModelsAndHealth(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var gotURL string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		gotURL = r.URL.String()
+		return resp(200, `{"object":"list","data":[{"id":"llama3.1:8b"},{"id":"supergemma4-26b:latest"},{"id":""}]}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "x"), doer)
+
+	// before probe: not alive, never checked, no models
+	if alive, at, _ := p.Health(); alive || !at.IsZero() {
+		t.Errorf("pre-probe health = %v %v", alive, at)
+	}
+	if len(p.Models()) != 0 {
+		t.Error("pre-probe models should be empty")
+	}
+
+	if err := p.Probe(context.Background()); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if gotURL != "http://gpu0:11434/v1/models" {
+		t.Errorf("probe url = %s", gotURL)
+	}
+	alive, at, errMsg := p.Health()
+	if !alive || at.IsZero() || errMsg != "" {
+		t.Errorf("post-probe health = %v %v %q", alive, at, errMsg)
+	}
+	got := p.Models()
+	if len(got) != 2 || got[0] != "llama3.1:8b" || got[1] != "supergemma4-26b:latest" {
+		t.Errorf("models = %v (empty ids must be dropped)", got)
+	}
+}
+
+func TestProbe_ErrorsRecordUnhealthy(t *testing.T) {
+	// transport error
+	d1 := mocks.NewHTTPDoer(t)
+	d1.EXPECT().Do(mock.Anything).Return(nil, errors.New("dial fail"))
+	p1 := New("ollama", "http://x", store(t, "k"), d1)
+	if err := p1.Probe(context.Background()); err == nil {
+		t.Error("transport error should propagate")
+	}
+	if alive, at, msg := p1.Health(); alive || at.IsZero() || msg == "" {
+		t.Errorf("after transport error: %v %v %q", alive, at, msg)
+	}
+
+	// non-200
+	d2 := mocks.NewHTTPDoer(t)
+	d2.EXPECT().Do(mock.Anything).Return(resp(503, ``), nil)
+	p2 := New("ollama", "http://x", store(t, "k"), d2)
+	if err := p2.Probe(context.Background()); err == nil {
+		t.Error("non-200 should error")
+	}
+	if alive, _, msg := p2.Health(); alive || !strings.Contains(msg, "503") {
+		t.Errorf("after 503: alive=%v msg=%q", alive, msg)
+	}
+}

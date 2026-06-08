@@ -885,3 +885,104 @@ func TestDispatch_NoneAvailable_503(t *testing.T) {
 		t.Errorf("code %d, want 503", rec.Code)
 	}
 }
+
+// fakeOllama is a Chatter that also implements ModelLister + Inspectable, to test
+// discovery routing and the providers view without a live upstream.
+type fakeOllama struct {
+	models []string
+	alive  bool
+}
+
+func (f *fakeOllama) Name() string     { return "ollama" }
+func (f *fakeOllama) BaseURL() string  { return "http://gpu0:11434" }
+func (f *fakeOllama) Models() []string { return f.models }
+func (f *fakeOllama) Health() (bool, time.Time, string) {
+	return f.alive, time.Unix(1700000000, 0), ""
+}
+func (f *fakeOllama) Chat(context.Context, []byte, bool, http.Header) (*provider.Response, error) {
+	return nil, errors.New("not used")
+}
+
+func TestRoute_DiscoveredModel(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.RegisterChatter(&fakeOllama{models: []string{"supergemma4-26b:latest", "hf.co/x/qwen:Q5"}})
+	// no prefix matches these arbitrary names — discovery must catch them
+	if got := s.route("supergemma4-26b:latest"); got != "ollama" {
+		t.Errorf("route(supergemma4) = %q, want ollama", got)
+	}
+	if got := s.route("hf.co/x/qwen:Q5"); got != "ollama" {
+		t.Errorf("route(hf.co/...) = %q, want ollama", got)
+	}
+	// an unknown model still falls back to anthropic
+	if got := s.route("mystery-model"); got != "anthropic" {
+		t.Errorf("route(mystery) = %q, want anthropic", got)
+	}
+}
+
+func TestProvidersView(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 2)) // anthropic store: 2 creds
+	s.RegisterChatter(&fakeOllama{models: []string{"llama3.1:8b"}, alive: true})
+	ostore, _ := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "ollama", Key: "x"}})
+	s.RegisterProviderStore("ollama", ostore)
+	h := s.Handler()
+
+	rec := do(t, h, "GET", "/admin/providers", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("providers = %d", rec.Code)
+	}
+	var d struct {
+		Providers []struct {
+			Name        string
+			BaseURL     string `json:"base_url"`
+			Credentials int
+			Probed      bool
+			Alive       bool
+			Models      []string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	var ollama, anth bool
+	for _, p := range d.Providers {
+		if p.Name == "ollama" {
+			ollama = true
+			if !p.Alive || !p.Probed || p.BaseURL == "" || len(p.Models) != 1 || p.Credentials != 1 {
+				t.Errorf("ollama view = %+v", p)
+			}
+		}
+		if p.Name == "anthropic" {
+			anth = true
+			if p.Credentials != 2 {
+				t.Errorf("anthropic creds = %d, want 2", p.Credentials)
+			}
+		}
+	}
+	if !ollama || !anth {
+		t.Errorf("providers must include ollama and anthropic: %+v", d.Providers)
+	}
+	// auth required
+	if rec := do(t, h, "GET", "/admin/providers", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
+func TestAccounts_AcrossProviders(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	ostore, _ := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "openai-1", Key: "x"}})
+	s.RegisterProviderStore("openai", ostore)
+	h := s.Handler()
+
+	rec := do(t, h, "GET", "/admin/accounts", "", clientKey)
+	if !strings.Contains(rec.Body.String(), `"provider":"openai"`) || !strings.Contains(rec.Body.String(), `"provider":"anthropic"`) {
+		t.Fatalf("accounts must tag provider: %s", rec.Body.String())
+	}
+	// disable a credential that lives in the openai store (not anthropic)
+	if rec := do(t, h, "POST", "/admin/accounts/openai-1/disable", "", clientKey); rec.Code != 200 {
+		t.Fatalf("disable openai-1 = %d", rec.Code)
+	}
+	rec = do(t, h, "GET", "/admin/accounts", "", clientKey)
+	if !strings.Contains(rec.Body.String(), `"name":"openai-1","kind":"api_key","enabled":false`) {
+		t.Errorf("openai-1 disable not reflected: %s", rec.Body.String())
+	}
+}

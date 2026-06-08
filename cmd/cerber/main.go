@@ -182,12 +182,16 @@ func main() {
 		}
 	})
 
+	// Anthropic's store is the primary one; expose it in the accounts view too.
+	srv.RegisterProviderStore("anthropic", store)
+
 	if o := cfg.Providers.OpenAI; o != nil {
 		ostore, err := credential.NewStore(o.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 		if err != nil {
 			logger.Fatal("openai credentials", zap.Error(err))
 		}
 		srv.RegisterChatter(openai.New("openai", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
+		srv.RegisterProviderStore("openai", ostore)
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
 	}
 
@@ -198,6 +202,7 @@ func main() {
 		}
 		// xAI/Grok is OpenAI-compatible: reuse the OpenAI provider, named "grok".
 		srv.RegisterChatter(openai.New("grok", k.BaseURL, kstore, &http.Client{Timeout: k.Timeout.Std()}))
+		srv.RegisterProviderStore("grok", kstore)
 		logger.Info("grok provider enabled", zap.Int("credentials", kstore.Len()))
 	}
 
@@ -213,8 +218,14 @@ func main() {
 			logger.Fatal("ollama credentials", zap.Error(err))
 		}
 		// ollama/vLLM serve an OpenAI-compatible API: reuse the OpenAI provider.
-		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
-		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL), zap.Int("credentials", ostore.Len()))
+		ollamaProv := openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()})
+		srv.RegisterChatter(ollamaProv)
+		srv.RegisterProviderStore("ollama", ostore)
+		// Periodic liveness + model discovery: lets requests route to whatever
+		// models ollama actually serves (no name-prefix config needed).
+		startProbe(ollamaProv, o.ProbeInterval.Std(), logger)
+		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
+			zap.Int("credentials", ostore.Len()), zap.Duration("probe_interval", o.ProbeInterval.Std()))
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {
@@ -223,6 +234,7 @@ func main() {
 			logger.Fatal("gemini credentials", zap.Error(err))
 		}
 		srv.RegisterChatter(gemini.New(g.BaseURL, gstore, &http.Client{Timeout: g.Timeout.Std()}))
+		srv.RegisterProviderStore("gemini", gstore)
 		logger.Info("gemini provider enabled", zap.Int("credentials", gstore.Len()))
 	}
 
@@ -407,6 +419,33 @@ func runClaudeLogin(authDir string, port int, noBrowser bool) {
 		fatal("save tokens: %v", err)
 	}
 	fmt.Printf("\nClaude login successful (%s). Tokens saved to %s\n", name, path)
+}
+
+// startProbe runs an initial liveness/model-discovery probe and then repeats it
+// on the given interval in the background. A non-positive interval disables it.
+func startProbe(p *openai.Provider, interval time.Duration, logger *zap.Logger) {
+	probe := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := p.Probe(ctx); err != nil {
+			logger.Warn("provider probe failed", zap.String("provider", p.Name()), zap.Error(err))
+			return
+		}
+		alive, _, _ := p.Health()
+		logger.Debug("provider probed", zap.String("provider", p.Name()),
+			zap.Bool("alive", alive), zap.Int("models", len(p.Models())))
+	}
+	go probe()
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for range t.C {
+			probe()
+		}
+	}()
 }
 
 func fatal(format string, args ...any) {

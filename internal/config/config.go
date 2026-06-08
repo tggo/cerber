@@ -125,9 +125,10 @@ type Grok struct {
 // These run on the LAN (e.g. a GPU box) and usually need no API key, so
 // credentials are optional — main injects a dummy key when none are configured.
 type Ollama struct {
-	BaseURL     string       `yaml:"base_url"`
-	Timeout     Duration     `yaml:"timeout"`
-	Credentials []Credential `yaml:"credentials"`
+	BaseURL       string       `yaml:"base_url"`
+	Timeout       Duration     `yaml:"timeout"`
+	ProbeInterval Duration     `yaml:"probe_interval"` // liveness + model-discovery poll (0 = default)
+	Credentials   []Credential `yaml:"credentials"`
 }
 
 // CredentialType enumerates the supported Anthropic auth mechanisms.
@@ -166,6 +167,7 @@ const (
 	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
 	defaultGrokBase        = "https://api.x.ai"
 	defaultOllamaBase      = "http://localhost:11434"
+	defaultOllamaProbeNS   = 30 * time.Second
 	defaultProviderWaitNS  = 120 * time.Second
 )
 
@@ -278,6 +280,9 @@ func (c *Config) applyDefaults() {
 		}
 		if o.Timeout == 0 {
 			o.Timeout = Duration(defaultProviderWaitNS)
+		}
+		if o.ProbeInterval == 0 {
+			o.ProbeInterval = Duration(defaultOllamaProbeNS)
 		}
 	}
 }

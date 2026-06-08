@@ -37,6 +37,23 @@ type Chatter interface {
 	Chat(ctx context.Context, openaiBody []byte, stream bool, clientHeader http.Header) (*Response, error)
 }
 
+// ModelLister is an optional capability: a Chatter that knows which model IDs
+// its upstream serves (e.g. discovered via /v1/models). The server uses it to
+// route a request to the provider that actually has the requested model, without
+// relying on name-prefix configuration.
+type ModelLister interface {
+	Models() []string
+}
+
+// Inspectable is an optional capability for provider health/discovery reporting
+// in the management API. checkedAt is zero if the provider has never been probed.
+type Inspectable interface {
+	Name() string
+	BaseURL() string
+	Models() []string
+	Health() (alive bool, checkedAt time.Time, errMsg string)
+}
+
 // BadRequestError marks a client-side error (e.g. an untranslatable request) so
 // callers can map it to HTTP 400 instead of a 502 upstream error.
 type BadRequestError struct{ Err error }
