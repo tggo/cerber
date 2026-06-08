@@ -35,7 +35,9 @@ usage:
 providers:
   # Multiple providers can be enabled; on /v1/chat/completions cerber routes by
   # model name (gpt*/o1*/o3*/o4*/chatgpt* -> openai, gemini* -> gemini,
-  # everything else -> anthropic). Override with `routing` below.
+  # grok* -> grok, claude* -> anthropic). Models a probed provider advertises
+  # (e.g. ollama) also route automatically. An unknown model is rejected (400),
+  # not silently sent to anthropic. Override/add prefixes with `routing` below.
   # strategy: round-robin   # or "fill-first" (drain one account before the next)
   # routing:
   #   - { prefix: "gpt", provider: openai }

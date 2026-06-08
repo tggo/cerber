@@ -144,7 +144,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 ## Multi-provider routing + OpenAI provider
 **What:** the OpenAI-compatible endpoint routes by model name to a provider; OpenAI is supported as a real upstream (passthrough).
 **DoD:**
-- `route(model)`: configured `providers.routing` prefixes win; built-in defaults `gpt*/o1*/o3*/o4*/chatgpt*→openai`, `gemini*→gemini`, else `anthropic`.
+- `route(model)`: configured `providers.routing` prefixes win, then discovered models, then built-in prefixes `gpt*/o1*/o3*/o4*/chatgpt*→openai`, `gemini*→gemini`, `grok*→grok`, `claude*→anthropic`. An unknown model matches nothing and `/v1/chat/completions` rejects it with 400 (no silent Anthropic fallback).
 - `/v1/chat/completions` with an OpenAI model → forwarded to OpenAI (Bearer key, rotation across credentials), response relayed unchanged (stream + non-stream); tokens recorded from OpenAI usage.
 - Model routed to an unconfigured provider → 501; native `/v1/messages` remains Anthropic-only.
 - Anthropic is currently required as the base provider; OpenAI/Gemini are optional.

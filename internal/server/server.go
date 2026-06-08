@@ -183,7 +183,10 @@ func (s *Server) SetUpstreamProxy(target *url.URL, transport http.RoundTripper, 
 }
 
 // route returns the provider name a model should go to on the OpenAI endpoint.
-// Configured prefixes win; otherwise built-in defaults; default is "anthropic".
+// Order: configured prefixes, then discovered models, then built-in prefixes
+// (gpt*/o*→openai, gemini*→gemini, grok*→grok, claude*→anthropic). An unknown
+// model returns "" so the caller can reject it instead of silently using
+// Anthropic.
 func (s *Server) route(model string) string {
 	for _, r := range s.routes {
 		if strings.HasPrefix(model, r.Prefix) {
@@ -211,8 +214,10 @@ func (s *Server) route(model string) string {
 		return "gemini"
 	case strings.HasPrefix(model, "grok"):
 		return "grok"
-	default:
+	case strings.HasPrefix(model, "claude"):
 		return "anthropic"
+	default:
+		return "" // unknown model: no provider matched (see handleOpenAI)
 	}
 }
 
@@ -650,8 +655,15 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	model := extractModel(body)
 	stream := wantsStream(body)
 
-	// Route non-Anthropic models to their provider (OpenAI-format passthrough/translation).
-	if target := s.route(model); target != "anthropic" {
+	// Route by model. Unknown models are rejected rather than silently sent to
+	// Anthropic; non-Anthropic models go to their provider (OpenAI-format).
+	target := s.route(model)
+	if target == "" {
+		s.usage.Record(usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("no provider configured for model %q", model))
+		return
+	}
+	if target != "anthropic" {
 		chatter, ok := s.chatters[target]
 		if !ok {
 			s.usage.Record(usage.Event{Model: model, IsError: true})

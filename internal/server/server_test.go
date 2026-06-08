@@ -251,7 +251,7 @@ func TestOpenAI_StreamTranslated(t *testing.T) {
 	up.EXPECT().Send(mock.Anything, mock.Anything, true, mock.Anything, mock.Anything).
 		Return(resp(200, "text/event-stream", stream), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
-		`{"model":"c","stream":true,"messages":[{"role":"user","content":"hi"}]}`, clientKey)
+		`{"model":"claude","stream":true,"messages":[{"role":"user","content":"hi"}]}`, clientKey)
 	if rec.Code != 200 {
 		t.Fatalf("code %d", rec.Code)
 	}
@@ -269,7 +269,7 @@ func TestOpenAI_UpstreamErrorRelayed(t *testing.T) {
 	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(resp(400, "application/json", `{"error":"bad model"}`), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
-		`{"model":"c","messages":[{"role":"user","content":"hi"}]}`, clientKey)
+		`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`, clientKey)
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "bad model") {
 		t.Errorf("relay = %d %q", rec.Code, rec.Body.String())
 	}
@@ -320,7 +320,7 @@ func TestOpenAI_UpstreamUntranslatable_502(t *testing.T) {
 	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
 		Return(resp(200, "application/json", `{not valid json`), nil)
 	rec := do(t, s.Handler(), "POST", "/v1/chat/completions",
-		`{"model":"c","messages":[{"role":"user","content":"hi"}]}`, clientKey)
+		`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`, clientKey)
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("code %d, want 502", rec.Code)
 	}
@@ -695,7 +695,8 @@ func TestRoute(t *testing.T) {
 		"grok-2":            "grok",
 		"custom-model":      "openai", // config override
 		"llama3.1":          "ollama", // config override (arbitrary model name)
-		"mystery":           "anthropic",
+		"claude-3-5-haiku":  "anthropic",
+		"mystery":           "", // unknown -> no provider (rejected by caller)
 	}
 	for model, want := range cases {
 		if got := s.route(model); got != want {
@@ -913,9 +914,25 @@ func TestRoute_DiscoveredModel(t *testing.T) {
 	if got := s.route("hf.co/x/qwen:Q5"); got != "ollama" {
 		t.Errorf("route(hf.co/...) = %q, want ollama", got)
 	}
-	// an unknown model still falls back to anthropic
-	if got := s.route("mystery-model"); got != "anthropic" {
-		t.Errorf("route(mystery) = %q, want anthropic", got)
+	// an unknown model resolves to no provider (the caller rejects it)
+	if got := s.route("mystery-model"); got != "" {
+		t.Errorf("route(mystery) = %q, want empty", got)
+	}
+	// claude* is matched by prefix, not by a catch-all default
+	if got := s.route("claude-opus-4-8"); got != "anthropic" {
+		t.Errorf("route(claude) = %q, want anthropic", got)
+	}
+}
+
+func TestOpenAI_UnknownModelRejected(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	h := s.Handler()
+	rec := do(t, h, "POST", "/v1/chat/completions", `{"model":"totally-unknown","messages":[]}`, clientKey)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown model = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no provider configured") {
+		t.Errorf("unexpected error body: %s", rec.Body.String())
 	}
 }
 
