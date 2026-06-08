@@ -126,3 +126,34 @@ func TestName(t *testing.T) {
 		t.Error("name")
 	}
 }
+
+func TestProbeCredential(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var gotURL string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		gotURL = r.URL.String()
+		return resp(200, `{"models":[{"name":"models/gemini-2.5-flash"},{"name":"models/gemini-2.5-pro"}]}`), nil
+	})
+	p := New("https://generativelanguage.googleapis.com", store(t, "gk"), doer)
+	cred, _ := p.store.Next()
+	models, err := p.ProbeCredential(context.Background(), cred)
+	if err != nil {
+		t.Fatalf("ProbeCredential: %v", err)
+	}
+	if !strings.Contains(gotURL, "/v1beta/models?key=gk") {
+		t.Errorf("url = %s", gotURL)
+	}
+	if len(models) != 2 || models[0] != "gemini-2.5-flash" || models[1] != "gemini-2.5-pro" {
+		t.Errorf("models = %v (models/ prefix must be stripped)", models)
+	}
+}
+
+func TestProbeCredential_BadKey(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	doer.EXPECT().Do(mock.Anything).Return(resp(400, `{"error":{"status":"INVALID_ARGUMENT"}}`), nil)
+	p := New("https://generativelanguage.googleapis.com", store(t, "bad"), doer)
+	cred, _ := p.store.Next()
+	if _, err := p.ProbeCredential(context.Background(), cred); !errors.Is(err, provider.ErrInvalidCredential) {
+		t.Errorf("400 err = %v, want ErrInvalidCredential", err)
+	}
+}

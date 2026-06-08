@@ -230,14 +230,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `providers.routing` prefixes select it (local model names are arbitrary); `ollama` is a valid routing provider.
 **Verified:** `internal/config` (defaults/no-creds/bad-url) + `internal/server` route tests; live against gpu0 ollama — 2026-06-08.
 
-## Ollama health-probe + model discovery + providers view
-**What:** cerber periodically checks the local ollama/vLLM upstream's liveness and the models it serves, routes by those discovered models, and surfaces every provider's health/models/credentials in the dashboard.
+## Per-credential health probe + model discovery (all providers)
+**What:** cerber periodically validates every credential of every provider and collects the models each provider serves, then uses that for key-health reporting and discovery routing.
 **DoD:**
-- The ollama provider is probed at startup and every `providers.ollama.probe_interval` (default 30s) via `GET /v1/models`, recording alive/checked-at/error and the served model-ID set; a failed probe records an unhealthy state (does not crash).
-- Routing: after configured prefixes, a request whose model exactly matches a discovered model goes to that provider — so arbitrary ollama names (`supergemma4-…`, `hf.co/…`, `mdq100/…`) route to ollama with no prefix config; unknown models still fall back to anthropic.
-- `GET /admin/accounts` covers **every** provider's credentials (each tagged with `provider`), and enable/disable works across all provider stores; `GET /admin/providers` lists each provider with base_url, credential count, probed/alive/checked-at/error, and discovered models.
-- The embedded dashboard shows a providers section (status + model count) and a provider column in the accounts table.
-**Verified:** `internal/provider/openai` (probe/health/discovery) + `internal/server` (discovery routing, providers view, cross-provider accounts) tests; live against gpu0 — 2026-06-08.
+- A background probe runs at startup and every `providers.ollama.probe_interval` (default 60s) calling `ProbeAll`: for each provider, each credential is validated against the upstream — OpenAI-compatible (openai/grok/ollama) and Anthropic-API-key via `GET /v1/models`; Gemini via `GET /v1beta/models?key=`; Anthropic-OAuth via a minimal `POST /v1/messages` auth check (OAuth can't list models). A `401/403` marks the credential invalid (`ErrInvalidCredential`); other errors record the error string; success marks it healthy and contributes its models.
+- Per-credential health (`healthy`, `health_error`, `health_checked_at`) is stored and returned by `GET /admin/accounts` (every provider's creds, tagged with `provider`; enable/disable works across all stores).
+- `GET /admin/providers` lists each provider: base_url, credential count, healthy-credential count, and the discovered model union.
+- Routing: after configured prefixes, a request whose model exactly matches a discovered model (any provider) goes there — arbitrary ollama names (`supergemma4-…`, `hf.co/…`) route to ollama with no prefix config.
+- The embedded dashboard shows a providers section (keys-ok ratio + model count) and the accounts table shows a per-key valid/invalid column.
+**Verified:** `internal/provider/{openai,anthropic,gemini}` ProbeCredential tests + `internal/server` (ProbeAll key health, discovery routing, providers view, cross-provider accounts) tests; live against gpu0 + cloud keys — 2026-06-08.
 
 ## Client keys — dashboard-managed (dynamic, persisted)
 **What:** client API keys can be minted, enabled/disabled and deleted at runtime from the dashboard, in addition to the static config keys.

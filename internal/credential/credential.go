@@ -136,14 +136,24 @@ type entry struct {
 	cred          *Credential
 	cooldownUntil time.Time
 	disabled      bool
+
+	// Health from the latest probe (see SetHealth). healthAt zero = never probed.
+	healthChecked bool
+	healthy       bool
+	healthErr     string
+	healthAt      time.Time
 }
 
 // Info is a redacted snapshot of a credential's state for orchestration/listing.
 type Info struct {
-	Name        string `json:"name"`
-	Kind        Kind   `json:"kind"`
-	Enabled     bool   `json:"enabled"`
-	CoolingDown bool   `json:"cooling_down"`
+	Name            string    `json:"name"`
+	Kind            Kind      `json:"kind"`
+	Enabled         bool      `json:"enabled"`
+	CoolingDown     bool      `json:"cooling_down"`
+	HealthChecked   bool      `json:"health_checked"`
+	Healthy         bool      `json:"healthy"`
+	HealthError     string    `json:"health_error,omitempty"`
+	HealthCheckedAt time.Time `json:"health_checked_at,omitempty"`
 }
 
 // Store holds a provider's credentials and hands them out round-robin, skipping
@@ -247,13 +257,49 @@ func (s *Store) List() []Info {
 	out := make([]Info, 0, len(s.entries))
 	for _, e := range s.entries {
 		out = append(out, Info{
-			Name:        e.cred.Name(),
-			Kind:        e.cred.Kind(),
-			Enabled:     !e.disabled,
-			CoolingDown: now.Before(e.cooldownUntil),
+			Name:            e.cred.Name(),
+			Kind:            e.cred.Kind(),
+			Enabled:         !e.disabled,
+			CoolingDown:     now.Before(e.cooldownUntil),
+			HealthChecked:   e.healthChecked,
+			Healthy:         e.healthy,
+			HealthError:     e.healthErr,
+			HealthCheckedAt: e.healthAt,
 		})
 	}
 	return out
+}
+
+// All returns every credential in the store (including disabled ones), for
+// out-of-band tasks like health probing. The returned slice is a fresh copy; the
+// *Credential pointers are the live ones.
+func (s *Store) All() []*Credential {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Credential, 0, len(s.entries))
+	for _, e := range s.entries {
+		out = append(out, e.cred)
+	}
+	return out
+}
+
+// SetHealth records the result of probing a credential (valid/invalid + error),
+// stamped with the current time. Unknown credentials are ignored.
+func (s *Store) SetHealth(c *Credential, healthy bool, errMsg string) {
+	if c == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.cred == c {
+			e.healthChecked = true
+			e.healthy = healthy
+			e.healthErr = errMsg
+			e.healthAt = s.now()
+			return
+		}
+	}
 }
 
 // Cooldown sidelines a credential for the given duration (e.g. after a 429 or

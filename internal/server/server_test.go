@@ -887,26 +887,37 @@ func TestDispatch_NoneAvailable_503(t *testing.T) {
 	}
 }
 
-// fakeOllama is a Chatter that also implements ModelLister + Inspectable, to test
-// discovery routing and the providers view without a live upstream.
+// fakeOllama is a Chatter that also implements provider.Prober + BaseURLer, to
+// drive ProbeAll (key validation + model discovery) without a live upstream.
 type fakeOllama struct {
 	models []string
-	alive  bool
 }
 
-func (f *fakeOllama) Name() string     { return "ollama" }
-func (f *fakeOllama) BaseURL() string  { return "http://gpu0:11434" }
-func (f *fakeOllama) Models() []string { return f.models }
-func (f *fakeOllama) Health() (bool, time.Time, string) {
-	return f.alive, time.Unix(1700000000, 0), ""
+func (f *fakeOllama) Name() string    { return "ollama" }
+func (f *fakeOllama) BaseURL() string { return "http://gpu0:11434" }
+func (f *fakeOllama) ProbeCredential(context.Context, *credential.Credential) ([]string, error) {
+	return f.models, nil
 }
 func (f *fakeOllama) Chat(context.Context, []byte, bool, http.Header) (*provider.Response, error) {
 	return nil, errors.New("not used")
 }
 
+// registerOllama wires a fake ollama provider (chatter + store) and runs a probe
+// so its models are discovered.
+func registerOllama(t *testing.T, s *Server, models ...string) {
+	t.Helper()
+	s.RegisterChatter(&fakeOllama{models: models})
+	ostore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "ollama", Key: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterProviderStore("ollama", ostore)
+	s.ProbeAll(context.Background())
+}
+
 func TestRoute_DiscoveredModel(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
-	s.RegisterChatter(&fakeOllama{models: []string{"supergemma4-26b:latest", "hf.co/x/qwen:Q5"}})
+	registerOllama(t, s, "supergemma4-26b:latest", "hf.co/x/qwen:Q5")
 	// no prefix matches these arbitrary names — discovery must catch them
 	if got := s.route("supergemma4-26b:latest"); got != "ollama" {
 		t.Errorf("route(supergemma4) = %q, want ollama", got)
@@ -938,9 +949,7 @@ func TestOpenAI_UnknownModelRejected(t *testing.T) {
 
 func TestProvidersView(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 2)) // anthropic store: 2 creds
-	s.RegisterChatter(&fakeOllama{models: []string{"llama3.1:8b"}, alive: true})
-	ostore, _ := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "ollama", Key: "x"}})
-	s.RegisterProviderStore("ollama", ostore)
+	registerOllama(t, s, "llama3.1:8b")
 	h := s.Handler()
 
 	rec := do(t, h, "GET", "/admin/providers", "", clientKey)
@@ -949,12 +958,11 @@ func TestProvidersView(t *testing.T) {
 	}
 	var d struct {
 		Providers []struct {
-			Name        string
-			BaseURL     string `json:"base_url"`
-			Credentials int
-			Probed      bool
-			Alive       bool
-			Models      []string
+			Name         string
+			BaseURL      string `json:"base_url"`
+			Credentials  int
+			HealthyCreds int `json:"healthy_credentials"`
+			Models       []string
 		}
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
@@ -964,7 +972,7 @@ func TestProvidersView(t *testing.T) {
 	for _, p := range d.Providers {
 		if p.Name == "ollama" {
 			ollama = true
-			if !p.Alive || !p.Probed || p.BaseURL == "" || len(p.Models) != 1 || p.Credentials != 1 {
+			if p.BaseURL == "" || len(p.Models) != 1 || p.Credentials != 1 || p.HealthyCreds != 1 {
 				t.Errorf("ollama view = %+v", p)
 			}
 		}
@@ -981,6 +989,60 @@ func TestProvidersView(t *testing.T) {
 	// auth required
 	if rec := do(t, h, "GET", "/admin/providers", "", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
+// fakeKeyProber marks credentials whose key is "bad" as invalid, others valid.
+type fakeKeyProber struct{ name string }
+
+func (f *fakeKeyProber) Name() string { return f.name }
+func (f *fakeKeyProber) ProbeCredential(_ context.Context, c *credential.Credential) ([]string, error) {
+	if c.APIKey() == "bad" {
+		return nil, provider.ErrInvalidCredential
+	}
+	return []string{"m1"}, nil
+}
+func (f *fakeKeyProber) Chat(context.Context, []byte, bool, http.Header) (*provider.Response, error) {
+	return nil, errors.New("not used")
+}
+
+func TestProbeAll_KeyHealth(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.RegisterChatter(&fakeKeyProber{name: "openai"})
+	store, _ := credential.NewStore([]config.Credential{
+		{Type: config.CredentialAPIKey, Name: "good-key", Key: "ok"},
+		{Type: config.CredentialAPIKey, Name: "bad-key", Key: "bad"},
+	})
+	s.RegisterProviderStore("openai", store)
+	s.ProbeAll(context.Background())
+
+	rec := do(t, s.Handler(), "GET", "/admin/accounts", "", clientKey)
+	body := rec.Body.String()
+	if !strings.Contains(body, `"name":"good-key"`) || !strings.Contains(body, `"name":"bad-key"`) {
+		t.Fatalf("accounts: %s", body)
+	}
+	var d struct {
+		Accounts []struct {
+			Name          string
+			HealthChecked bool   `json:"health_checked"`
+			Healthy       bool   `json:"healthy"`
+			HealthError   string `json:"health_error"`
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range d.Accounts {
+		switch a.Name {
+		case "good-key":
+			if !a.HealthChecked || !a.Healthy {
+				t.Errorf("good-key should be healthy: %+v", a)
+			}
+		case "bad-key":
+			if !a.HealthChecked || a.Healthy || a.HealthError == "" {
+				t.Errorf("bad-key should be unhealthy with error: %+v", a)
+			}
+		}
 	}
 }
 
@@ -1006,7 +1068,7 @@ func TestAccounts_AcrossProviders(t *testing.T) {
 
 func TestLLMDoc(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
-	s.RegisterChatter(&fakeOllama{models: []string{"llama3.1:8b", "supergemma4-26b:latest"}, alive: true})
+	registerOllama(t, s, "llama3.1:8b", "supergemma4-26b:latest")
 	h := s.Handler()
 
 	// public: readable with no key (so a browser/agent can discover usage)

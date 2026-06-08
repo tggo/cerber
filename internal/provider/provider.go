@@ -37,21 +37,24 @@ type Chatter interface {
 	Chat(ctx context.Context, openaiBody []byte, stream bool, clientHeader http.Header) (*Response, error)
 }
 
-// ModelLister is an optional capability: a Chatter that knows which model IDs
-// its upstream serves (e.g. discovered via /v1/models). The server uses it to
-// route a request to the provider that actually has the requested model, without
-// relying on name-prefix configuration.
-type ModelLister interface {
-	Models() []string
+// ErrInvalidCredential is returned by a Prober when the upstream rejects a
+// credential's auth (e.g. 401/403) — i.e. the key/token is bad, as opposed to a
+// transport or server error.
+var ErrInvalidCredential = errors.New("provider: credential rejected by upstream")
+
+// Prober is an optional capability: validate a single credential against the
+// upstream and report the model IDs it can access. A nil error means the
+// credential is valid; ErrInvalidCredential means it was rejected; any other
+// error is a transport/unknown failure. models may be empty even when valid
+// (e.g. an upstream that has no model-listing for that auth kind).
+type Prober interface {
+	ProbeCredential(ctx context.Context, c *credential.Credential) (models []string, err error)
 }
 
-// Inspectable is an optional capability for provider health/discovery reporting
-// in the management API. checkedAt is zero if the provider has never been probed.
-type Inspectable interface {
-	Name() string
+// BaseURLer is an optional capability exposing a provider's upstream base URL
+// for the management UI (safe to display).
+type BaseURLer interface {
 	BaseURL() string
-	Models() []string
-	Health() (alive bool, checkedAt time.Time, errMsg string)
 }
 
 // BadRequestError marks a client-side error (e.g. an untranslatable request) so

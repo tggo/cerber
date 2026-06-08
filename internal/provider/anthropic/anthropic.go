@@ -7,6 +7,7 @@ package anthropic
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -37,6 +38,72 @@ func New(baseURL, version string, doer provider.HTTPDoer) *Client {
 		version: version,
 		http:    doer,
 	}
+}
+
+// ModelsPath is the Anthropic model-listing endpoint (API-key auth only; OAuth
+// tokens are inference-scoped and get 401 here).
+const ModelsPath = "/v1/models"
+
+// BaseURL returns the configured upstream base URL (safe to display).
+func (c *Client) BaseURL() string { return c.baseURL }
+
+// ProbeCredential validates one Anthropic credential.
+//   - API key: GET /v1/models (x-api-key) → the model IDs it can access.
+//   - OAuth: /v1/models is not available to inference-scoped tokens, so validity
+//     is checked with a minimal POST /v1/messages — a 401 means the token is bad;
+//     any other status (e.g. 400 for the empty body) means auth passed. No models.
+//
+// A 401/403 yields provider.ErrInvalidCredential.
+func (c *Client) ProbeCredential(ctx context.Context, cred *credential.Credential) ([]string, error) {
+	if cred == nil {
+		return nil, provider.ErrInvalidCredential
+	}
+	if cred.Kind() == credential.KindOAuth {
+		// OAuth (Claude Code) tokens can't list models, and a live /v1/messages
+		// probe would only pass with the full injected Claude Code system prompt —
+		// which is large and would cost real tokens every probe. So validity is a
+		// zero-cost state check: a present access token is "working" (cerber
+		// refreshes it before expiry); only a missing token is invalid.
+		_ = ctx
+		if cred.AccessToken() == "" {
+			return nil, provider.ErrInvalidCredential
+		}
+		return nil, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+ModelsPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: build models request: %w", err)
+	}
+	req.Header.Set("anthropic-version", c.version)
+	req.Header.Set("Accept", "application/json")
+	applyAuth(req, cred)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, provider.ErrInvalidCredential
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("anthropic: models probe status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("anthropic: decode models: %w", err)
+	}
+	models := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+	return models, nil
 }
 
 // managedRequestHeaders are headers cerber sets itself; client copies of these

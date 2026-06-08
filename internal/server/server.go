@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tggo/cerber/internal/access"
@@ -62,6 +63,8 @@ type Server struct {
 	quota          *quota.Tracker
 	chatters       map[string]provider.Chatter
 	provStores     map[string]*credential.Store // provider name -> its credential store (for the accounts view)
+	provMu         sync.Mutex
+	provModels     map[string][]string // provider name -> discovered model IDs (from ProbeAll)
 	routes         []config.Route
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
@@ -97,6 +100,7 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		quota:       quota.New(),
 		chatters:    map[string]provider.Chatter{},
 		provStores:  map[string]*credential.Store{},
+		provModels:  map[string][]string{},
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
@@ -194,16 +198,10 @@ func (s *Server) route(model string) string {
 		}
 	}
 	// Discovery: route to whichever provider actually advertises this exact model
-	// (e.g. a local ollama serving "supergemma4-…" or "hf.co/…" names that no
-	// prefix would match). Probed providers only.
-	for name, c := range s.chatters {
-		if ml, ok := c.(provider.ModelLister); ok {
-			for _, m := range ml.Models() {
-				if m == model {
-					return name
-				}
-			}
-		}
+	// (from the latest probe), e.g. a local ollama serving "supergemma4-…" or
+	// "hf.co/…" names that no prefix would match.
+	if name := s.providerForModel(model); name != "" {
+		return name
 	}
 	switch {
 	case strings.HasPrefix(model, "gpt"), strings.HasPrefix(model, "o1"),
@@ -347,6 +345,90 @@ func (s *Server) accountStores() map[string]*credential.Store {
 	return stores
 }
 
+// setProviderModels stores the discovered model IDs for a provider.
+func (s *Server) setProviderModels(name string, models []string) {
+	s.provMu.Lock()
+	defer s.provMu.Unlock()
+	s.provModels[name] = models
+}
+
+// providerModels returns a copy of a provider's discovered model IDs.
+func (s *Server) providerModels(name string) []string {
+	s.provMu.Lock()
+	defer s.provMu.Unlock()
+	m := s.provModels[name]
+	out := make([]string, len(m))
+	copy(out, m)
+	return out
+}
+
+// providerForModel returns the provider whose discovered models include the exact
+// model, or "" if none.
+func (s *Server) providerForModel(model string) string {
+	s.provMu.Lock()
+	defer s.provMu.Unlock()
+	for name, models := range s.provModels {
+		for _, m := range models {
+			if m == model {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// proberFor returns the Prober for a provider name: the Anthropic upstream for
+// "anthropic", otherwise the registered chatter. Returns nil if it can't probe.
+func (s *Server) proberFor(name string) provider.Prober {
+	if name == "anthropic" {
+		if pr, ok := s.upstream.(provider.Prober); ok {
+			return pr
+		}
+		return nil
+	}
+	if pr, ok := s.chatters[name].(provider.Prober); ok {
+		return pr
+	}
+	return nil
+}
+
+// ProbeAll validates every credential of every provider against its upstream and
+// refreshes the discovered model set per provider. Per-credential validity is
+// recorded on the store (visible in /admin/accounts); the model union per
+// provider drives discovery routing and /admin/providers. Credentials whose
+// probe is unsupported or errors keep their last health; invalid ones are flagged.
+func (s *Server) ProbeAll(ctx context.Context) {
+	for name, store := range s.accountStores() {
+		prober := s.proberFor(name)
+		if prober == nil {
+			continue
+		}
+		modelSet := map[string]struct{}{}
+		for _, c := range store.All() {
+			models, err := prober.ProbeCredential(ctx, c)
+			switch {
+			case errors.Is(err, provider.ErrInvalidCredential):
+				store.SetHealth(c, false, "credential rejected by upstream")
+			case err != nil:
+				store.SetHealth(c, false, err.Error())
+			default:
+				store.SetHealth(c, true, "")
+				for _, m := range models {
+					modelSet[m] = struct{}{}
+				}
+			}
+		}
+		models := make([]string, 0, len(modelSet))
+		for m := range modelSet {
+			models = append(models, m)
+		}
+		sort.Strings(models)
+		s.setProviderModels(name, models)
+		s.log.Debug("provider probed", zap.String("provider", name),
+			zap.Int("credentials", store.Len()), zap.Int("models", len(models)))
+	}
+}
+
 // handleAccounts lists every provider's credentials with state and usage.
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	if !s.adminAuthorized(w, r) {
@@ -382,20 +464,29 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"accounts": out})
 }
 
-// providerView is a provider's health + discovered models for the management UI.
+// providerView is a provider's credential health + discovered models for the UI.
 type providerView struct {
-	Name        string    `json:"name"`
-	BaseURL     string    `json:"base_url,omitempty"`
-	Credentials int       `json:"credentials"`
-	Probed      bool      `json:"probed"`
-	Alive       bool      `json:"alive"`
-	CheckedAt   time.Time `json:"checked_at,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	Models      []string  `json:"models,omitempty"`
+	Name         string   `json:"name"`
+	BaseURL      string   `json:"base_url,omitempty"`
+	Credentials  int      `json:"credentials"`
+	HealthyCreds int      `json:"healthy_credentials"`
+	Models       []string `json:"models,omitempty"`
 }
 
-// handleProviders lists each configured provider with its liveness (if probed)
-// and the models it advertises (for ollama/vLLM discovery).
+// baseURLOf returns a provider's upstream base URL if it exposes one.
+func (s *Server) baseURLOf(name string) string {
+	var p any = s.chatters[name]
+	if name == "anthropic" {
+		p = s.upstream
+	}
+	if b, ok := p.(provider.BaseURLer); ok {
+		return b.BaseURL()
+	}
+	return ""
+}
+
+// handleProviders lists each configured provider: credential count, how many
+// credentials are currently healthy, and the models discovered for it.
 func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	if !s.adminAuthorized(w, r) {
 		return
@@ -408,17 +499,19 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(names)
 	out := make([]providerView, 0, len(names))
 	for _, name := range names {
-		pv := providerView{Name: name, Credentials: stores[name].Len()}
-		if c, ok := s.chatters[name]; ok {
-			if insp, ok := c.(provider.Inspectable); ok {
-				pv.BaseURL = insp.BaseURL()
-				pv.Models = insp.Models()
-				alive, checkedAt, errMsg := insp.Health()
-				pv.Alive, pv.CheckedAt, pv.Error = alive, checkedAt, errMsg
-				pv.Probed = !checkedAt.IsZero()
+		healthy := 0
+		for _, info := range stores[name].List() {
+			if info.HealthChecked && info.Healthy {
+				healthy++
 			}
 		}
-		out = append(out, pv)
+		out = append(out, providerView{
+			Name:         name,
+			BaseURL:      s.baseURLOf(name),
+			Credentials:  stores[name].Len(),
+			HealthyCreds: healthy,
+			Models:       s.providerModels(name),
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -480,18 +573,15 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		insp, ok := s.chatters[name].(provider.Inspectable)
-		if ok {
-			if models := insp.Models(); len(models) > 0 {
-				fmt.Fprintf(&b, "### %s (%d)\n\n", name, len(models))
-				for _, m := range models {
-					fmt.Fprintf(&b, "- `%s`\n", m)
-				}
-				b.WriteString("\n")
-				continue
+		if models := s.providerModels(name); len(models) > 0 {
+			fmt.Fprintf(&b, "### %s (%d)\n\n", name, len(models))
+			for _, m := range models {
+				fmt.Fprintf(&b, "- `%s`\n", m)
 			}
+			b.WriteString("\n")
+			continue
 		}
-		// No discovered list (cloud providers): give the routing hint instead.
+		// No discovered list (e.g. Claude via OAuth): give the routing hint.
 		fmt.Fprintf(&b, "### %s\n\nUse this provider's standard model names (routed by the prefixes above).\n\n", name)
 	}
 

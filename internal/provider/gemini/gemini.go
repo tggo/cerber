@@ -7,6 +7,7 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +44,51 @@ func New(baseURL string, store *credential.Store, doer provider.HTTPDoer) *Provi
 
 // Name identifies this provider.
 func (p *Provider) Name() string { return "gemini" }
+
+// BaseURL returns the configured upstream base URL (safe to display).
+func (p *Provider) BaseURL() string { return p.baseURL }
+
+// ProbeCredential validates a Gemini API key via GET /v1beta/models?key=… and
+// returns the model IDs (with the "models/" prefix stripped). A 400/401/403
+// yields provider.ErrInvalidCredential.
+func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential) ([]string, error) {
+	if c == nil || c.APIKey() == "" {
+		return nil, provider.ErrInvalidCredential
+	}
+	url := fmt.Sprintf("%s/v1beta/models?key=%s&pageSize=200", p.baseURL, c.APIKey())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("gemini: build models request: %w", err)
+	}
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	// Gemini returns 400 INVALID_ARGUMENT for a malformed key and 403 for a
+	// disabled/forbidden one; treat both as a bad credential.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
+		return nil, provider.ErrInvalidCredential
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gemini: models probe status %d", resp.StatusCode)
+	}
+	var out struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("gemini: decode models: %w", err)
+	}
+	models := make([]string, 0, len(out.Models))
+	for _, m := range out.Models {
+		if id := strings.TrimPrefix(m.Name, "models/"); id != "" {
+			models = append(models, id)
+		}
+	}
+	return models, nil
+}
 
 // Chat translates the OpenAI request to Gemini, sends it (rotating credentials),
 // and translates the response back to OpenAI format.

@@ -168,16 +168,20 @@
       const r = await fetch("/admin/accounts", { headers: authHeaders() });
       if (!r.ok) { $("accounts").innerHTML = `<tr><td class="muted">accounts: HTTP ${r.status}</td></tr>`; return; }
       const d = await r.json();
-      const head = "<tr><th>provider</th><th>name</th><th>kind</th><th>state</th><th>requests</th><th>errors</th><th>5h quota</th><th></th></tr>";
+      const head = "<tr><th>provider</th><th>name</th><th>kind</th><th>key</th><th>state</th><th>requests</th><th>errors</th><th>5h quota</th><th></th></tr>";
       const body = (d.accounts || []).map(a => {
         const q = a.quota ? (Math.round((a.quota.five_hour.utilization || 0) * 100) + "%") : "—";
         const btn = a.enabled
           ? `<button data-n="${a.name}" data-act="disable">disable</button>`
           : `<button data-n="${a.name}" data-act="enable">enable</button>`;
         const state = a.cooling_down ? `<span class="err">cooling</span>` : (a.enabled ? `<span style="color:var(--ok)">on</span>` : `<span class="muted">off</span>`);
-        return `<tr><td class="muted">${a.provider||"—"}</td><td>${a.name}</td><td class="muted">${a.kind}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
+        let key;
+        if (!a.health_checked) key = `<span class="muted">—</span>`;
+        else if (a.healthy) key = `<span style="color:var(--ok)">✓ valid</span>`;
+        else key = `<span class="err" title="${(a.health_error||'').replace(/"/g,'')}">✗ invalid</span>`;
+        return `<tr><td class="muted">${a.provider||"—"}</td><td>${a.name}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
       }).join("");
-      $("accounts").innerHTML = head + (body || `<tr><td colspan="8" class="muted">no accounts</td></tr>`);
+      $("accounts").innerHTML = head + (body || `<tr><td colspan="9" class="muted">no accounts</td></tr>`);
       $("accounts").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
         await fetch(`/admin/accounts/${encodeURIComponent(b.dataset.n)}/${b.dataset.act}`,
           { method: "POST", headers: authHeaders() });
@@ -191,18 +195,17 @@
       const r = await fetch("/admin/providers", { headers: authHeaders() });
       if (!r.ok) { $("providers").innerHTML = `<tr><td class="muted">providers: HTTP ${r.status}</td></tr>`; return; }
       const d = await r.json();
-      const head = "<tr><th>provider</th><th>endpoint</th><th>status</th><th>creds</th><th>models</th></tr>";
+      const head = "<tr><th>provider</th><th>endpoint</th><th>keys ok</th><th>models</th></tr>";
       const body = (d.providers || []).map(p => {
-        let status;
-        if (!p.probed) status = `<span class="muted">not probed</span>`;
-        else if (p.alive) status = `<span style="color:var(--ok)">● live</span>`;
-        else status = `<span class="err" title="${(p.error||'').replace(/"/g,'')}">● down</span>`;
+        const total = p.credentials || 0, ok = p.healthy_credentials || 0;
+        const cls = ok === 0 ? "err" : (ok < total ? "" : "");
+        const keys = `<span class="${ok===0?'err':''}" style="${ok>0&&ok===total?'color:var(--ok)':''}">${ok}/${total}</span>`;
         const models = (p.models && p.models.length)
-          ? `<span title="${p.models.join('\n')}">${p.models.length} models ▾</span>`
+          ? `<span title="${p.models.join('\n')}">${p.models.length} ▾</span>`
           : `<span class="muted">—</span>`;
-        return `<tr><td>${p.name}</td><td class="muted">${p.base_url||"—"}</td><td>${status}</td><td class="muted">${p.credentials}</td><td class="muted">${models}</td></tr>`;
+        return `<tr><td>${p.name}</td><td class="muted">${p.base_url||"—"}</td><td>${keys}</td><td class="muted">${models}</td></tr>`;
       }).join("");
-      $("providers").innerHTML = head + (body || `<tr><td colspan="5" class="muted">no providers</td></tr>`);
+      $("providers").innerHTML = head + (body || `<tr><td colspan="4" class="muted">no providers</td></tr>`);
     } catch (e) { /* ignore */ }
   }
 

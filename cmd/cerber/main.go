@@ -218,14 +218,10 @@ func main() {
 			logger.Fatal("ollama credentials", zap.Error(err))
 		}
 		// ollama/vLLM serve an OpenAI-compatible API: reuse the OpenAI provider.
-		ollamaProv := openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()})
-		srv.RegisterChatter(ollamaProv)
+		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
 		srv.RegisterProviderStore("ollama", ostore)
-		// Periodic liveness + model discovery: lets requests route to whatever
-		// models ollama actually serves (no name-prefix config needed).
-		startProbe(ollamaProv, o.ProbeInterval.Std(), logger)
 		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
-			zap.Int("credentials", ostore.Len()), zap.Duration("probe_interval", o.ProbeInterval.Std()))
+			zap.Int("credentials", ostore.Len()))
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {
@@ -237,6 +233,15 @@ func main() {
 		srv.RegisterProviderStore("gemini", gstore)
 		logger.Info("gemini provider enabled", zap.Int("credentials", gstore.Len()))
 	}
+
+	// Periodically validate every credential and refresh each provider's model
+	// list (drives key-health in the dashboard + discovery routing). Cadence comes
+	// from providers.ollama.probe_interval when set, else 60s.
+	probeInterval := 60 * time.Second
+	if o := cfg.Providers.Ollama; o != nil && o.ProbeInterval.Std() > 0 {
+		probeInterval = o.ProbeInterval.Std()
+	}
+	startHealthProbe(srv, probeInterval, logger)
 
 	handler := srv.Handler()
 	logger.Info("cerber starting",
@@ -421,19 +426,14 @@ func runClaudeLogin(authDir string, port int, noBrowser bool) {
 	fmt.Printf("\nClaude login successful (%s). Tokens saved to %s\n", name, path)
 }
 
-// startProbe runs an initial liveness/model-discovery probe and then repeats it
-// on the given interval in the background. A non-positive interval disables it.
-func startProbe(p *openai.Provider, interval time.Duration, logger *zap.Logger) {
+// startHealthProbe runs an initial credential/model probe across all providers
+// and then repeats it on the given interval. A non-positive interval disables
+// the repeat (the one-shot still runs).
+func startHealthProbe(srv *server.Server, interval time.Duration, logger *zap.Logger) {
 	probe := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := p.Probe(ctx); err != nil {
-			logger.Warn("provider probe failed", zap.String("provider", p.Name()), zap.Error(err))
-			return
-		}
-		alive, _, _ := p.Health()
-		logger.Debug("provider probed", zap.String("provider", p.Name()),
-			zap.Bool("alive", alive), zap.Int("models", len(p.Models())))
+		srv.ProbeAll(ctx)
 	}
 	go probe()
 	if interval <= 0 {

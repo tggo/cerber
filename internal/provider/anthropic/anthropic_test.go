@@ -10,6 +10,7 @@ import (
 
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
 	"github.com/tggo/cerber/internal/provider/mocks"
 
 	"github.com/stretchr/testify/mock"
@@ -209,5 +210,51 @@ func TestSend_BadURL(t *testing.T) {
 	c := New("http://\x7f", "v", mocks.NewHTTPDoer(t))
 	if _, err := c.Send(context.Background(), []byte(`{}`), false, cred, http.Header{}); err == nil {
 		t.Fatal("expected error for invalid URL")
+	}
+}
+
+func TestProbeCredential_APIKeyModels(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var url, apiKey string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		url = r.URL.String()
+		apiKey = r.Header.Get("x-api-key")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(
+			`{"data":[{"id":"claude-sonnet-4-6"},{"id":"claude-3-5-haiku"},{"id":""}]}`))}, nil
+	})
+	c := New("https://api.anthropic.com", "2023-06-01", doer)
+	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "sk-ant"})
+	cred, _ := store.Next()
+	models, err := c.ProbeCredential(context.Background(), cred)
+	if err != nil {
+		t.Fatalf("ProbeCredential: %v", err)
+	}
+	if url != "https://api.anthropic.com/v1/models" || apiKey != "sk-ant" {
+		t.Errorf("url=%s key=%s", url, apiKey)
+	}
+	if len(models) != 2 || models[0] != "claude-sonnet-4-6" {
+		t.Errorf("models = %v", models)
+	}
+}
+
+func TestProbeCredential_APIKeyInvalid(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	doer.EXPECT().Do(mock.Anything).Return(&http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(`{}`))}, nil)
+	c := New("https://api.anthropic.com", "2023-06-01", doer)
+	s := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "sk-bad"})
+	cred, _ := s.Next()
+	if _, err := c.ProbeCredential(context.Background(), cred); !errors.Is(err, provider.ErrInvalidCredential) {
+		t.Errorf("401 err = %v, want ErrInvalidCredential", err)
+	}
+}
+
+func TestProbeCredential_OAuthStateCheck(t *testing.T) {
+	// OAuth is validated by state (no network call): a present token is healthy.
+	doer := mocks.NewHTTPDoer(t) // no Do() expectation — must not be called
+	c := New("https://api.anthropic.com", "2023-06-01", doer)
+	s := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "tok"})
+	cred, _ := s.Next()
+	if models, err := c.ProbeCredential(context.Background(), cred); err != nil || len(models) != 0 {
+		t.Errorf("oauth with token: models=%v err=%v (want healthy, no models)", models, err)
 	}
 }

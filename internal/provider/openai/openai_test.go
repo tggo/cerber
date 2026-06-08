@@ -10,6 +10,7 @@ import (
 
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
+	"github.com/tggo/cerber/internal/provider"
 	"github.com/tggo/cerber/internal/provider/mocks"
 
 	"github.com/stretchr/testify/mock"
@@ -121,60 +122,46 @@ func TestName(t *testing.T) {
 		t.Error("name")
 	}
 }
-
-func TestProbe_DiscoversModelsAndHealth(t *testing.T) {
+func TestProbeCredential_Models(t *testing.T) {
 	doer := mocks.NewHTTPDoer(t)
-	var gotURL string
+	var gotURL, gotAuth string
 	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
 		gotURL = r.URL.String()
-		return resp(200, `{"object":"list","data":[{"id":"llama3.1:8b"},{"id":"supergemma4-26b:latest"},{"id":""}]}`), nil
+		gotAuth = r.Header.Get("Authorization")
+		return resp(200, `{"object":"list","data":[{"id":"llama3.1:8b"},{"id":"qwen3:9b"},{"id":""}]}`), nil
 	})
-	p := New("ollama", "http://gpu0:11434", store(t, "x"), doer)
-
-	// before probe: not alive, never checked, no models
-	if alive, at, _ := p.Health(); alive || !at.IsZero() {
-		t.Errorf("pre-probe health = %v %v", alive, at)
-	}
-	if len(p.Models()) != 0 {
-		t.Error("pre-probe models should be empty")
-	}
-
-	if err := p.Probe(context.Background()); err != nil {
-		t.Fatalf("Probe: %v", err)
+	p := New("ollama", "http://gpu0:11434", store(t, "sk-k"), doer)
+	cred, _ := p.store.Next()
+	models, err := p.ProbeCredential(context.Background(), cred)
+	if err != nil {
+		t.Fatalf("ProbeCredential: %v", err)
 	}
 	if gotURL != "http://gpu0:11434/v1/models" {
-		t.Errorf("probe url = %s", gotURL)
+		t.Errorf("url = %s", gotURL)
 	}
-	alive, at, errMsg := p.Health()
-	if !alive || at.IsZero() || errMsg != "" {
-		t.Errorf("post-probe health = %v %v %q", alive, at, errMsg)
+	if gotAuth != "Bearer sk-k" {
+		t.Errorf("auth = %q", gotAuth)
 	}
-	got := p.Models()
-	if len(got) != 2 || got[0] != "llama3.1:8b" || got[1] != "supergemma4-26b:latest" {
-		t.Errorf("models = %v (empty ids must be dropped)", got)
+	if len(models) != 2 || models[0] != "llama3.1:8b" || models[1] != "qwen3:9b" {
+		t.Errorf("models = %v (empty ids dropped)", models)
 	}
 }
 
-func TestProbe_ErrorsRecordUnhealthy(t *testing.T) {
-	// transport error
+func TestProbeCredential_InvalidAndError(t *testing.T) {
+	// 401 -> ErrInvalidCredential
 	d1 := mocks.NewHTTPDoer(t)
-	d1.EXPECT().Do(mock.Anything).Return(nil, errors.New("dial fail"))
-	p1 := New("ollama", "http://x", store(t, "k"), d1)
-	if err := p1.Probe(context.Background()); err == nil {
-		t.Error("transport error should propagate")
+	d1.EXPECT().Do(mock.Anything).Return(resp(401, `{}`), nil)
+	p1 := New("openai", "https://api.openai.com", store(t, "bad"), d1)
+	c1, _ := p1.store.Next()
+	if _, err := p1.ProbeCredential(context.Background(), c1); !errors.Is(err, provider.ErrInvalidCredential) {
+		t.Errorf("401 err = %v, want ErrInvalidCredential", err)
 	}
-	if alive, at, msg := p1.Health(); alive || at.IsZero() || msg == "" {
-		t.Errorf("after transport error: %v %v %q", alive, at, msg)
-	}
-
-	// non-200
+	// transport error -> plain error (not ErrInvalidCredential)
 	d2 := mocks.NewHTTPDoer(t)
-	d2.EXPECT().Do(mock.Anything).Return(resp(503, ``), nil)
-	p2 := New("ollama", "http://x", store(t, "k"), d2)
-	if err := p2.Probe(context.Background()); err == nil {
-		t.Error("non-200 should error")
-	}
-	if alive, _, msg := p2.Health(); alive || !strings.Contains(msg, "503") {
-		t.Errorf("after 503: alive=%v msg=%q", alive, msg)
+	d2.EXPECT().Do(mock.Anything).Return(nil, errors.New("dial fail"))
+	p2 := New("openai", "https://api.openai.com", store(t, "k"), d2)
+	c2, _ := p2.store.Next()
+	if _, err := p2.ProbeCredential(context.Background(), c2); err == nil || errors.Is(err, provider.ErrInvalidCredential) {
+		t.Errorf("transport err = %v, want plain error", err)
 	}
 }
