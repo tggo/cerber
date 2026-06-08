@@ -43,6 +43,14 @@
   .chart rect.req { fill:var(--accent); }
   .chart rect.err { fill:var(--err); }
   .chart text { fill:var(--muted); font-size:10px; }
+  .keybar { display:flex; gap:10px; margin-bottom:12px; }
+  .keybar input { flex:1; width:auto; }
+  #newKeyReveal { margin-bottom:12px; }
+  #newKeyReveal .reveal { background:var(--panel); border:1px solid var(--ok);
+    border-radius:10px; padding:12px 14px; display:flex; gap:10px; align-items:center; }
+  #newKeyReveal code { color:var(--ok); word-break:break-all; flex:1; }
+  button.danger:hover { border-color:var(--err); color:var(--err); }
+  td .row-actions { display:flex; gap:6px; justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -58,6 +66,15 @@
   <div class="cards" id="cards"></div>
   <section><h2>requests / hour (last 48h)</h2><div id="chart" class="chart"></div></section>
   <section><h2>accounts</h2><table id="accounts"></table></section>
+  <section>
+    <h2>client keys</h2>
+    <div class="keybar">
+      <input id="newKeyName" placeholder="new key name (e.g. laptop, ci)" autocomplete="off">
+      <button id="createKey">create key</button>
+    </div>
+    <div id="newKeyReveal"></div>
+    <table id="keys"></table>
+  </section>
   <section><h2>by credential</h2><table id="byCred"></table></section>
   <section><h2>by model</h2><table id="byModel"></table></section>
 </main>
@@ -108,6 +125,7 @@
       rows($("byModel"), d.by_model || [], head);
       renderChart(d.series || []);
       loadAccounts();
+      loadKeys();
       $("status").innerHTML = `<span class="ok" style="color:var(--ok)">●</span> updated ${new Date().toLocaleTimeString()}`;
     } catch (e) {
       $("status").innerHTML = `<span class="err">${e}</span>`;
@@ -164,6 +182,67 @@
     } catch (e) { /* ignore */ }
   }
 
+  function authHeaders() { return { Authorization: "Bearer " + key.value }; }
+
+  async function loadKeys() {
+    try {
+      const r = await fetch("/admin/keys", { headers: authHeaders() });
+      if (!r.ok) { $("keys").innerHTML = `<tr><td class="muted">keys: HTTP ${r.status}</td></tr>`; return; }
+      const d = await r.json();
+      const head = "<tr><th>name</th><th>key</th><th>state</th><th>created</th><th>last used</th><th></th></tr>";
+      const body = (d.keys || []).map(k => {
+        const state = k.enabled ? `<span style="color:var(--ok)">on</span>` : `<span class="muted">off</span>`;
+        const toggle = k.enabled
+          ? `<button data-n="${k.name}" data-act="disable">disable</button>`
+          : `<button data-n="${k.name}" data-act="enable">enable</button>`;
+        const del = `<button class="danger" data-n="${k.name}" data-act="delete">delete</button>`;
+        const created = k.created_at ? new Date(k.created_at).toLocaleDateString() : "—";
+        const used = k.last_used_at && Date.parse(k.last_used_at) > 0 ? ago(Date.parse(k.last_used_at)/1000) : "—";
+        return `<tr><td>${k.name}</td><td class="muted">…${k.last4}</td><td>${state}</td>
+          <td class="muted">${created}</td><td class="muted">${used}</td>
+          <td><div class="row-actions">${toggle}${del}</div></td></tr>`;
+      }).join("");
+      $("keys").innerHTML = head + (body || `<tr><td colspan="6" class="muted">no keys yet</td></tr>`);
+      $("keys").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
+        const n = b.dataset.n, act = b.dataset.act;
+        if (act === "delete") {
+          if (!confirm(`Delete client key "${n}"? Anything using it stops working.`)) return;
+          await fetch(`/admin/keys/${encodeURIComponent(n)}`, { method: "DELETE", headers: authHeaders() });
+        } else {
+          await fetch(`/admin/keys/${encodeURIComponent(n)}/${act}`, { method: "POST", headers: authHeaders() });
+        }
+        loadKeys();
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  async function createKey() {
+    const name = $("newKeyName").value.trim();
+    if (!name) { $("newKeyName").focus(); return; }
+    const r = await fetch("/admin/keys", {
+      method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      $("newKeyReveal").innerHTML = `<div class="reveal" style="border-color:var(--err)"><span class="err">${e.error || ("HTTP " + r.status)}</span></div>`;
+      return;
+    }
+    const d = await r.json();
+    $("newKeyReveal").innerHTML = `<div class="reveal">
+      <span class="muted">copy now — shown once:</span>
+      <code id="newKeyVal">${d.key}</code>
+      <button id="copyKey">copy</button></div>`;
+    $("copyKey").addEventListener("click", () => {
+      navigator.clipboard?.writeText(d.key);
+      $("copyKey").textContent = "copied";
+    });
+    $("newKeyName").value = "";
+    loadKeys();
+  }
+
+  $("createKey").addEventListener("click", createKey);
+  $("newKeyName").addEventListener("keydown", (e) => { if (e.key === "Enter") createKey(); });
   $("refresh").addEventListener("click", load);
   setInterval(() => { if ($("auto").checked) load(); }, 5000);
   load();

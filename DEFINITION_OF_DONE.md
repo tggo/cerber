@@ -223,6 +223,21 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - The embedded dashboard (`go:embed`, no external/CDN assets) renders a requests/hour SVG chart (last 48h, errors overlaid, hover details) plus cost card and accounts table.
 **Verified:** `internal/usage` series test + live (`series` populated, cost computed, dashboard 200) — 2026-06-08.
 
+## Ollama / vLLM provider (local, OpenAI-compatible)
+**What:** route selected models to a local ollama/vLLM server (e.g. on a GPU box) over the same OpenAI-compatible passthrough as Grok.
+**DoD:**
+- `providers.ollama` (base_url, optional credentials; default `http://localhost:11434`) registers an OpenAI-compatible chatter named `ollama`; credentials are optional (keyless local server → a dummy key is injected so rotation works).
+- `providers.routing` prefixes select it (local model names are arbitrary); `ollama` is a valid routing provider.
+**Verified:** `internal/config` (defaults/no-creds/bad-url) + `internal/server` route tests; live against gpu0 ollama — 2026-06-08.
+
+## Client keys — dashboard-managed (dynamic, persisted)
+**What:** client API keys can be minted, enabled/disabled and deleted at runtime from the dashboard, in addition to the static config keys.
+**DoD:**
+- A persisted store (`access.keys_file`, default `./data/keys.json`) holds `cer_`-prefixed keys; its enabled keys are accepted alongside the static config keys (so an env-seeded key always works).
+- `GET /admin/keys` lists keys redacted (name, enabled, last4, created, last-used — never the secret); `POST /admin/keys {name}` mints one and returns the full secret exactly once (409 on duplicate name, 400 on empty); `POST /admin/keys/{name}/{enable,disable}` toggles; `DELETE /admin/keys/{name}` (or `…/delete`) removes; unknown name → 404; all gated by the admin auth (management key if set, else client key); 503 if no store configured.
+- Mutations persist atomically; last-used is stamped on auth and flushed by the periodic saver. The embedded dashboard has a client-keys section (create + reveal-once, enable/disable, delete).
+**Verified:** `internal/access` store tests + `internal/server` CRUD/not-configured tests — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

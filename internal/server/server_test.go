@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -546,6 +547,88 @@ func TestAccounts_ListEnableDisable(t *testing.T) {
 	// auth required
 	if rec := do(t, h, "GET", "/admin/accounts", "", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
+func TestClientKeys_CRUD(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	ks, err := access.LoadStore(filepath.Join(t.TempDir(), "keys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetClientKeyStore(ks)
+	h := s.Handler()
+
+	// create
+	rec := do(t, h, "POST", "/admin/keys", `{"name":"laptop"}`, clientKey)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	var created struct{ Name, Key string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Name != "laptop" || !strings.HasPrefix(created.Key, "cer_") {
+		t.Fatalf("created = %+v", created)
+	}
+
+	// the new key now authenticates a real request
+	if rec := do(t, h, "GET", "/admin/keys", "", created.Key); rec.Code != 200 {
+		t.Errorf("new key should authenticate, got %d", rec.Code)
+	}
+
+	// list shows it, redacted (no secret)
+	rec = do(t, h, "GET", "/admin/keys", "", clientKey)
+	if !strings.Contains(rec.Body.String(), `"name":"laptop"`) || strings.Contains(rec.Body.String(), created.Key) {
+		t.Errorf("list leaked or missing key: %s", rec.Body.String())
+	}
+
+	// duplicate name -> 409
+	if rec := do(t, h, "POST", "/admin/keys", `{"name":"laptop"}`, clientKey); rec.Code != http.StatusConflict {
+		t.Errorf("dup = %d, want 409", rec.Code)
+	}
+	// empty name -> 400
+	if rec := do(t, h, "POST", "/admin/keys", `{"name":""}`, clientKey); rec.Code != http.StatusBadRequest {
+		t.Errorf("empty name = %d, want 400", rec.Code)
+	}
+
+	// disable -> key stops authenticating
+	if rec := do(t, h, "POST", "/admin/keys/laptop/disable", "", clientKey); rec.Code != 200 {
+		t.Fatalf("disable = %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/admin/keys", "", created.Key); rec.Code != http.StatusUnauthorized {
+		t.Errorf("disabled key should be 401, got %d", rec.Code)
+	}
+	// enable back
+	if rec := do(t, h, "POST", "/admin/keys/laptop/enable", "", clientKey); rec.Code != 200 {
+		t.Fatalf("enable = %d", rec.Code)
+	}
+
+	// delete (DELETE verb)
+	if rec := do(t, h, "DELETE", "/admin/keys/laptop", "", clientKey); rec.Code != 200 {
+		t.Fatalf("delete = %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/admin/keys", "", created.Key); rec.Code != http.StatusUnauthorized {
+		t.Errorf("deleted key should be 401, got %d", rec.Code)
+	}
+	// unknown -> 404
+	if rec := do(t, h, "POST", "/admin/keys/ghost/disable", "", clientKey); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown = %d, want 404", rec.Code)
+	}
+	// auth required
+	if rec := do(t, h, "GET", "/admin/keys", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
+func TestClientKeys_NotConfigured(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1)) // no SetClientKeyStore
+	h := s.Handler()
+	if rec := do(t, h, "GET", "/admin/keys", "", clientKey); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("list w/o store = %d, want 503", rec.Code)
+	}
+	if rec := do(t, h, "POST", "/admin/keys", `{"name":"x"}`, clientKey); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("create w/o store = %d, want 503", rec.Code)
 	}
 }
 

@@ -69,6 +69,7 @@ type Access struct {
 	Keys           []string `yaml:"keys"`
 	AllowLocalhost bool     `yaml:"allow_localhost"`
 	ManagementKey  string   `yaml:"management_key"` // if set, /admin/* requires this key (not client keys)
+	KeysFile       string   `yaml:"keys_file"`      // persisted store of dashboard-managed client keys
 }
 
 // Providers groups upstream provider configuration. Only configured providers
@@ -157,6 +158,7 @@ const (
 	defaultLogDir          = "./logs"
 	defaultAuthDir         = "./auths"
 	defaultUsageFile       = "./data/usage.json"
+	defaultKeysFile        = "./data/keys.json"
 	defaultAnthropicBase   = "https://api.anthropic.com"
 	defaultAnthropicVer    = "2023-06-01"
 	defaultAnthropicWaitNS = 120 * time.Second
@@ -220,6 +222,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Usage.File == "" {
 		c.Usage.File = defaultUsageFile
+	}
+	if c.Access.KeysFile == "" {
+		c.Access.KeysFile = defaultKeysFile
 	}
 	if c.TLS.Enabled {
 		if c.TLS.Addr == "" {

@@ -64,6 +64,7 @@ type Server struct {
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
 	mgmt           *access.Checker // if set, /admin/* requires this key
+	keys           *access.Store   // dynamic, dashboard-managed client keys (consulted with static config keys)
 	upstreamProxy  http.Handler
 	cooldown       time.Duration
 	refreshSkew    time.Duration
@@ -119,6 +120,11 @@ func (s *Server) SetTokenPersister(f func(name string, tok credential.OAuthToken
 
 // SetAllowLocalhost lets loopback clients call cerber without a valid key.
 func (s *Server) SetAllowLocalhost(v bool) { s.allowLocalhost = v }
+
+// SetClientKeyStore installs the dynamic, dashboard-managed client-key store. Its
+// keys are accepted in addition to the static config keys, and it backs the
+// /admin/keys management endpoints. Call before Handler().
+func (s *Server) SetClientKeyStore(st *access.Store) { s.keys = st }
 
 // SetManagementKey requires a dedicated key for /admin/* (sent as Bearer,
 // x-api-key, or X-Cerber-Management). Empty keeps /admin on the client-key check.
@@ -208,6 +214,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/accounts", s.handleAccounts)
 	mux.HandleFunc("POST /admin/accounts/{name}/enable", s.handleSetAccount(true))
 	mux.HandleFunc("POST /admin/accounts/{name}/disable", s.handleSetAccount(false))
+	mux.HandleFunc("GET /admin/keys", s.handleKeysList)
+	mux.HandleFunc("POST /admin/keys", s.handleKeyCreate)
+	mux.HandleFunc("POST /admin/keys/{name}/enable", s.handleSetKey(true))
+	mux.HandleFunc("POST /admin/keys/{name}/disable", s.handleSetKey(false))
+	mux.HandleFunc("DELETE /admin/keys/{name}", s.handleKeyDelete)
+	mux.HandleFunc("POST /admin/keys/{name}/delete", s.handleKeyDelete)
 	// /metrics is unauthenticated (standard for Prometheus scraping); it exposes
 	// counts and credential names, never secrets.
 	mux.Handle("GET /metrics", metrics.Handler(s.usage))
@@ -334,6 +346,104 @@ func (s *Server) handleSetAccount(enabled bool) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "enabled": enabled})
 	}
+}
+
+// handleKeysList returns the managed client keys (redacted — no secrets).
+func (s *Server) handleKeysList(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	if s.keys == nil {
+		writeError(w, http.StatusServiceUnavailable, "client-key store not configured")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"keys": s.keys.List()})
+}
+
+// handleKeyCreate mints a new client key. The full secret is returned exactly
+// once in the response; thereafter only its last 4 chars are ever shown.
+func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	if s.keys == nil {
+		writeError(w, http.StatusServiceUnavailable, "client-key store not configured")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	key, info, err := s.keys.Add(req.Name)
+	if err != nil {
+		switch {
+		case errors.Is(err, access.ErrNameTaken):
+			writeError(w, http.StatusConflict, err.Error())
+		case strings.Contains(err.Error(), "required"):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			s.log.Warn("create client key", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "could not create key")
+		}
+		return
+	}
+	s.log.Info("client key created", zap.String("name", info.Name))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": info.Name, "key": key, "created_at": info.CreatedAt})
+}
+
+// handleSetKey enables/disables a managed client key.
+func (s *Server) handleSetKey(enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.adminAuthorized(w, r) {
+			return
+		}
+		if s.keys == nil {
+			writeError(w, http.StatusServiceUnavailable, "client-key store not configured")
+			return
+		}
+		name := r.PathValue("name")
+		if err := s.keys.SetEnabled(name, enabled); err != nil {
+			writeError(w, http.StatusNotFound, "no client key named "+name)
+			return
+		}
+		s.log.Info("client key state changed", zap.String("name", name), zap.Bool("enabled", enabled))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "enabled": enabled})
+	}
+}
+
+// handleKeyDelete removes a managed client key.
+func (s *Server) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	if s.keys == nil {
+		writeError(w, http.StatusServiceUnavailable, "client-key store not configured")
+		return
+	}
+	name := r.PathValue("name")
+	if err := s.keys.Delete(name); err != nil {
+		writeError(w, http.StatusNotFound, "no client key named "+name)
+		return
+	}
+	s.log.Info("client key deleted", zap.String("name", name))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "deleted": true})
 }
 
 // handleNative passes an Anthropic Messages request straight through, injecting a
@@ -672,7 +782,8 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	if s.allowLocalhost && isLoopback(r.RemoteAddr) {
 		return true
 	}
-	if s.access.Allow(access.FromRequest(r)) {
+	presented := access.FromRequest(r)
+	if s.access.Allow(presented) || s.keys.Allow(presented) {
 		return true
 	}
 	// Diagnostic without leaking secrets: which auth the client sent and how long

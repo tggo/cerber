@@ -22,7 +22,8 @@ access:
   # source IPs (keyless from the LAN), and requires it from the public/CF side.
   allow_localhost: false
   keys:
-    - "${CERBER_CLIENT_KEY}"
+    - "${CERBER_CLIENT_KEY}"          # bootstrap key (env); also what nginx injects for the LAN
+  keys_file: "/work/data/keys.json"   # dashboard-managed client keys (persisted)
 
 providers:
   # /v1/chat/completions routes by model: gpt*/o1*/o3*/o4*/chatgpt* -> openai,

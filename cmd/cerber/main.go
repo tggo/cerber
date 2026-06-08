@@ -128,7 +128,15 @@ func main() {
 	client := anthropic.New(a.BaseURL, a.Version, httpClient)
 	refresher := anthropic.NewRefresher(a.BaseURL, httpClient)
 
+	// Dynamic, dashboard-managed client keys (persisted), accepted alongside the
+	// static config keys.
+	keyStore, kerr := access.LoadStore(cfg.Access.KeysFile)
+	if kerr != nil {
+		logger.Fatal("client keys", zap.Error(kerr))
+	}
+
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
+	srv.SetClientKeyStore(keyStore)
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 	srv.SetManagementKey(cfg.Access.ManagementKey)
@@ -244,6 +252,10 @@ func main() {
 	saveUsage := func() {
 		if err := tracker.Save(cfg.Usage.File); err != nil {
 			logger.Warn("save usage", zap.Error(err))
+		}
+		// Persist lazily-stamped client-key last-used times.
+		if err := keyStore.Save(); err != nil {
+			logger.Warn("save keys", zap.Error(err))
 		}
 	}
 	stopSave := make(chan struct{})
