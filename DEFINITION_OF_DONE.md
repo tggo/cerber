@@ -255,6 +255,14 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Content is dynamic: base URL is derived from the request host/scheme (honours `X-Forwarded-Proto`); the model list reflects discovered models per provider (e.g. ollama), with routing rules and curl/SDK examples.
 **Verified:** `internal/server` TestLLMDoc (auth, content-type, endpoints, discovered models, host) — 2026-06-08.
 
+## Model list, token counting, usage export
+**What:** OpenAI-style model listing, Anthropic token counting, and a CSV usage export.
+**DoD:**
+- `GET /v1/models` (authed like the API) returns `{"object":"list","data":[{id,object:"model",owned_by:<provider>}]}` aggregated from the per-provider discovered models (ProbeAll); sorted by provider.
+- `POST /v1/messages/count_tokens` proxies Anthropic's count-tokens endpoint through the pooled credentials (rotation/refresh via the shared dispatch), forwarding the client body unchanged (no Claude Code system injection); Anthropic-only.
+- `GET /admin/usage.csv` (admin-authed) exports a section-tagged CSV: total, per-credential, per-model (requests/errors/tokens/cost) and the hourly series (RFC3339 UTC).
+**Verified:** `internal/server` TestModelsEndpoint / TestCountTokens / TestUsageCSV; mocks regenerated (Upstream.CountTokens) — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

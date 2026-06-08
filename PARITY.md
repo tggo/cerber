@@ -12,8 +12,8 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 |---|---|---|
 | OpenAI `/v1/chat/completions` (stream + non-stream) | ✅ | routes by model |
 | Anthropic native `/v1/messages` (stream) | ✅ | transparent passthrough |
-| `/v1/models` (list models) | ❌ | |
-| `/v1/messages/count_tokens` | ❌ | |
+| `/v1/models` (list models) | ✅ | aggregated from per-provider discovery |
+| `/v1/messages/count_tokens` | ✅ | proxied to Anthropic via pooled creds |
 | `/v1/completions`, `/v1/responses`, images, videos | ❌ | |
 | Streaming SSE + flush | ✅ | |
 | Request/response header passthrough | ✅ | incl. anthropic-ratelimit-* |
@@ -69,7 +69,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | **Persistent usage (survives restart)** | ✅ | JSON aggregates (not per-event SQLite) |
 | **Quota inspection per account** (5h/7d windows) | ✅ | passive, from Anthropic rate-limit headers |
 | **Cost calculation** (per-model pricing) | ✅ | `usage.pricing` |
-| Usage event log / export / filtering | ❌ | |
+| Usage event log / export / filtering | 🟡 | CSV export `/admin/usage.csv` (aggregates, no per-event) |
 | Cost/usage history & analytics | 🟡 | hourly time-series + chart (no per-event) |
 
 ## Management UI (CPA-Manager-Plus territory)
@@ -101,10 +101,17 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 
 ## Suggested next priorities
 
-1. **Persistent usage + cost** — survive restart, per-model pricing → cost (the
-   main cpa-usage-keeper value).
-2. **Quota inspection** — poll each account's provider quota (5h/7d) → show in
-   `/admin/accounts` + dashboard.
-3. **Accounts view in the dashboard** (the API already exists).
-4. **`/v1/models` + `/v1/messages/count_tokens`** (cheap parity wins).
-5. More providers (Codex, Vertex) and OpenAI→Anthropic tools translation.
+Done: persistent usage+cost ✅, quota ✅, accounts view ✅, ollama/vLLM ✅,
+per-credential key-health + model discovery ✅, dashboard client-key mgmt ✅,
+`/llm.md` ✅, favicon ✅, `GET /v1/models` ✅, `/v1/messages/count_tokens` ✅,
+usage CSV export ✅, origin restricted to Cloudflare+LAN ✅.
+
+Remaining, roughly by value/effort:
+
+1. **`cerber -healthcheck` flag** — local GET /healthz → exit 0/1, so a distroless
+   docker `healthcheck` works (prereq for the Traefik zero-downtime plan).
+2. **Zero-downtime deploy** — Traefik sidecar (see `~/obsidian/notes/cerber-zero-downtime-proxy.md`); deferred.
+3. **OpenAI→Anthropic tools/function-calling translation** — finish the 🟡.
+4. **Resilience** — exponential backoff; reactive refresh on 401.
+5. **More providers** — Codex, Vertex, OpenRouter, Kimi.
+6. **Per-event usage** (SQLite) — enables filtering/per-event export & true history.

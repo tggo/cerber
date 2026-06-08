@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,7 @@ var faviconSVG []byte
 // it is an interface so the server can be unit-tested against a mock.
 type Upstream interface {
 	Send(ctx context.Context, body []byte, stream bool, cred *credential.Credential, clientHeader http.Header) (*http.Response, error)
+	CountTokens(ctx context.Context, body []byte, cred *credential.Credential, clientHeader http.Header) (*http.Response, error)
 }
 
 // Refresher renews an OAuth credential's access token. *anthropic.Refresher
@@ -242,8 +245,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /llm.md", s.handleLLMDoc)
 	mux.HandleFunc("GET /llms.txt", s.handleLLMDoc) // common convention alias
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
+	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
+	mux.HandleFunc("GET /admin/usage.csv", s.handleUsageCSV)
 	mux.HandleFunc("GET /admin/accounts", s.handleAccounts)
 	mux.HandleFunc("GET /admin/providers", s.handleProviders)
 	mux.HandleFunc("POST /admin/accounts/{name}/enable", s.handleSetAccount(true))
@@ -326,6 +332,39 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(s.usage.Snapshot())
+}
+
+// handleUsageCSV exports usage for spreadsheets/analysis: the hourly time-series
+// plus per-credential and per-model breakdowns, as one CSV (section-tagged rows).
+func (s *Server) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	rep := s.usage.Snapshot()
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="cerber-usage.csv"`)
+	w.WriteHeader(http.StatusOK)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"section", "key", "requests", "errors", "input_tokens", "output_tokens", "cost"})
+	row := func(section, key string, st usage.Stat, cost float64) {
+		_ = cw.Write([]string{
+			section, key,
+			strconv.FormatInt(st.Requests, 10), strconv.FormatInt(st.Errors, 10),
+			strconv.FormatInt(st.InputTokens, 10), strconv.FormatInt(st.OutputTokens, 10),
+			strconv.FormatFloat(cost, 'f', -1, 64),
+		})
+	}
+	row("total", "all", rep.Totals, rep.TotalCost)
+	for _, e := range rep.ByCredential {
+		row("credential", e.Name, e.Stat, e.Cost)
+	}
+	for _, e := range rep.ByModel {
+		row("model", e.Name, e.Stat, e.Cost)
+	}
+	for _, b := range rep.Series {
+		row("hour", time.Unix(b.Unix, 0).UTC().Format(time.RFC3339), b.Stat, 0)
+	}
+	cw.Flush()
 }
 
 // accountView is one credential's state plus its usage and quota, for orchestration.
@@ -752,7 +791,9 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	s.log.Debug("native request", append(debugRequestFields(body, stream),
 		zap.String("anthropic_beta", r.Header.Get("anthropic-beta")))...)
 	dumpRequest(body) // diagnostic: writes raw body if CERBER_DUMP_DIR is set
-	resp, cred, err := s.dispatch(r.Context(), body, stream, r.Header, credFilter(r))
+	resp, cred, err := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
+		return s.upstream.Send(r.Context(), body, stream, c, r.Header)
+	})
 	if err != nil {
 		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
@@ -833,6 +874,64 @@ func parseAnthropicStreamUsage(data []byte) (in, out int64) {
 	return ev.Message.Usage.totalInput(), out
 }
 
+// handleModels serves an OpenAI-shaped model list aggregated from every
+// provider's discovered models (from ProbeAll). Authenticated like the API.
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	type model struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		OwnedBy string `json:"owned_by"`
+	}
+	s.provMu.Lock()
+	names := make([]string, 0, len(s.provModels))
+	for name := range s.provModels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var data []model
+	for _, prov := range names {
+		for _, id := range s.provModels[prov] {
+			data = append(data, model{ID: id, Object: "model", OwnedBy: prov})
+		}
+	}
+	s.provMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+// handleCountTokens proxies Anthropic's /v1/messages/count_tokens through the
+// pooled credentials (Anthropic-only, like /v1/messages).
+func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	model := extractModel(body)
+	resp, cred, err := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
+		return s.upstream.CountTokens(r.Context(), body, c, r.Header)
+	})
+	if err != nil {
+		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		s.relayError(w, resp)
+		return
+	}
+	copyUpstreamHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
 // handleOpenAI accepts an OpenAI chat-completions request, translates it to
 // Anthropic, and translates the response back.
 func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
@@ -872,7 +971,9 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	resp, cred, err := s.dispatch(r.Context(), anthropicBody, stream, r.Header, credFilter(r))
+	resp, cred, err := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
+		return s.upstream.Send(r.Context(), anthropicBody, stream, c, r.Header)
+	})
 	if err != nil {
 		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
@@ -917,10 +1018,12 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(translated)
 }
 
-// dispatch sends body upstream, rotating credentials and sidelining any that
-// fail with auth/rate-limit errors. It returns the response, the name of the
-// credential used (or last tried), and an error. The response Body must be closed.
-func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientHeader http.Header, match func(*credential.Credential) bool) (*http.Response, string, error) {
+// dispatch sends a request upstream, rotating credentials and sidelining any
+// that fail with auth/rate-limit errors. send performs the actual call with the
+// chosen credential (so the same rotation/refresh serves /v1/messages and
+// /v1/messages/count_tokens). It returns the response, the name of the credential
+// used (or last tried), and an error. The response Body must be closed.
+func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
 	var lastErr error
 	var lastCred string
 	for i, n := 0, s.creds.Len(); i < n; i++ {
@@ -943,8 +1046,8 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 				s.persist(cred.Name(), tok)
 			}
 		}
-		s.log.Debug("dispatch", zap.String("credential", cred.Name()), zap.Bool("stream", stream), zap.Int("attempt", i+1))
-		resp, err := s.upstream.Send(ctx, body, stream, cred, clientHeader)
+		s.log.Debug("dispatch", zap.String("credential", cred.Name()), zap.Int("attempt", i+1))
+		resp, err := send(cred)
 		if err != nil {
 			// Client cancellation/timeout is not the credential's fault — don't
 			// sideline it (one canceled request would otherwise cooldown the only

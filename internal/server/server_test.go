@@ -19,6 +19,7 @@ import (
 	"github.com/tggo/cerber/internal/provider"
 	providermocks "github.com/tggo/cerber/internal/provider/mocks"
 	"github.com/tggo/cerber/internal/server/mocks"
+	"github.com/tggo/cerber/internal/usage"
 
 	"github.com/stretchr/testify/mock"
 )
@@ -1112,5 +1113,83 @@ func TestFavicon(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), "<svg") {
 			t.Errorf("%s body not svg", path)
 		}
+	}
+}
+
+func TestModelsEndpoint(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	registerOllama(t, s, "llama3.1:8b", "qwen3:9b") // sets provModels via ProbeAll
+	h := s.Handler()
+
+	// authed like the API
+	if rec := do(t, h, "GET", "/v1/models", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+	rec := do(t, h, "GET", "/v1/models", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("models = %d", rec.Code)
+	}
+	var d struct {
+		Object string
+		Data   []struct {
+			ID      string
+			Object  string
+			OwnedBy string `json:"owned_by"`
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Object != "list" {
+		t.Errorf("object = %q", d.Object)
+	}
+	var found bool
+	for _, m := range d.Data {
+		if m.ID == "llama3.1:8b" {
+			found = true
+			if m.Object != "model" || m.OwnedBy != "ollama" {
+				t.Errorf("model entry = %+v", m)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("discovered model missing from /v1/models: %s", rec.Body.String())
+	}
+}
+
+func TestCountTokens(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	up.EXPECT().CountTokens(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"input_tokens":42}`), nil)
+	rec := do(t, s.Handler(), "POST", "/v1/messages/count_tokens",
+		`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`, clientKey)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"input_tokens":42`) {
+		t.Fatalf("count_tokens = %d %s", rec.Code, rec.Body.String())
+	}
+	// auth required
+	if rec := do(t, s.Handler(), "POST", "/v1/messages/count_tokens", `{}`, ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+}
+
+func TestUsageCSV(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.usage.Record(usage.Event{Credential: "c1", Model: "claude-x", InputTokens: 10, OutputTokens: 5})
+	rec := do(t, s.Handler(), "GET", "/admin/usage.csv", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("usage.csv = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Errorf("content-type = %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "section,key,requests,errors,input_tokens,output_tokens,cost") {
+		t.Errorf("missing header: %s", body)
+	}
+	if !strings.Contains(body, "credential,c1,") || !strings.Contains(body, "model,claude-x,") {
+		t.Errorf("missing rows: %s", body)
+	}
+	if rec := do(t, s.Handler(), "GET", "/admin/usage.csv", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
 	}
 }

@@ -19,6 +19,9 @@ import (
 // MessagesPath is the Anthropic Messages endpoint.
 const MessagesPath = "/v1/messages"
 
+// CountTokensPath is the Anthropic token-counting endpoint.
+const CountTokensPath = "/v1/messages/count_tokens"
+
 // oauthBetas are the anthropic-beta features Claude Code OAuth tokens are
 // authorized for. Sent only with OAuth credentials.
 const oauthBetas = "oauth-2025-04-20"
@@ -162,6 +165,40 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: upstream request: %w", err)
+	}
+	return resp, nil
+}
+
+// CountTokens POSTs to /v1/messages/count_tokens with the client's raw body,
+// applying only credential auth (forwarding client headers like Send). It does
+// not inject the Claude Code system prompt — the count reflects the client's own
+// request. Non-streaming; the returned response Body must be closed.
+func (c *Client) CountTokens(ctx context.Context, body []byte, cred *credential.Credential, clientHeader http.Header) (*http.Response, error) {
+	if cred == nil {
+		return nil, fmt.Errorf("anthropic: nil credential")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+CountTokensPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: build count_tokens request: %w", err)
+	}
+	for k, vs := range clientHeader {
+		if managedRequestHeaders[strings.ToLower(k)] {
+			continue
+		}
+		req.Header[k] = append([]string(nil), vs...)
+	}
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if req.Header.Get("anthropic-version") == "" {
+		req.Header.Set("anthropic-version", c.version)
+	}
+	req.Header.Set("Accept", "application/json")
+	applyAuth(req, cred)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: count_tokens request: %w", err)
 	}
 	return resp, nil
 }

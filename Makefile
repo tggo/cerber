@@ -40,7 +40,7 @@ cover-report: cover
 # Regenerate mocks. No-op until .mockery.yaml has uncommented package entries
 # (mockery v2 panics on an empty packages map).
 mocks:
-	@if grep -qE '^  cerber/' .mockery.yaml; then mockery; else echo "no packages configured in .mockery.yaml yet — skipping"; fi
+	@if grep -qE '^  github.com/tggo/cerber/' .mockery.yaml; then mockery; else echo "no packages configured in .mockery.yaml yet — skipping"; fi
 
 lint: fmt vet
 

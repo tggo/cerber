@@ -17,6 +17,10 @@ server {
     access_log /var/log/nginx/cerber.ihatebot.com.access.log main;
     error_log  /var/log/nginx/cerber.ihatebot.com.error.log;
 
+    # Only Cloudflare edge + home LAN/WG may reach the origin; a direct hit on the
+    # public IP (bypassing CF) is denied. Refresh: deploy/nginx/cerber-allow.conf.
+    include /etc/nginx/snippets/cerber-allow.conf;
+
     location / {
         proxy_pass http://127.0.0.1:18080;
         proxy_http_version 1.1;

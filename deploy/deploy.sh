@@ -42,9 +42,18 @@ rsync -az --rsh="$RSYNC_RSH" \
   deploy/config.firebat.yaml \
   .env \
   "$TARGET:$DIR/"
-# OAuth tokens (Claude Max + Team). --ignore-existing would keep server-side
-# refreshes; we mirror the local set instead so the deploy is reproducible.
-rsync -az --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
+# OAuth tokens. cerber refreshes them server-side and Anthropic ROTATES the
+# refresh token on every refresh, so firebat's copy is the source of truth —
+# overwriting it with a stale local copy kills the credential (invalid_grant).
+# Default: seed only missing accounts (--ignore-existing), never clobber.
+# After a local re-login (`cerber --claude-login`), push the fresh token with
+#   DEPLOY_PUSH_CREDS=1 make deploy
+if [ "${DEPLOY_PUSH_CREDS:-}" = "1" ]; then
+  echo "  (DEPLOY_PUSH_CREDS=1: force-pushing local auths, overwriting server tokens)"
+  rsync -az --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
+else
+  rsync -az --ignore-existing --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
+fi
 
 echo "› building image + restarting container on firebat"
 # shellcheck disable=SC2086
