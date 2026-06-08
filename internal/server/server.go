@@ -236,6 +236,8 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
 	})
+	mux.HandleFunc("GET /llm.md", s.handleLLMDoc)
+	mux.HandleFunc("GET /llms.txt", s.handleLLMDoc) // common convention alias
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
@@ -421,6 +423,91 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"providers": out})
+}
+
+// handleLLMDoc serves a live, self-describing usage guide (markdown) so an agent
+// given only the base URL + a key can learn how to connect: endpoints, auth,
+// model routing, and the actual models each provider serves. Gated like the API
+// (LAN keyless; public needs a key), since it lists the model inventory.
+func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	scheme := "https"
+	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
+		scheme = xf
+	} else if r.TLS == nil {
+		scheme = "http"
+	}
+	base := scheme + "://" + r.Host
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# cerber — LLM proxy usage\n\n")
+	fmt.Fprintf(&b, "cerber is a multi-provider proxy that speaks both the OpenAI and the\n")
+	fmt.Fprintf(&b, "Anthropic API dialects and routes each request to the right upstream.\n\n")
+
+	fmt.Fprintf(&b, "## Base URL\n\n    %s\n\n", base)
+
+	fmt.Fprintf(&b, "## Authentication\n\n")
+	fmt.Fprintf(&b, "- From the local network: no key required.\n")
+	fmt.Fprintf(&b, "- From outside: send `Authorization: Bearer <YOUR_KEY>` (or `x-api-key: <YOUR_KEY>`).\n")
+	fmt.Fprintf(&b, "  Ask the operator for a key; keys are managed in the dashboard.\n\n")
+
+	fmt.Fprintf(&b, "## Endpoints\n\n")
+	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible. Point any OpenAI SDK at base_url `%s/v1`.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native. Point the Anthropic SDK at base_url `%s`.\n", base)
+	fmt.Fprintf(&b, "- `GET /llm.md` — this document.\n\n")
+
+	fmt.Fprintf(&b, "## Model routing\n\n")
+	fmt.Fprintf(&b, "Just set `model`; cerber routes by name:\n\n")
+	fmt.Fprintf(&b, "- `gpt*`, `o1*`, `o3*`, `o4*`, `chatgpt*` → OpenAI\n")
+	fmt.Fprintf(&b, "- `gemini*` → Gemini\n")
+	fmt.Fprintf(&b, "- `grok*` → xAI (Grok)\n")
+	fmt.Fprintf(&b, "- `claude*` → Anthropic (Claude)\n")
+	fmt.Fprintf(&b, "- the local models listed below → ollama\n")
+	fmt.Fprintf(&b, "- anything else → 400 (unknown model)\n\n")
+
+	fmt.Fprintf(&b, "## Available models\n\n")
+	nameSet := map[string]struct{}{}
+	for name := range s.accountStores() {
+		nameSet[name] = struct{}{}
+	}
+	for name := range s.chatters {
+		nameSet[name] = struct{}{}
+	}
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		insp, ok := s.chatters[name].(provider.Inspectable)
+		if ok {
+			if models := insp.Models(); len(models) > 0 {
+				fmt.Fprintf(&b, "### %s (%d)\n\n", name, len(models))
+				for _, m := range models {
+					fmt.Fprintf(&b, "- `%s`\n", m)
+				}
+				b.WriteString("\n")
+				continue
+			}
+		}
+		// No discovered list (cloud providers): give the routing hint instead.
+		fmt.Fprintf(&b, "### %s\n\nUse this provider's standard model names (routed by the prefixes above).\n\n", name)
+	}
+
+	fmt.Fprintf(&b, "## Examples\n\n")
+	fmt.Fprintf(&b, "OpenAI dialect (curl):\n\n")
+	fmt.Fprintf(&b, "```sh\ncurl %s/v1/chat/completions \\\n  -H 'Authorization: Bearer $KEY' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
+	fmt.Fprintf(&b, "Anthropic dialect (curl):\n\n")
+	fmt.Fprintf(&b, "```sh\ncurl %s/v1/messages \\\n  -H 'Authorization: Bearer $KEY' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
+	fmt.Fprintf(&b, "OpenAI Python SDK:\n\n")
+	fmt.Fprintf(&b, "```python\nfrom openai import OpenAI\nclient = OpenAI(base_url=\"%s/v1\", api_key=\"$KEY\")\nclient.chat.completions.create(model=\"claude-sonnet-4-6\", messages=[{\"role\":\"user\",\"content\":\"hi\"}])\n```\n\n", base)
+	fmt.Fprintf(&b, "Streaming is supported on both endpoints (`\"stream\": true`).\n")
+
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, b.String())
 }
 
 // handleSetAccount enables/disables a credential at runtime.

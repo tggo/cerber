@@ -247,6 +247,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Mutations persist atomically; last-used is stamped on auth and flushed by the periodic saver. The embedded dashboard has a client-keys section (create + reveal-once, enable/disable, delete).
 **Verified:** `internal/access` store tests + `internal/server` CRUD/not-configured tests — 2026-06-08.
 
+## Self-describing usage doc (`GET /llm.md`)
+**What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
+**DoD:**
+- `GET /llm.md` (alias `GET /llms.txt`) returns `text/markdown`, gated like the API (LAN keyless; public needs a key).
+- Content is dynamic: base URL is derived from the request host/scheme (honours `X-Forwarded-Proto`); the model list reflects discovered models per provider (e.g. ollama), with routing rules and curl/SDK examples.
+**Verified:** `internal/server` TestLLMDoc (auth, content-type, endpoints, discovered models, host) — 2026-06-08.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

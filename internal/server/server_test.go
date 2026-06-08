@@ -1003,3 +1003,35 @@ func TestAccounts_AcrossProviders(t *testing.T) {
 		t.Errorf("openai-1 disable not reflected: %s", rec.Body.String())
 	}
 }
+
+func TestLLMDoc(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.RegisterChatter(&fakeOllama{models: []string{"llama3.1:8b", "supergemma4-26b:latest"}, alive: true})
+	h := s.Handler()
+
+	// auth required (public path with no key)
+	if rec := do(t, h, "GET", "/llm.md", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no key = %d, want 401", rec.Code)
+	}
+
+	rec := do(t, h, "GET", "/llm.md", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("llm.md = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/markdown") {
+		t.Errorf("content-type = %q", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"/v1/chat/completions", "/v1/messages", "Authorization: Bearer",
+		"claude*", "llama3.1:8b", "supergemma4-26b:latest", // discovered models listed
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("llm.md missing %q\n%s", want, body)
+		}
+	}
+	// the request host appears as the base URL
+	if !strings.Contains(body, "example.com") {
+		t.Errorf("base URL (host) not reflected: %s", body)
+	}
+}
