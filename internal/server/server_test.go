@@ -1097,3 +1097,20 @@ func TestLLMDoc(t *testing.T) {
 		t.Errorf("base URL (host) not reflected: %s", body)
 	}
 }
+
+func TestFavicon(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	h := s.Handler()
+	for _, path := range []string{"/favicon.ico", "/favicon.svg"} {
+		rec := do(t, h, "GET", path, "", "") // public, no key
+		if rec.Code != 200 {
+			t.Errorf("%s = %d, want 200", path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "image/svg+xml" {
+			t.Errorf("%s content-type = %q", path, ct)
+		}
+		if !strings.Contains(rec.Body.String(), "<svg") {
+			t.Errorf("%s body not svg", path)
+		}
+	}
+}

@@ -39,6 +39,9 @@ import (
 //go:embed web/dashboard.html
 var dashboardHTML []byte
 
+//go:embed web/favicon.svg
+var faviconSVG []byte
+
 // Upstream issues Anthropic Messages requests. *anthropic.Client satisfies it;
 // it is an interface so the server can be unit-tested against a mock.
 type Upstream interface {
@@ -234,6 +237,8 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
 	})
+	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
+	mux.HandleFunc("GET /favicon.svg", s.handleFavicon)
 	mux.HandleFunc("GET /llm.md", s.handleLLMDoc)
 	mux.HandleFunc("GET /llms.txt", s.handleLLMDoc) // common convention alias
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
@@ -516,6 +521,16 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"providers": out})
+}
+
+// handleFavicon serves the embedded SVG favicon (public, cached) so the dashboard
+// tab is identifiable. Browsers request /favicon.ico by default; we serve the SVG
+// for both paths (modern browsers accept it).
+func (s *Server) handleFavicon(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(faviconSVG)
 }
 
 // handleLLMDoc serves a live, self-describing usage guide (markdown) so an agent

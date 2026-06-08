@@ -2,4 +2,4 @@
 
 Small, non-urgent improvements. Promote to a `DEFINITION_OF_DONE.md` entry when picked up.
 
-- [ ] **Favicon for the dashboard** — serve a `/favicon.ico` (and `<link rel="icon">` in `dashboard.html`) so the cerber tab is identifiable and not lost among many browser tabs.
+- [x] **Favicon for the dashboard** — embedded SVG served at `/favicon.svg` + `/favicon.ico`, linked from `dashboard.html` (done 2026-06-08).
