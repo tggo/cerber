@@ -193,6 +193,22 @@ func main() {
 		logger.Info("grok provider enabled", zap.Int("credentials", kstore.Len()))
 	}
 
+	if o := cfg.Providers.Ollama; o != nil {
+		creds := o.Credentials
+		if len(creds) == 0 {
+			// Local ollama/vLLM ignores auth; inject a dummy key so the rotating
+			// store (which requires >=1 credential) has something to hand out.
+			creds = []config.Credential{{Type: config.CredentialAPIKey, Name: "ollama", Key: "ollama"}}
+		}
+		ostore, err := credential.NewStore(creds, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		if err != nil {
+			logger.Fatal("ollama credentials", zap.Error(err))
+		}
+		// ollama/vLLM serve an OpenAI-compatible API: reuse the OpenAI provider.
+		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
+		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL), zap.Int("credentials", ostore.Len()))
+	}
+
 	if g := cfg.Providers.Gemini; g != nil {
 		gstore, err := credential.NewStore(g.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 		if err != nil {

@@ -599,14 +599,19 @@ func TestStats_RecordsErrors(t *testing.T) {
 
 func TestRoute(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
-	s.SetRoutes([]config.Route{{Prefix: "custom-", Provider: "openai"}})
+	s.SetRoutes([]config.Route{
+		{Prefix: "custom-", Provider: "openai"},
+		{Prefix: "llama", Provider: "ollama"},
+	})
 	cases := map[string]string{
 		"claude-sonnet-4-6": "anthropic",
 		"gpt-4o":            "openai",
 		"o3-mini":           "openai",
 		"chatgpt-x":         "openai",
 		"gemini-2.5-flash":  "gemini",
+		"grok-2":            "grok",
 		"custom-model":      "openai", // config override
+		"llama3.1":          "ollama", // config override (arbitrary model name)
 		"mystery":           "anthropic",
 	}
 	for model, want := range cases {

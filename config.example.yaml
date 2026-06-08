@@ -56,6 +56,13 @@ providers:
   #   credentials:
   #     - { type: api_key, name: grok, key: "${GROK_API_KEY}" }
 
+  # ollama:  # local ollama/vLLM (OpenAI-compatible); needs no API key.
+  #   base_url: "http://localhost:11434"   # e.g. "http://gpu0:11434" on the LAN
+  #   # Model names are arbitrary, so route them explicitly under `routing` above:
+  #   #   - { prefix: "llama",  provider: ollama }
+  #   #   - { prefix: "qwen",   provider: ollama }
+  #   # credentials are optional; omit them entirely for a keyless local server.
+
   anthropic:
     base_url: "https://api.anthropic.com"
     version: "2023-06-01"

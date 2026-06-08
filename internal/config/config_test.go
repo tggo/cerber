@@ -202,6 +202,33 @@ func TestParse_GrokDefaults(t *testing.T) {
 	}
 }
 
+func TestParse_OllamaDefaultsNoCreds(t *testing.T) {
+	// Local ollama needs no key: an empty credential list is valid, and it can
+	// be the only configured provider.
+	y := "access: {keys: [k]}\nproviders: {ollama: {}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Ollama == nil {
+		t.Fatal("ollama should be set")
+	}
+	if c.Providers.Ollama.BaseURL != defaultOllamaBase || c.Providers.Ollama.Timeout.Std() != defaultProviderWaitNS {
+		t.Errorf("ollama defaults = %+v", c.Providers.Ollama)
+	}
+}
+
+func TestParse_OllamaRouting(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {ollama: {base_url: \"http://gpu0:11434\"}, routing: [{prefix: llama, provider: ollama}]}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Ollama.BaseURL != "http://gpu0:11434" {
+		t.Errorf("ollama base = %q", c.Providers.Ollama.BaseURL)
+	}
+}
+
 func TestParse_ProviderErrors(t *testing.T) {
 	cases := map[string]string{
 		"openai bad url":    "access: {keys: [k]}\nproviders: {openai: {base_url: \"ftp://x\", credentials: [{type: api_key, key: k}]}}",
@@ -213,6 +240,7 @@ func TestParse_ProviderErrors(t *testing.T) {
 		"route no prefix":   "access: {keys: [k]}\nproviders: {openai: {credentials: [{type: api_key, key: k}]}, routing: [{prefix: \"\", provider: openai}]}",
 		"truly no provider": "access: {keys: [k]}\nproviders: {}",
 		"grok no creds":     "access: {keys: [k]}\nproviders: {grok: {credentials: []}}",
+		"ollama bad url":    "access: {keys: [k]}\nproviders: {ollama: {base_url: \"ftp://x\"}}",
 	}
 	for name, y := range cases {
 		t.Run(name, func(t *testing.T) {

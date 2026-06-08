@@ -28,6 +28,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | OpenAI | ✅ | api_key (passthrough) |
 | Gemini | ✅ | api_key (OpenAI↔Gemini translate) |
 | Grok / xAI | ✅ | api_key (OpenAI-compatible passthrough) |
+| Ollama / vLLM (local) | ✅ | keyless (OpenAI-compatible passthrough) |
 | Codex, Kimi, Vertex, Antigravity, Gemini-CLI OAuth, OpenRouter | ❌ | |
 
 ## Credentials & orchestration
