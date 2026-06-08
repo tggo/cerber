@@ -48,7 +48,7 @@ func (e *BadRequestError) Unwrap() error { return e.Err }
 // fail with a transport error or an auth/rate-limit status, until one succeeds.
 // It returns the successful response, the credential name used, and an error.
 // The returned response's Body must be closed by the caller.
-func Rotate(store *credential.Store, cooldown time.Duration, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
+func Rotate(ctx context.Context, store *credential.Store, cooldown time.Duration, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
 	var lastErr error
 	var lastCred string
 	for i, n := 0, store.Len(); i < n; i++ {
@@ -59,6 +59,9 @@ func Rotate(store *credential.Store, cooldown time.Duration, send func(*credenti
 		lastCred = cred.Name()
 		resp, err := send(cred)
 		if err != nil {
+			if ctx.Err() != nil { // client canceled — don't penalize the credential
+				return nil, lastCred, ctx.Err()
+			}
 			lastErr = err
 			store.Cooldown(cred, cooldown)
 			continue

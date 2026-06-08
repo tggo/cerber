@@ -757,6 +757,35 @@ func TestCredFilter_OAuthRequestedButNone_503(t *testing.T) {
 	}
 }
 
+func TestDispatch_ClientCancelNoCooldown(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	call := 0
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, _ *credential.Credential, _ http.Header) (*http.Response, error) {
+			call++
+			if call == 1 {
+				return nil, context.Canceled
+			}
+			return resp(200, "application/json", `{"id":"ok"}`), nil
+		})
+	h := s.Handler()
+
+	// first request with an already-canceled context (client went away)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r1 := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{}`)).WithContext(ctx)
+	r1.Header.Set("Authorization", "Bearer "+clientKey)
+	h.ServeHTTP(httptest.NewRecorder(), r1)
+
+	// the single credential must NOT have been cooled down -> next request works
+	if rec := do(t, h, "POST", "/v1/messages", `{}`, clientKey); rec.Code != 200 {
+		t.Errorf("credential cooled after client cancel: got %d", rec.Code)
+	}
+	if call != 2 {
+		t.Errorf("calls = %d, want 2", call)
+	}
+}
+
 func TestDispatch_NoneAvailable_503(t *testing.T) {
 	store := newStore(t, 1)
 	// Put the only credential into cooldown so Next() returns ErrNoneAvailable.

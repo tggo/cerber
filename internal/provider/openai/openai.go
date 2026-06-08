@@ -51,7 +51,7 @@ func (p *Provider) Name() string { return p.name }
 // Chat forwards an OpenAI chat-completions request upstream, rotating across
 // credentials, and returns the OpenAI-format response unchanged.
 func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
-	resp, credName, err := provider.Rotate(p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
+	resp, credName, err := provider.Rotate(ctx, p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ChatPath, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("openai: build request: %w", err)

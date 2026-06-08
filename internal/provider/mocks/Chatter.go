@@ -3,8 +3,8 @@
 package mocks
 
 import (
-	provider "github.com/tggo/cerber/internal/provider"
 	context "context"
+	provider "github.com/tggo/cerber/internal/provider"
 	http "net/http"
 
 	mock "github.com/stretchr/testify/mock"

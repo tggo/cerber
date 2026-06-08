@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -30,7 +31,7 @@ func resp(status int) *http.Response {
 }
 
 func TestRotate_Success(t *testing.T) {
-	r, cred, err := Rotate(store(t, 2), time.Minute, func(c *credential.Credential) (*http.Response, error) {
+	r, cred, err := Rotate(context.Background(), store(t, 2), time.Minute, func(c *credential.Credential) (*http.Response, error) {
 		return resp(200), nil
 	})
 	if err != nil || cred != "a" || r.StatusCode != 200 {
@@ -41,7 +42,7 @@ func TestRotate_Success(t *testing.T) {
 
 func TestRotate_On429ThenSuccess(t *testing.T) {
 	n := 0
-	r, cred, err := Rotate(store(t, 2), time.Minute, func(c *credential.Credential) (*http.Response, error) {
+	r, cred, err := Rotate(context.Background(), store(t, 2), time.Minute, func(c *credential.Credential) (*http.Response, error) {
 		n++
 		if n == 1 {
 			return resp(429), nil
@@ -55,7 +56,7 @@ func TestRotate_On429ThenSuccess(t *testing.T) {
 }
 
 func TestRotate_AllFail(t *testing.T) {
-	_, _, err := Rotate(store(t, 2), time.Minute, func(c *credential.Credential) (*http.Response, error) {
+	_, _, err := Rotate(context.Background(), store(t, 2), time.Minute, func(c *credential.Credential) (*http.Response, error) {
 		return resp(401), nil
 	})
 	if err == nil {
@@ -64,7 +65,7 @@ func TestRotate_AllFail(t *testing.T) {
 }
 
 func TestRotate_TransportError(t *testing.T) {
-	_, _, err := Rotate(store(t, 1), time.Minute, func(c *credential.Credential) (*http.Response, error) {
+	_, _, err := Rotate(context.Background(), store(t, 1), time.Minute, func(c *credential.Credential) (*http.Response, error) {
 		return nil, errors.New("dial")
 	})
 	if err == nil {
@@ -76,11 +77,27 @@ func TestRotate_NoneAvailable(t *testing.T) {
 	s := store(t, 1)
 	c, _ := s.Next()
 	s.Cooldown(c, time.Hour)
-	_, _, err := Rotate(s, time.Minute, func(*credential.Credential) (*http.Response, error) {
+	_, _, err := Rotate(context.Background(), s, time.Minute, func(*credential.Credential) (*http.Response, error) {
 		t.Fatal("send should not be called")
 		return nil, nil
 	})
 	if !errors.Is(err, credential.ErrNoneAvailable) {
 		t.Fatalf("err = %v, want ErrNoneAvailable", err)
+	}
+}
+
+func TestRotate_ClientCancelNoCooldown(t *testing.T) {
+	s := store(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := Rotate(ctx, s, time.Minute, func(*credential.Credential) (*http.Response, error) {
+		return nil, context.Canceled
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// credential must NOT be cooled down after a client cancellation
+	if _, e := s.Next(); e != nil {
+		t.Errorf("credential should still be available after client cancel, got %v", e)
 	}
 }

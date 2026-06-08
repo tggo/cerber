@@ -538,6 +538,13 @@ func (s *Server) dispatch(ctx context.Context, body []byte, stream bool, clientH
 		s.log.Debug("dispatch", zap.String("credential", cred.Name()), zap.Bool("stream", stream), zap.Int("attempt", i+1))
 		resp, err := s.upstream.Send(ctx, body, stream, cred, clientHeader)
 		if err != nil {
+			// Client cancellation/timeout is not the credential's fault — don't
+			// sideline it (one canceled request would otherwise cooldown the only
+			// account and cascade 503s).
+			if ctx.Err() != nil {
+				s.log.Debug("request canceled by client", zap.String("credential", cred.Name()))
+				return nil, cred.Name(), ctx.Err()
+			}
 			s.log.Warn("upstream send failed", zap.String("credential", cred.Name()), zap.Error(err))
 			lastErr = err
 			s.creds.Cooldown(cred, s.cooldown)

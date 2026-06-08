@@ -61,7 +61,7 @@ func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, _ http.He
 		url += "?alt=sse"
 	}
 
-	resp, credName, err := provider.Rotate(p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
+	resp, credName, err := provider.Rotate(ctx, p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
 		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(geminiBody))
 		if rerr != nil {
 			return nil, fmt.Errorf("gemini: build request: %w", rerr)
