@@ -88,12 +88,12 @@ func (p *Provider) bearer(ctx context.Context, cred *credential.Credential) stri
 	if cred.Kind() != credential.KindOAuth {
 		return cred.APIKey()
 	}
-	if p.refresh != nil && p.now != nil && cred.NeedsRefresh(p.now(), p.refreshSkew) {
-		if tok, err := p.refresh(ctx, cred.RefreshToken()); err == nil {
-			p.store.UpdateOAuth(cred, tok)
-			if p.persist != nil {
-				p.persist(cred.Name(), tok)
-			}
+	if p.refresh != nil && p.now != nil {
+		tok, did, err := p.store.EnsureFresh(cred, false, p.now(), p.refreshSkew, func() (credential.OAuthTokens, error) {
+			return p.refresh(ctx, cred.RefreshToken())
+		})
+		if err == nil && did && p.persist != nil {
+			p.persist(cred.Name(), tok)
 		}
 		// On refresh error, fall through with the current token; a 401 will
 		// rotate/cooldown it via Rotate.

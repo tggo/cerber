@@ -2,6 +2,8 @@ package credential
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -275,5 +277,55 @@ func TestCooldown_NoopCases(t *testing.T) {
 	s.Cooldown(c, 0) // non-positive duration
 	if _, err := s.Next(); err != nil {
 		t.Fatalf("Next after noop cooldowns: %v", err)
+	}
+}
+
+func TestEnsureFresh_Singleflight(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s, err := NewStore([]config.Credential{{
+		Type: config.CredentialOAuth, Name: "o", AccessToken: "old", RefreshToken: "rt",
+		ExpiresAt: now.Add(-time.Minute), // already expired -> needs refresh
+	}}, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, _ := s.Next()
+	var calls int32
+	refresh := func() (OAuthTokens, error) {
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(15 * time.Millisecond) // widen the race window
+		return OAuthTokens{AccessToken: "new", RefreshToken: "rt2", ExpiresAt: now.Add(time.Hour)}, nil
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _, _ = s.EnsureFresh(cred, false, now, time.Minute, refresh) }()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("refresh called %d times, want 1 (singleflight)", got)
+	}
+	if cred.AccessToken() != "new" {
+		t.Errorf("token not updated: %q", cred.AccessToken())
+	}
+}
+
+func TestEnsureFresh_ForceVsProactive(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s, _ := NewStore([]config.Credential{{
+		Type: config.CredentialOAuth, Name: "o", AccessToken: "a", RefreshToken: "rt",
+		ExpiresAt: now.Add(time.Hour), // fresh -> no proactive refresh
+	}}, WithClock(func() time.Time { return now }))
+	cred, _ := s.Next()
+	refresh := func() (OAuthTokens, error) { return OAuthTokens{AccessToken: "b", ExpiresAt: now.Add(time.Hour)}, nil }
+
+	if _, did, _ := s.EnsureFresh(cred, false, now, time.Minute, refresh); did {
+		t.Error("proactive refresh should NOT run for a fresh token")
+	}
+	if _, did, err := s.EnsureFresh(cred, true, now, time.Minute, refresh); err != nil || !did {
+		t.Errorf("force refresh should run: did=%v err=%v", did, err)
+	}
+	if cred.AccessToken() != "b" {
+		t.Errorf("forced refresh didn't update token: %q", cred.AccessToken())
 	}
 }

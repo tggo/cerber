@@ -60,6 +60,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - OAuth requests carry the Claude Code system prefix (see OAuth entry below).
 **Verified:** `internal/provider/anthropic` tests (mockery HTTPDoer) + live OAuth smoke test — 2026-06-07.
 
+## OAuth refresh — singleflight + 401 self-heal
+**What:** concurrent requests to an OAuth credential must not corrupt its rotating refresh token, and a stale-but-valid-looking access token (401) must self-heal.
+**DoD:**
+- `credential.Store.EnsureFresh(cred, force, now, skew, refreshFn)` serializes refresh per credential (per-cred mutex) and dedups via a generation counter: only one concurrent caller spends the single-use refresh token; the others reuse the winner's result. `force` refreshes regardless of expiry. Proven: 12 concurrent `EnsureFresh` → refresh runs exactly once.
+- dispatch refreshes proactively near expiry via EnsureFresh; on an upstream `401/403` for an OAuth cred it forces one refresh and retries the SAME credential before sidelining it (the access token was likely invalidated by a rotation elsewhere). Proven: 401-then-retry → 200, upstream called twice.
+- The OpenAI-compatible provider's OAuth path (grok) uses EnsureFresh too.
+- Refresh lifecycle logs at Info (`oauth token near expiry, refreshing`; `oauth token refreshed`; `retrying after forced oauth refresh`; `upstream credential failure, sidelining`).
+**Verified:** `internal/credential` (singleflight, force vs proactive) + `internal/server` (401 force-refresh+retry) tests; live: 10 concurrent requests pinned to one OAuth account → all 200 (previously flapped to 503) — 2026-06-09.
+
 ## OAuth — token refresh & Claude Code spoofing
 **What:** Claude Code OAuth credentials stay usable over time: their access token is refreshed before expiry, and requests carry the system prefix Anthropic requires for OAuth.
 **DoD:**

@@ -48,6 +48,12 @@ type Credential struct {
 	accessToken  string
 	refreshToken string
 	expiresAt    time.Time
+	refreshGen   uint64 // bumped on every token update; used to dedup refreshes
+
+	// refreshMu serializes token refresh for this credential so concurrent
+	// requests don't each spend the (single-use, rotating) refresh token — which
+	// would burn it and 401/cooldown the account. See Store.EnsureFresh.
+	refreshMu sync.Mutex
 }
 
 // Name returns the human label for this credential (safe to log).
@@ -104,6 +110,7 @@ func (c *Credential) updateOAuth(tok OAuthTokens) {
 		c.refreshToken = tok.RefreshToken
 	}
 	c.expiresAt = tok.ExpiresAt
+	c.refreshGen++
 }
 
 // String is a redacted identifier — it never contains secret material.
@@ -335,6 +342,45 @@ func (s *Store) Cooldown(c *Credential, d time.Duration) {
 			return
 		}
 	}
+}
+
+// EnsureFresh refreshes a credential's OAuth token, serializing concurrent
+// callers per credential so the rotating (single-use) refresh token is spent
+// exactly once — concurrent refreshes would burn it and 401/cooldown the account.
+//
+// force=false: refresh only if within skew of expiry (proactive).
+// force=true:  refresh regardless (e.g. recovering from an upstream 401).
+//
+// Dedup: each token update bumps a generation counter; a caller captures it
+// before taking the lock and, if it changed while waiting, skips the refresh and
+// uses the token the winner just obtained. refresh() does the provider-specific
+// exchange. Returns the new tokens and whether a refresh actually ran.
+func (s *Store) EnsureFresh(c *Credential, force bool, now time.Time, skew time.Duration, refresh func() (OAuthTokens, error)) (OAuthTokens, bool, error) {
+	if c == nil {
+		return OAuthTokens{}, false, nil
+	}
+	c.mu.RLock()
+	gen := c.refreshGen
+	c.mu.RUnlock()
+
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	c.mu.RLock()
+	changed := c.refreshGen != gen
+	c.mu.RUnlock()
+	if changed {
+		return OAuthTokens{}, false, nil // refreshed by another goroutine while we waited
+	}
+	if !force && !c.NeedsRefresh(now, skew) {
+		return OAuthTokens{}, false, nil
+	}
+	tok, err := refresh()
+	if err != nil {
+		return OAuthTokens{}, false, err
+	}
+	c.updateOAuth(tok)
+	return tok, true, nil
 }
 
 // UpdateOAuth replaces a credential's OAuth token state after a refresh. Unknown

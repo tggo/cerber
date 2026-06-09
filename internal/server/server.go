@@ -1091,6 +1091,32 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 // chosen credential (so the same rotation/refresh serves /v1/messages and
 // /v1/messages/count_tokens). It returns the response, the name of the credential
 // used (or last tried), and an error. The response Body must be closed.
+// refreshCred refreshes an OAuth credential via the store's singleflight
+// EnsureFresh (so concurrent requests spend the rotating refresh token once).
+// force=true refreshes regardless of expiry (to recover from a 401). It persists
+// + logs on success. Returns whether a refresh actually ran.
+func (s *Server) refreshCred(ctx context.Context, cred *credential.Credential, force bool) (bool, error) {
+	if s.refresher == nil || cred.Kind() != credential.KindOAuth {
+		return false, nil
+	}
+	tok, did, err := s.creds.EnsureFresh(cred, force, s.now(), s.refreshSkew, func() (credential.OAuthTokens, error) {
+		return s.refresher.Refresh(ctx, cred.RefreshToken())
+	})
+	if err != nil {
+		s.log.Warn("oauth refresh failed", zap.String("credential", cred.Name()),
+			zap.Bool("forced", force), zap.Error(err))
+		return false, err
+	}
+	if did {
+		s.log.Info("oauth token refreshed", zap.String("credential", cred.Name()),
+			zap.Bool("forced", force), zap.Time("expires_at", tok.ExpiresAt))
+		if s.persist != nil {
+			s.persist(cred.Name(), tok)
+		}
+	}
+	return did, nil
+}
+
 func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
 	var lastErr error
 	var lastCred string
@@ -1100,18 +1126,14 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 			return nil, lastCred, err // ErrNoneAvailable
 		}
 		lastCred = cred.Name()
-		if s.refresher != nil && cred.NeedsRefresh(s.now(), s.refreshSkew) {
-			s.log.Debug("refreshing oauth credential", zap.String("credential", cred.Name()))
-			tok, rerr := s.refresher.Refresh(ctx, cred.RefreshToken())
-			if rerr != nil {
-				s.log.Warn("oauth refresh failed", zap.String("credential", cred.Name()), zap.Error(rerr))
+		// Proactive refresh if the OAuth token is near expiry (singleflight).
+		if cred.NeedsRefresh(s.now(), s.refreshSkew) {
+			s.log.Info("oauth token near expiry, refreshing",
+				zap.String("credential", cred.Name()), zap.Time("expires_at", cred.ExpiresAt()))
+			if _, rerr := s.refreshCred(ctx, cred, false); rerr != nil {
 				s.creds.Cooldown(cred, s.cooldown)
 				lastErr = fmt.Errorf("refresh %s: %w", cred, rerr)
 				continue
-			}
-			s.creds.UpdateOAuth(cred, tok)
-			if s.persist != nil {
-				s.persist(cred.Name(), tok)
 			}
 		}
 		s.log.Debug("dispatch", zap.String("credential", cred.Name()), zap.Int("attempt", i+1))
@@ -1130,11 +1152,29 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 			continue
 		}
 		if isCredFailure(resp.StatusCode) {
-			s.log.Warn("upstream credential failure, rotating",
-				zap.String("credential", cred.Name()), zap.Int("status", resp.StatusCode))
+			status := resp.StatusCode
 			_ = resp.Body.Close()
+			// An OAuth 401/403 usually means the access token was invalidated (e.g.
+			// a rotation elsewhere), not that the account is dead. Force one refresh
+			// and retry the SAME credential before sidelining it — this self-heals
+			// the common flap instead of cooling the account for a minute.
+			if (status == http.StatusUnauthorized || status == http.StatusForbidden) && cred.Kind() == credential.KindOAuth && s.refresher != nil {
+				if did, rerr := s.refreshCred(ctx, cred, true); rerr == nil && did {
+					s.log.Info("retrying after forced oauth refresh", zap.String("credential", cred.Name()))
+					resp2, err2 := send(cred)
+					if err2 == nil && !isCredFailure(resp2.StatusCode) {
+						s.quota.Record(cred.Name(), resp2.Header)
+						return resp2, cred.Name(), nil
+					}
+					if resp2 != nil {
+						_ = resp2.Body.Close()
+					}
+				}
+			}
+			s.log.Warn("upstream credential failure, sidelining",
+				zap.String("credential", cred.Name()), zap.Int("status", status))
 			s.creds.Cooldown(cred, s.cooldown)
-			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", resp.StatusCode)
+			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", status)
 			continue
 		}
 		s.quota.Record(cred.Name(), resp.Header) // passive Anthropic quota capture

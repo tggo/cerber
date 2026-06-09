@@ -1263,3 +1263,38 @@ func TestChatPage(t *testing.T) {
 		}
 	}
 }
+
+func TestDispatch_OAuth401_ForceRefreshAndRetry(t *testing.T) {
+	// OAuth cred with a still-valid expiry (so no proactive refresh), but the
+	// upstream rejects the access token with 401 — cerber must force a refresh and
+	// retry the SAME credential, succeeding without sidelining it.
+	creds := oauthStore(t, "stale-access", time.Now().Add(time.Hour))
+	up := mocks.NewUpstream(t)
+	refr := mocks.NewRefresher(t)
+	s := New(access.New([]string{clientKey}), creds, up, refr, nil)
+
+	refr.EXPECT().Refresh(mock.Anything, "refresh-0").
+		Return(credential.OAuthTokens{AccessToken: "fresh-access", RefreshToken: "refresh-1", ExpiresAt: time.Now().Add(time.Hour)}, nil).Once()
+
+	var n int
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ []byte, _ bool, cred *credential.Credential, _ http.Header) (*http.Response, error) {
+			n++
+			if n == 1 {
+				return resp(401, "application/json", `{"error":"invalid token"}`), nil
+			}
+			// retry must carry the refreshed access token
+			if cred.AccessToken() != "fresh-access" {
+				t.Errorf("retry used %q, want fresh-access", cred.AccessToken())
+			}
+			return resp(200, "application/json", `{"id":"ok"}`), nil
+		})
+
+	rec := do(t, s.Handler(), "POST", "/v1/messages", `{"model":"claude"}`, clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 after force-refresh+retry, got %d %s", rec.Code, rec.Body.String())
+	}
+	if n != 2 {
+		t.Errorf("upstream called %d times, want 2 (401 then retry)", n)
+	}
+}
