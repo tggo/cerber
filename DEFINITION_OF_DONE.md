@@ -120,6 +120,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **What:** cerber forwards the client's `anthropic-beta` header upstream so faithful clients (Claude Code) work.
 **DoD:**
 - Client `anthropic-beta` is forwarded to Anthropic (required for `context_management` etc.); for OAuth it is merged with `oauth-2025-04-20` (deduped).
+- Browser-context headers (`Origin`, `Referer`, `Cookie`, `Sec-Fetch-*`, `Sec-Ch-*`) are NOT forwarded, and for **OAuth** credentials a non-`claude-cli` User-Agent is replaced with the Claude Code UA — Anthropic ties OAuth tokens to the Claude Code client and 401/403s browser/SDK/curl UAs (this is why the web chat 503'd on Claude). A genuine 401 force-refreshes+retries once; a 403 is treated as a policy/permission/rate decision and not retried.
 - `Accept-Encoding` is NOT forwarded — Go's transport negotiates + transparently decompresses, so cerber always reads a plain body (else a client `Accept-Encoding: gzip` left the body gzipped and the OpenAI→Anthropic response translator failed with 502 "translate upstream response").
 - Real `claude -p` pointed at cerber (`ANTHROPIC_BASE_URL`) completes a prompt through cerber to Anthropic.
 **Verified:** `internal/provider/anthropic` beta tests + `scripts/verify-claude.sh` (real `claude -p` → "pong") — 2026-06-07.

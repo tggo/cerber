@@ -26,6 +26,12 @@ const CountTokensPath = "/v1/messages/count_tokens"
 // authorized for. Sent only with OAuth credentials.
 const oauthBetas = "oauth-2025-04-20"
 
+// oauthUserAgent is sent on OAuth requests whose client isn't already Claude
+// Code: Anthropic ties OAuth (Claude Code) tokens to the Claude Code client and
+// rejects other User-Agents (browser, SDK, curl…) with 401/403. This mirrors the
+// real claude-cli UA; bump the version to match the Claude Code we impersonate.
+const oauthUserAgent = "claude-cli/2.1.170 (external, cli)"
+
 // Client issues Anthropic Messages requests.
 type Client struct {
 	baseURL string
@@ -120,6 +126,16 @@ var managedRequestHeaders = map[string]bool{
 	// cerber always reads a plain body (the OpenAI→Anthropic translator parses it;
 	// forwarding a client gzip request leaves the body compressed → parse fails).
 	"accept-encoding": true,
+	// Browser-context headers: Anthropic REJECTS OAuth (Claude Code) tokens used
+	// from a browser origin (anti-token-theft), so a request from the web chat
+	// would 401/403. Strip them (plus Sec-Fetch-*/Sec-Ch-* by prefix below).
+	"origin": true, "referer": true, "cookie": true,
+}
+
+// browserHeaderPrefix reports whether a header name is a browser-context header
+// (Sec-Fetch-*, Sec-Ch-*) that must not be forwarded to Anthropic.
+func browserHeaderPrefix(lower string) bool {
+	return strings.HasPrefix(lower, "sec-fetch-") || strings.HasPrefix(lower, "sec-ch-")
 }
 
 // Send POSTs an Anthropic Messages request with the given raw JSON body. cerber
@@ -145,7 +161,8 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 
 	// Forward all client headers (except the ones cerber manages).
 	for k, vs := range clientHeader {
-		if managedRequestHeaders[strings.ToLower(k)] {
+		lk := strings.ToLower(k)
+		if managedRequestHeaders[lk] || browserHeaderPrefix(lk) {
 			continue
 		}
 		req.Header[k] = append([]string(nil), vs...)
@@ -162,6 +179,14 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 			req.Header.Set("Accept", "text/event-stream")
 		} else {
 			req.Header.Set("Accept", "application/json")
+		}
+	}
+	// OAuth tokens are tied to the Claude Code client: any non-claude-cli
+	// User-Agent (browser, SDK, curl…) is rejected. Force the claude-cli UA unless
+	// the client already is Claude Code (native passthrough keeps its real UA).
+	if cred.Kind() == credential.KindOAuth {
+		if ua := req.Header.Get("User-Agent"); !strings.HasPrefix(ua, "claude-cli/") {
+			req.Header.Set("User-Agent", oauthUserAgent)
 		}
 	}
 	applyAuth(req, cred)
@@ -186,7 +211,8 @@ func (c *Client) CountTokens(ctx context.Context, body []byte, cred *credential.
 		return nil, fmt.Errorf("anthropic: build count_tokens request: %w", err)
 	}
 	for k, vs := range clientHeader {
-		if managedRequestHeaders[strings.ToLower(k)] {
+		lk := strings.ToLower(k)
+		if managedRequestHeaders[lk] || browserHeaderPrefix(lk) {
 			continue
 		}
 		req.Header[k] = append([]string(nil), vs...)

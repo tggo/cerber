@@ -1154,11 +1154,12 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 		if isCredFailure(resp.StatusCode) {
 			status := resp.StatusCode
 			_ = resp.Body.Close()
-			// An OAuth 401/403 usually means the access token was invalidated (e.g.
-			// a rotation elsewhere), not that the account is dead. Force one refresh
-			// and retry the SAME credential before sidelining it — this self-heals
-			// the common flap instead of cooling the account for a minute.
-			if (status == http.StatusUnauthorized || status == http.StatusForbidden) && cred.Kind() == credential.KindOAuth && s.refresher != nil {
+			// An OAuth 401 usually means the access token was invalidated (e.g. a
+			// rotation elsewhere), not that the account is dead — force one refresh
+			// and retry the SAME credential before sidelining it. (Only 401: a 403 is
+			// a permission/policy/rate decision that refreshing can't fix, and
+			// rotating the token on every 403 just churns it.)
+			if status == http.StatusUnauthorized && cred.Kind() == credential.KindOAuth && s.refresher != nil {
 				if did, rerr := s.refreshCred(ctx, cred, true); rerr == nil && did {
 					s.log.Info("retrying after forced oauth refresh", zap.String("credential", cred.Name()))
 					resp2, err2 := send(cred)

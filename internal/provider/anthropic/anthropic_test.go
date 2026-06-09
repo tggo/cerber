@@ -280,3 +280,82 @@ func TestSend_StripsAcceptEncoding(t *testing.T) {
 		t.Errorf("Accept-Encoding forwarded = %q, want stripped", ae)
 	}
 }
+
+func TestSend_StripsBrowserHeaders(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return okResp(), nil
+	})
+	c := New("https://api.anthropic.com", "2023-06-01", doer)
+	store := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+	cred, _ := store.Next()
+	h := http.Header{}
+	h.Set("Origin", "https://cerber.ihatebot.com")
+	h.Set("Referer", "https://cerber.ihatebot.com/chat")
+	h.Set("Cookie", "sid=secret")
+	h.Set("Sec-Fetch-Site", "same-origin")
+	h.Set("Sec-Ch-Ua", "\"Chromium\"")
+	h.Set("X-Keep", "yes") // a non-browser header must still pass through
+	resp, err := c.Send(context.Background(), []byte(`{"model":"c"}`), false, cred, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	for _, bad := range []string{"Origin", "Referer", "Cookie", "Sec-Fetch-Site", "Sec-Ch-Ua"} {
+		if captured.Header.Get(bad) != "" {
+			t.Errorf("browser header %q must NOT be forwarded to Anthropic (OAuth blocks browser origin)", bad)
+		}
+	}
+	if captured.Header.Get("X-Keep") != "yes" {
+		t.Error("non-browser header should still pass through")
+	}
+}
+
+func TestSend_OAuthUserAgent(t *testing.T) {
+	// non-claude UA (browser/sdk/curl) -> forced to claude-cli
+	d1 := mocks.NewHTTPDoer(t)
+	var r1 *http.Request
+	d1.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) { r1 = r; return okResp(), nil })
+	c1 := New("https://api.anthropic.com", "v", d1)
+	s1 := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+	cr1, _ := s1.Next()
+	h := http.Header{}
+	h.Set("User-Agent", "Mozilla/5.0 Safari/605")
+	resp, _ := c1.Send(context.Background(), []byte(`{}`), false, cr1, h)
+	resp.Body.Close()
+	if ua := r1.Header.Get("User-Agent"); !strings.HasPrefix(ua, "claude-cli/") {
+		t.Errorf("OAuth UA = %q, want claude-cli/*", ua)
+	}
+
+	// native Claude Code UA is preserved
+	d2 := mocks.NewHTTPDoer(t)
+	var r2 *http.Request
+	d2.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) { r2 = r; return okResp(), nil })
+	c2 := New("https://api.anthropic.com", "v", d2)
+	s2 := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+	cr2, _ := s2.Next()
+	h2 := http.Header{}
+	h2.Set("User-Agent", "claude-cli/2.1.170 (external, cli)")
+	resp2, _ := c2.Send(context.Background(), []byte(`{}`), false, cr2, h2)
+	resp2.Body.Close()
+	if ua := r2.Header.Get("User-Agent"); ua != "claude-cli/2.1.170 (external, cli)" {
+		t.Errorf("native claude UA not preserved: %q", ua)
+	}
+
+	// api_key cred: UA untouched
+	d3 := mocks.NewHTTPDoer(t)
+	var r3 *http.Request
+	d3.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) { r3 = r; return okResp(), nil })
+	c3 := New("https://api.anthropic.com", "v", d3)
+	s3 := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
+	cr3, _ := s3.Next()
+	h3 := http.Header{}
+	h3.Set("User-Agent", "Mozilla/5.0")
+	resp3, _ := c3.Send(context.Background(), []byte(`{}`), false, cr3, h3)
+	resp3.Body.Close()
+	if r3.Header.Get("User-Agent") != "Mozilla/5.0" {
+		t.Errorf("api_key UA must be untouched, got %q", r3.Header.Get("User-Agent"))
+	}
+}
