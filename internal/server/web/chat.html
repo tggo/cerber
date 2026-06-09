@@ -148,7 +148,7 @@
       const r = await fetch("/admin/accounts", { headers: authHeaders() });
       if (!r.ok) return;
       const d = await r.json();
-      (d.accounts || []).forEach(a => { (ACCOUNTS[a.provider] = ACCOUNTS[a.provider] || []).push({ name: a.name, kind: a.kind }); });
+      (d.accounts || []).forEach(a => { (ACCOUNTS[a.provider] = ACCOUNTS[a.provider] || []).push({ name: a.name, kind: a.kind, cooling: a.cooling_down, enabled: a.enabled }); });
     } catch (e) { /* ignore */ }
   }
 
@@ -160,7 +160,10 @@
     const sel = $("cred"); const cur = sel.value;
     sel.innerHTML = '<option value="">auto</option>';
     (ACCOUNTS[prov] || []).forEach(a => {
-      const o = document.createElement("option"); o.value = a.name; o.textContent = a.name + " (" + a.kind + ")"; sel.appendChild(o);
+      const o = document.createElement("option"); o.value = a.name;
+      const warn = !a.enabled ? " ⚠ disabled" : (a.cooling ? " ⚠ cooling (bad token?)" : "");
+      o.textContent = a.name + " (" + a.kind + ")" + warn;
+      sel.appendChild(o);
     });
     if (credParam && ![...sel.options].some(o => o.value === credParam)) {
       const o = document.createElement("option"); o.value = credParam; o.textContent = credParam + " (pinned)"; sel.appendChild(o);
