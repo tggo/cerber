@@ -95,15 +95,16 @@ func RotateFiltered(ctx context.Context, store *credential.Store, cooldown time.
 				return nil, lastCred, ctx.Err()
 			}
 			lastErr = err
-			store.Cooldown(cred, cooldown)
+			store.Penalize(cred, cooldown) // exponential backoff on repeated failures
 			continue
 		}
 		if isCredFailure(resp.StatusCode) {
 			_ = resp.Body.Close()
-			store.Cooldown(cred, cooldown)
+			store.Penalize(cred, cooldown)
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", resp.StatusCode)
 			continue
 		}
+		store.MarkSuccess(cred) // recovered → clear backoff
 		return resp, cred.Name(), nil
 	}
 	if lastErr == nil {

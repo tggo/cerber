@@ -140,9 +140,15 @@ func newCredential(cc config.Credential, idx int) (*Credential, error) {
 	}
 }
 
+// maxCooldown caps the exponential backoff applied to a repeatedly-failing
+// credential (e.g. an unpaid/forbidden account), so it is effectively parked
+// instead of retried every minute, until it succeeds again (which resets it).
+const maxCooldown = 30 * time.Minute
+
 type entry struct {
 	cred          *Credential
 	cooldownUntil time.Time
+	failStreak    int // consecutive failures; drives exponential backoff
 	disabled      bool
 
 	// Health from the latest probe (see SetHealth). healthAt zero = never probed.
@@ -322,6 +328,51 @@ func (s *Store) SetHealth(c *Credential, healthy bool, errMsg string) {
 			e.healthy = healthy
 			e.healthErr = errMsg
 			e.healthAt = s.now()
+			return
+		}
+	}
+}
+
+// Penalize sidelines a credential after a failure, with exponential backoff:
+// each consecutive failure doubles the cooldown (base, 2×base, 4×base, …) capped
+// at maxCooldown. A persistently-broken account (e.g. unpaid → 403) thus gets
+// parked for longer and longer so rotation stops picking it, until MarkSuccess
+// resets it. Returns the applied cooldown. Unknown credentials are ignored.
+func (s *Store) Penalize(c *Credential, base time.Duration) time.Duration {
+	if c == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.cred == c {
+			e.failStreak++
+			d := base
+			for i := 1; i < e.failStreak && d < maxCooldown; i++ {
+				d *= 2
+			}
+			if d > maxCooldown {
+				d = maxCooldown
+			}
+			e.cooldownUntil = s.now().Add(d)
+			return d
+		}
+	}
+	return 0
+}
+
+// MarkSuccess clears a credential's failure streak and cooldown after a
+// successful use, so a recovered account returns to rotation immediately.
+func (s *Store) MarkSuccess(c *Credential) {
+	if c == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.cred == c {
+			e.failStreak = 0
+			e.cooldownUntil = time.Time{}
 			return
 		}
 	}

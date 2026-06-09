@@ -36,7 +36,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **What:** thread-safe store of Anthropic credentials handed out round-robin, with per-credential cooldown after upstream failures.
 **DoD:**
 - Round-robin order is stable; `Next()` cycles through all credentials.
-- A credential put on `Cooldown(d)` is skipped until `d` elapses, then returns to rotation.
+- A failing credential is sidelined with **exponential backoff** (`Penalize`: 60s→120s→…→30m cap); a successful use (`MarkSuccess`) resets the streak and clears the cooldown. So a persistently-broken account (e.g. unpaid → 403) is parked instead of retried every minute, and `auto` stops picking it until it recovers.
 - When all credentials are cooling down, `Next()` returns `ErrNoneAvailable`.
 - Secrets are never present in `String()`/logs; readable only via explicit accessors.
 **Verified:** `internal/credential` tests, 100% coverage — 2026-06-07.

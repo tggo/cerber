@@ -329,3 +329,35 @@ func TestEnsureFresh_ForceVsProactive(t *testing.T) {
 		t.Errorf("forced refresh didn't update token: %q", cred.AccessToken())
 	}
 }
+
+func TestPenalizeBackoffAndReset(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s, _ := NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "a", Key: "k"}},
+		WithClock(func() time.Time { return now }))
+	cred, _ := s.Next()
+	// exponential: 60s, 120s, 240s ...
+	for i, want := range []time.Duration{60 * time.Second, 120 * time.Second, 240 * time.Second} {
+		if got := s.Penalize(cred, 60*time.Second); got != want {
+			t.Errorf("penalize #%d = %v, want %v", i+1, got, want)
+		}
+	}
+	// cap at maxCooldown
+	for i := 0; i < 20; i++ {
+		s.Penalize(cred, 60*time.Second)
+	}
+	if got := s.Penalize(cred, 60*time.Second); got != maxCooldown {
+		t.Errorf("capped penalize = %v, want %v", got, maxCooldown)
+	}
+	// while cooling, Next skips it
+	if _, err := s.Next(); err != ErrNoneAvailable {
+		t.Errorf("cooling cred should be skipped, got %v", err)
+	}
+	// success resets streak + clears cooldown
+	s.MarkSuccess(cred)
+	if _, err := s.Next(); err != nil {
+		t.Errorf("after MarkSuccess cred should be available: %v", err)
+	}
+	if got := s.Penalize(cred, 60*time.Second); got != 60*time.Second {
+		t.Errorf("after reset, first penalize = %v, want 60s", got)
+	}
+}

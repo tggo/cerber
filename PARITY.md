@@ -39,8 +39,8 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Multiple accounts per provider | ✅ | auth_dir + config, per-org names |
 | Round-robin rotation | ✅ | |
 | Fill-first strategy | ✅ | `providers.strategy: fill-first` |
-| Cooldown on 401/403/429 + transport error | ✅ | fixed duration (no exponential backoff yet) |
-| Exponential backoff | ❌ | |
+| Cooldown on 401/403/429 + transport error | ✅ | exponential backoff (60s→…→30m), reset on success |
+| Exponential backoff | ✅ | per-credential, capped 30m; success resets |
 | Pick credential per request | ✅ | `X-Cerber-Cred: oauth\|key\|<name>` |
 | **Runtime enable/disable account** | ✅ | `POST /admin/accounts/{name}/{enable,disable}` |
 | **List accounts + state + usage** | ✅ | `GET /admin/accounts` |

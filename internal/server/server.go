@@ -1131,7 +1131,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 			s.log.Info("oauth token near expiry, refreshing",
 				zap.String("credential", cred.Name()), zap.Time("expires_at", cred.ExpiresAt()))
 			if _, rerr := s.refreshCred(ctx, cred, false); rerr != nil {
-				s.creds.Cooldown(cred, s.cooldown)
+				s.creds.Penalize(cred, s.cooldown)
 				lastErr = fmt.Errorf("refresh %s: %w", cred, rerr)
 				continue
 			}
@@ -1148,7 +1148,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 			}
 			s.log.Warn("upstream send failed", zap.String("credential", cred.Name()), zap.Error(err))
 			lastErr = err
-			s.creds.Cooldown(cred, s.cooldown)
+			s.creds.Penalize(cred, s.cooldown)
 			continue
 		}
 		if isCredFailure(resp.StatusCode) {
@@ -1165,6 +1165,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 					resp2, err2 := send(cred)
 					if err2 == nil && !isCredFailure(resp2.StatusCode) {
 						s.quota.Record(cred.Name(), resp2.Header)
+						s.creds.MarkSuccess(cred)
 						return resp2, cred.Name(), nil
 					}
 					if resp2 != nil {
@@ -1174,11 +1175,12 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 			}
 			s.log.Warn("upstream credential failure, sidelining",
 				zap.String("credential", cred.Name()), zap.Int("status", status))
-			s.creds.Cooldown(cred, s.cooldown)
+			s.creds.Penalize(cred, s.cooldown)
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", status)
 			continue
 		}
 		s.quota.Record(cred.Name(), resp.Header) // passive Anthropic quota capture
+		s.creds.MarkSuccess(cred)
 		return resp, cred.Name(), nil
 	}
 	if lastErr == nil {
