@@ -43,17 +43,18 @@ rsync -az --rsh="$RSYNC_RSH" \
   deploy/rollout.sh \
   .env \
   "$TARGET:$DIR/"
-# OAuth tokens. cerber refreshes them server-side and Anthropic ROTATES the
-# refresh token on every refresh, so firebat's copy is the source of truth —
-# overwriting it with a stale local copy kills the credential (invalid_grant).
-# Default: seed only missing accounts (--ignore-existing), never clobber.
-# After a local re-login (`cerber --claude-login`), push the fresh token with
-#   DEPLOY_PUSH_CREDS=1 make deploy
-if [ "${DEPLOY_PUSH_CREDS:-}" = "1" ]; then
-  echo "  (DEPLOY_PUSH_CREDS=1: force-pushing local auths, overwriting server tokens)"
+# OAuth tokens, synced with --update (-u): push only files that are NEWER locally
+# (i.e. a fresh `cerber --claude-login`/`--xai-login`), and NEVER overwrite a
+# token the server refreshed more recently. cerber refreshes tokens server-side
+# and Anthropic ROTATES the refresh token on every refresh, so clobbering a
+# server token with a stale local copy kills the account (invalid_grant). -a
+# preserves mtimes so the -u comparison is correct. Set DEPLOY_FORCE_CREDS=1 to
+# force-overwrite all (rarely needed).
+if [ "${DEPLOY_FORCE_CREDS:-}" = "1" ]; then
+  echo "  (DEPLOY_FORCE_CREDS=1: force-overwriting ALL server tokens with local)"
   rsync -az --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
 else
-  rsync -az --ignore-existing --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
+  rsync -auz --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
 fi
 
 echo "› blue-green rollout on firebat (Caddy follows the health check)"
