@@ -40,6 +40,7 @@ rsync -az --rsh="$RSYNC_RSH" \
   deploy/Dockerfile \
   deploy/docker-compose.yml \
   deploy/config.firebat.yaml \
+  deploy/rollout.sh \
   .env \
   "$TARGET:$DIR/"
 # OAuth tokens. cerber refreshes them server-side and Anthropic ROTATES the
@@ -55,12 +56,15 @@ else
   rsync -az --ignore-existing --rsh="$RSYNC_RSH" auths/ "$TARGET:$DIR/auths/"
 fi
 
-echo "› building image + restarting container on firebat"
+echo "› blue-green rollout on firebat (Caddy follows the health check)"
 # shellcheck disable=SC2086
-$SSH "$TARGET" "cd $DIR && docker compose up -d --build && sleep 2 && docker compose ps"
+$SSH "$TARGET" "cd $DIR && bash rollout.sh"
 
-echo "› health check (inside host)"
-# shellcheck disable=SC2086
-$SSH "$TARGET" "curl -fsS http://127.0.0.1:18080/healthz && echo" || echo "  (healthz not ready yet — check: cd $DIR && docker compose logs)"
+echo "› health check via the public vhost"
+if curl -fsS -m 10 https://cerber.ihatebot.com/healthz >/dev/null 2>&1; then
+  echo "  ok"
+else
+  echo "  (could not reach https://cerber.ihatebot.com/healthz from here)"
+fi
 
-echo "✓ deployed. https://cerber.ihatebot.com (LAN keyless / public needs the client key)"
+echo "✓ deployed (zero-downtime). https://cerber.ihatebot.com"

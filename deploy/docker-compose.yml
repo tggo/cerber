@@ -1,27 +1,39 @@
-# cerber — production proxy stack for firebat.
+# cerber — production stack for firebat (blue-green, zero-downtime behind Caddy).
 #
-#   docker compose up -d --build
+# Two identical containers, cerber-a (127.0.0.1:18080) and cerber-b
+# (127.0.0.1:18082). The host Caddy reverse-proxies BOTH with active health
+# checks (see deploy/caddy/cerber.caddy) and routes to whichever is healthy.
+# deploy/rollout.sh rolls them one at a time: start the idle colour, wait for
+# /healthz, then gracefully stop the active one — Caddy follows the health state,
+# so there's no downtime and no Caddy reload per deploy.
 #
-# The container listens on 0.0.0.0:8080 *inside* the container and publishes only
-# to 127.0.0.1:8080 on the host — the host nginx (cerber.ihatebot.com vhost) is
-# the sole front door. Config, secrets, OAuth tokens, logs and usage state are
-# bind-mounted so they live on the host and survive image rebuilds.
+# Only ONE colour runs in steady state (cerber is a stateful singleton: it writes
+# usage/keys state; two live writers would clobber it). cerber drains in-flight
+# requests on SIGTERM. State is shared via the bind mounts below.
+x-cerber: &cerber
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: cerber:local
+  restart: unless-stopped
+  user: "1000:1000"
+  command: ["-config", "/work/config.yaml", "-env", "/work/.env"]
+  stop_grace_period: 15s
+  volumes:
+    - ./config.firebat.yaml:/work/config.yaml:ro
+    - ./.env:/work/.env:ro
+    - ./auths:/work/auths
+    - ./logs:/work/logs
+    - ./data:/work/data
+
 services:
-  cerber:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: cerber:local
-    container_name: cerber
-    restart: unless-stopped
-    # Run as host uid:gid 1000 so bind-mounted dirs (owned by ruslan) are writable.
-    user: "1000:1000"
-    command: ["-config", "/work/config.yaml", "-env", "/work/.env"]
-    volumes:
-      - ./config.firebat.yaml:/work/config.yaml:ro
-      - ./.env:/work/.env:ro
-      - ./auths:/work/auths
-      - ./logs:/work/logs
-      - ./data:/work/data
+  cerber-a:
+    <<: *cerber
+    container_name: cerber-a
     ports:
       - "127.0.0.1:18080:8080"
+  cerber-b:
+    <<: *cerber
+    container_name: cerber-b
+    ports:
+      - "127.0.0.1:18082:8080"   # 18081 is taken by radioclubnikolaev
