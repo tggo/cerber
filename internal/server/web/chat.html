@@ -52,7 +52,8 @@
   <h1>cerber<span>·</span>chat</h1>
   <a href="/dashboard">← dashboard</a>
   <span class="grow"></span>
-  <input id="model" list="models" placeholder="model (type or pick)" style="width:230px">
+  <input id="model" list="models" placeholder="model (type or pick)" style="width:230px"
+         autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true">
   <datalist id="models"></datalist>
   <select id="cred" title="which credential to use">
     <option value="">auto</option>
@@ -99,6 +100,10 @@
     $("cred").appendChild(opt); $("cred").value = credParam;
   }
   $("lefthead").textContent = "chat" + (provider ? " · " + provider : "") + (credParam ? " · " + credParam : "");
+
+  // Preselect a model so it's never blank: ?model=, else a sane default (no
+  // provider → gpt-4o-mini; with a provider, loadModels picks its first model).
+  $("model").value = qs.get("model") || (provider ? "" : "gpt-4o-mini");
 
   const messages = [];
 

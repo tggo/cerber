@@ -258,3 +258,25 @@ func TestProbeCredential_OAuthStateCheck(t *testing.T) {
 		t.Errorf("oauth with token: models=%v err=%v (want healthy, no models)", models, err)
 	}
 }
+
+func TestSend_StripsAcceptEncoding(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var ae string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		ae = r.Header.Get("Accept-Encoding")
+		return okResp(), nil
+	})
+	c := New("https://api.anthropic.com", "2023-06-01", doer)
+	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
+	cred, _ := store.Next()
+	h := http.Header{}
+	h.Set("Accept-Encoding", "gzip") // client asked for gzip; must NOT be forwarded
+	resp, err := c.Send(context.Background(), []byte(`{"model":"c"}`), false, cred, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if ae != "" {
+		t.Errorf("Accept-Encoding forwarded = %q, want stripped", ae)
+	}
+}

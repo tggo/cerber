@@ -116,6 +116,10 @@ var managedRequestHeaders = map[string]bool{
 	"content-length": true, "connection": true, "keep-alive": true,
 	"proxy-authenticate": true, "proxy-authorization": true, "te": true,
 	"trailer": true, "transfer-encoding": true, "upgrade": true,
+	// Not forwarded: let Go's transport negotiate + transparently decompress, so
+	// cerber always reads a plain body (the OpenAI→Anthropic translator parses it;
+	// forwarding a client gzip request leaves the body compressed → parse fails).
+	"accept-encoding": true,
 }
 
 // Send POSTs an Anthropic Messages request with the given raw JSON body. cerber

@@ -608,9 +608,21 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "  Ask the operator for a key; keys are managed in the dashboard.\n\n")
 
 	fmt.Fprintf(&b, "## Endpoints\n\n")
-	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible. Point any OpenAI SDK at base_url `%s/v1`.\n", base)
-	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native. Point the Anthropic SDK at base_url `%s`.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible chat (all providers, incl. Claude). Point any OpenAI SDK at base_url `%s/v1`.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native messages. Point the Anthropic SDK at base_url `%s`.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/messages/count_tokens` — Anthropic token counting.\n")
+	fmt.Fprintf(&b, "- `POST /v1/images/generations` — image generation (OpenAI Images shape; e.g. `grok-imagine-image`).\n")
+	fmt.Fprintf(&b, "- `GET /v1/models` — list available model ids (use these exact strings as `model`).\n")
 	fmt.Fprintf(&b, "- `GET /llm.md` — this document.\n\n")
+
+	fmt.Fprintf(&b, "## Recommended models\n\n")
+	fmt.Fprintf(&b, "- Fast/cheap default: `gpt-4o-mini`.\n")
+	fmt.Fprintf(&b, "- Strong reasoning: `claude-sonnet-4-6` (Claude; works on `/v1/chat/completions` too).\n")
+	fmt.Fprintf(&b, "- Local/free: an ollama model from the list below.\n")
+	fmt.Fprintf(&b, "Always set `model` to an exact id (see `GET /v1/models` or the list below). Streaming: add `\"stream\": true`.\n\n")
+
+	fmt.Fprintf(&b, "## Picking a specific account / subscription\n\n")
+	fmt.Fprintf(&b, "Send header `X-Cerber-Cred: <value>` to pin which credential serves the request: `oauth` (a subscription token), `key` (an API key), or an exact account name from `GET /admin/accounts`. Omit it to let cerber rotate.\n\n")
 
 	fmt.Fprintf(&b, "## Model routing\n\n")
 	fmt.Fprintf(&b, "Just set `model`; cerber routes by name:\n\n")
@@ -1062,6 +1074,10 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
 	translated, err := s.tr.AnthropicToOpenAI(upstreamBody)
 	if err != nil {
+		s.log.Warn("translate upstream response failed", zap.Error(err),
+			zap.String("content_type", resp.Header.Get("Content-Type")),
+			zap.String("content_encoding", resp.Header.Get("Content-Encoding")),
+			zap.Int("body_len", len(upstreamBody)))
 		writeError(w, http.StatusBadGateway, "translate upstream response")
 		return
 	}
