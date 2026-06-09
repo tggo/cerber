@@ -52,9 +52,7 @@
   <h1>cerber<span>·</span>chat</h1>
   <a href="/dashboard">← dashboard</a>
   <span class="grow"></span>
-  <input id="model" list="models" placeholder="model (type or pick)" style="width:230px"
-         autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true">
-  <datalist id="models"></datalist>
+  <select id="model" title="model" style="width:260px"></select>
   <select id="cred" title="which credential to use">
     <option value="">auto</option>
     <option value="oauth">oauth / subscription</option>
@@ -101,11 +99,10 @@
   }
   $("lefthead").textContent = "chat" + (provider ? " · " + provider : "") + (credParam ? " · " + credParam : "");
 
-  // Preselect a model so it's never blank: ?model=, else a sane default (no
-  // provider → gpt-4o-mini; with a provider, loadModels picks its first model).
-  $("model").value = qs.get("model") || (provider ? "" : "gpt-4o-mini");
-
   const messages = [];
+
+  // Providers that don't self-list via /v1/models (Claude over OAuth) — curated.
+  const CURATED = { anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"] };
 
   function addMsg(role, text, cls) {
     const d = document.createElement("div");
@@ -124,19 +121,30 @@
   }
 
   async function loadModels() {
+    const groups = {};
     try {
       const r = await fetch("/v1/models", { headers: authHeaders() });
-      if (!r.ok) return;
-      const d = await r.json();
-      const dl = $("models"); dl.innerHTML = "";
-      (d.data || [])
-        .filter(m => !provider || m.owned_by === provider)
-        .forEach(m => { const o = document.createElement("option"); o.value = m.id; o.label = m.owned_by; dl.appendChild(o); });
-      if (!$("model").value) {
-        const first = (d.data || []).find(m => !provider || m.owned_by === provider);
-        if (first) $("model").value = first.id;
+      if (r.ok) {
+        const d = await r.json();
+        (d.data || []).forEach(m => { (groups[m.owned_by] = groups[m.owned_by] || []).push(m.id); });
       }
     } catch (e) { /* ignore */ }
+    // Add curated models for providers that don't self-list (Claude via OAuth).
+    for (const [p, ids] of Object.entries(CURATED)) if (!groups[p]) groups[p] = ids.slice();
+
+    const sel = $("model"); sel.innerHTML = "";
+    Object.keys(groups).sort().filter(p => !provider || p === provider).forEach(p => {
+      const og = document.createElement("optgroup"); og.label = p;
+      groups[p].sort().forEach(id => { const o = document.createElement("option"); o.value = id; o.textContent = id; og.appendChild(o); });
+      sel.appendChild(og);
+    });
+    if (!sel.options.length) { // nothing discovered (e.g. no key) — fall back to curated default
+      const o = document.createElement("option"); o.value = "claude-sonnet-4-6"; o.textContent = "claude-sonnet-4-6"; sel.appendChild(o);
+    }
+    // Default: ?model=, else provider's first, else claude-sonnet-4-6.
+    const want = qs.get("model") || (provider ? groups[provider]?.[0] : "claude-sonnet-4-6");
+    const has = [...sel.options].some(o => o.value === want);
+    if (want && has) sel.value = want; else sel.selectedIndex = 0;
   }
 
   async function send() {

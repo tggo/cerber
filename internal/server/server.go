@@ -616,8 +616,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- `GET /llm.md` — this document.\n\n")
 
 	fmt.Fprintf(&b, "## Recommended models\n\n")
-	fmt.Fprintf(&b, "- Fast/cheap default: `gpt-4o-mini`.\n")
-	fmt.Fprintf(&b, "- Strong reasoning: `claude-sonnet-4-6` (Claude; works on `/v1/chat/completions` too).\n")
+	fmt.Fprintf(&b, "- Default: `claude-sonnet-4-6` (strong; works on `/v1/chat/completions` and `/v1/messages`).\n")
+	fmt.Fprintf(&b, "- Cheap/fast: `claude-haiku-4-5-20251001`.\n")
 	fmt.Fprintf(&b, "- Local/free: an ollama model from the list below.\n")
 	fmt.Fprintf(&b, "Always set `model` to an exact id (see `GET /v1/models` or the list below). Streaming: add `\"stream\": true`.\n\n")
 
