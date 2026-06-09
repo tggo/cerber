@@ -44,6 +44,9 @@ var dashboardHTML []byte
 //go:embed web/favicon.svg
 var faviconSVG []byte
 
+//go:embed web/chat.html
+var chatHTML []byte
+
 // Upstream issues Anthropic Messages requests. *anthropic.Client satisfies it;
 // it is an interface so the server can be unit-tested against a mock.
 type Upstream interface {
@@ -267,6 +270,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(dashboardHTML)
+	})
+	mux.HandleFunc("GET /chat", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(chatHTML)
 	})
 	// Catch-all: transparently proxy anything else to the real upstream (TLS
 	// impersonation), or 404 when no upstream proxy is configured.
@@ -1128,17 +1135,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 // "" -> any; anything else selects a credential by exact name (for picking a
 // specific account when several are pooled).
 func credFilter(r *http.Request) func(*credential.Credential) bool {
-	v := strings.TrimSpace(r.Header.Get("X-Cerber-Cred"))
-	switch strings.ToLower(v) {
-	case "":
-		return nil
-	case "oauth":
-		return func(c *credential.Credential) bool { return c.Kind() == credential.KindOAuth }
-	case "key", "api_key", "apikey":
-		return func(c *credential.Credential) bool { return c.Kind() == credential.KindAPIKey }
-	default:
-		return func(c *credential.Credential) bool { return c.Name() == v }
-	}
+	return credential.MatchHeader(r.Header.Get("X-Cerber-Cred"))
 }
 
 // debugRequestFields inspects an Anthropic request body for debug logging,

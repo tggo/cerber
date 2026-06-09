@@ -75,10 +75,16 @@ func (e *BadRequestError) Unwrap() error { return e.Err }
 // It returns the successful response, the credential name used, and an error.
 // The returned response's Body must be closed by the caller.
 func Rotate(ctx context.Context, store *credential.Store, cooldown time.Duration, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
+	return RotateFiltered(ctx, store, cooldown, nil, send)
+}
+
+// RotateFiltered is Rotate restricted to credentials matching match (nil = any),
+// so a client can pin a specific account/subscription (see credential.MatchHeader).
+func RotateFiltered(ctx context.Context, store *credential.Store, cooldown time.Duration, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
 	var lastErr error
 	var lastCred string
 	for i, n := 0, store.Len(); i < n; i++ {
-		cred, err := store.Next()
+		cred, err := store.NextOf(match)
 		if err != nil {
 			return nil, lastCred, err // ErrNoneAvailable
 		}

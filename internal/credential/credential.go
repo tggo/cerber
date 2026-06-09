@@ -8,6 +8,7 @@ package credential
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -178,6 +179,23 @@ func WithClock(now func() time.Time) Option {
 // only move on when it is unavailable) instead of round-robin.
 func WithFillFirst(v bool) Option {
 	return func(s *Store) { s.fillFirst = v }
+}
+
+// MatchHeader builds a credential matcher from an X-Cerber-Cred spec: "oauth" or
+// "key"/"api_key" select by kind, anything else selects by exact name; "" (or a
+// blank spec) returns nil (match any). Shared by the server and providers so a
+// client can pin a specific account/subscription.
+func MatchHeader(spec string) func(*Credential) bool {
+	switch s := strings.TrimSpace(spec); strings.ToLower(s) {
+	case "":
+		return nil
+	case "oauth":
+		return func(c *Credential) bool { return c.Kind() == KindOAuth }
+	case "key", "api_key", "apikey":
+		return func(c *Credential) bool { return c.Kind() == KindAPIKey }
+	default:
+		return func(c *Credential) bool { return c.Name() == s }
+	}
 }
 
 // NewStore builds a Store from validated config credentials.

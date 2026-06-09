@@ -279,6 +279,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Trust: only xAI hosts (`auth.x.ai`, `api.x.ai`) are contacted; tokens live in `auth_dir/xai` (0600), never logged.
 **Verified:** `internal/auth/xai` (device/poll/refresh) + `internal/auth/login` (Grok device flow) + `internal/provider/openai` (oauth bearer + refresh) tests; device-code start confirmed live against auth.x.ai — 2026-06-09.
 
+## Chat playground (`/chat`)
+**What:** an embedded web chat to try a provider/account from the browser — left = conversation, right = raw request/response JSON.
+**DoD:**
+- `GET /chat` serves an embedded page (no external assets). Model picker is populated from `/v1/models` (filtered to `?provider=` when present, free-text allowed); a credential picker (auto / oauth / key, or a pinned `?cred=<name>`) sets `X-Cerber-Cred`.
+- It calls `/v1/chat/completions` with the running conversation; the assistant reply renders on the left and every request + response (or error) is shown as pretty JSON on the right.
+- The dashboard links into it: each provider → `/chat?provider=<p>`, each account → `/chat?provider=<p>&cred=<name>` (so you can chat on a specific subscription/key).
+- The OpenAI-compatible providers (openai/grok/ollama) honour `X-Cerber-Cred` to pin a credential (`provider.RotateFiltered` + `credential.MatchHeader`, shared with the server), so "chat with this subscription" actually uses it.
+**Verified:** `internal/server` TestChatPage + `internal/provider/openai` TestChat_PinsCredentialByHeader; live — 2026-06-09.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

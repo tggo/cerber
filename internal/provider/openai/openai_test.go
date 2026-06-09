@@ -253,3 +253,24 @@ func TestChat_OAuthNoRefreshWhenFresh(t *testing.T) {
 		t.Errorf("auth = %q", auth)
 	}
 }
+
+func TestChat_PinsCredentialByHeader(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var auth string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		auth = r.Header.Get("Authorization")
+		return resp(200, `{}`), nil
+	})
+	// two keys; pin the second by name via X-Cerber-Cred
+	p := New("grok", "https://api.x.ai", store(t, "k1", "k2"), doer)
+	h := http.Header{}
+	h.Set("X-Cerber-Cred", "b") // store names creds a,b,...
+	out, err := p.Chat(context.Background(), []byte(`{}`), false, h)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	out.Body.Close()
+	if auth != "Bearer k2" {
+		t.Errorf("auth = %q, want Bearer k2 (pinned cred b)", auth)
+	}
+}

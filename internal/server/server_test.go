@@ -1247,3 +1247,19 @@ func TestImages_ProviderWithoutImageSupport(t *testing.T) {
 		t.Errorf("non-imager = %d, want 501", rec.Code)
 	}
 }
+
+func TestChatPage(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	rec := do(t, s.Handler(), "GET", "/chat", "", "") // public HTML, like /dashboard
+	if rec.Code != 200 {
+		t.Fatalf("/chat = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("ct = %q", ct)
+	}
+	for _, want := range []string{"cerber", "/v1/chat/completions", "X-Cerber-Cred", "/v1/models"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("/chat missing %q", want)
+		}
+	}
+}

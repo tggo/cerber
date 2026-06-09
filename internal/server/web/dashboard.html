@@ -53,6 +53,8 @@
   #newKeyReveal code { color:var(--ok); word-break:break-all; flex:1; }
   button.danger:hover { border-color:var(--err); color:var(--err); }
   td .row-actions { display:flex; gap:6px; justify-content:flex-end; }
+  td a { color:var(--accent); text-decoration:none; }
+  td a:hover { text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -181,7 +183,8 @@
         if (!a.health_checked) key = `<span class="muted">—</span>`;
         else if (a.healthy) key = `<span style="color:var(--ok)">✓ valid</span>`;
         else key = `<span class="err" title="${(a.health_error||'').replace(/"/g,'')}">✗ invalid</span>`;
-        return `<tr><td class="muted">${a.provider||"—"}</td><td>${a.name}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
+        const chat = `<a href="/chat?provider=${encodeURIComponent(a.provider||'')}&cred=${encodeURIComponent(a.name)}" title="chat with this account">${a.name}</a>`;
+        return `<tr><td class="muted">${a.provider||"—"}</td><td>${chat}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
       }).join("");
       $("accounts").innerHTML = head + (body || `<tr><td colspan="9" class="muted">no accounts</td></tr>`);
       $("accounts").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
@@ -205,7 +208,7 @@
         const models = (p.models && p.models.length)
           ? `<span title="${p.models.join('\n')}">${p.models.length} ▾</span>`
           : `<span class="muted">—</span>`;
-        return `<tr><td>${p.name}</td><td class="muted">${p.base_url||"—"}</td><td>${keys}</td><td class="muted">${models}</td></tr>`;
+        return `<tr><td><a href="/chat?provider=${encodeURIComponent(p.name)}" title="chat with ${p.name}">${p.name}</a></td><td class="muted">${p.base_url||"—"}</td><td>${keys}</td><td class="muted">${models}</td></tr>`;
       }).join("");
       $("providers").innerHTML = head + (body || `<tr><td colspan="4" class="muted">no providers</td></tr>`);
     } catch (e) { /* ignore */ }

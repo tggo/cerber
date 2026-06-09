@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cerber · chat</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --muted:#8b93a7;
+    --accent:#7c9cff; --err:#ff7b72; --ok:#5ad17e; --user:#1d2740; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+    font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { display:flex; align-items:center; gap:10px; padding:12px 18px;
+    border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; letter-spacing:.5px; }
+  header h1 span { color:var(--accent); }
+  header a { color:var(--muted); text-decoration:none; }
+  .grow { flex:1; }
+  input, button, select { font:inherit; color:var(--fg); background:var(--panel);
+    border:1px solid var(--line); border-radius:8px; padding:6px 10px; }
+  input:focus, select:focus { outline:1px solid var(--accent); }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  .pill { color:var(--muted); font-size:12px; }
+  .pill b { color:var(--accent); }
+  main { flex:1; display:grid; grid-template-columns:1fr 1fr; gap:0; min-height:0; }
+  .col { display:flex; flex-direction:column; min-height:0; }
+  .col.left { border-right:1px solid var(--line); }
+  .colhead { padding:8px 16px; color:var(--muted); font-size:12px; text-transform:uppercase;
+    letter-spacing:.6px; border-bottom:1px solid var(--line); }
+  #msgs, #raw { flex:1; overflow:auto; padding:16px; }
+  .msg { margin-bottom:14px; }
+  .msg .who { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+  .msg .body { white-space:pre-wrap; word-break:break-word; background:var(--panel);
+    border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .msg.user .body { background:var(--user); }
+  .msg.err .body { border-color:var(--err); color:var(--err); }
+  .composer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); }
+  .composer textarea { flex:1; resize:none; height:54px; }
+  #raw .item { margin-bottom:12px; }
+  #raw .lbl { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+  #raw pre { margin:0; white-space:pre-wrap; word-break:break-word; background:var(--panel);
+    border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:12.5px; }
+  #raw pre.req { border-left:3px solid var(--accent); }
+  #raw pre.res { border-left:3px solid var(--ok); }
+  #raw pre.bad { border-left:3px solid var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <h1>cerber<span>·</span>chat</h1>
+  <a href="/dashboard">← dashboard</a>
+  <span class="grow"></span>
+  <input id="model" list="models" placeholder="model (type or pick)" style="width:230px">
+  <datalist id="models"></datalist>
+  <select id="cred" title="which credential to use">
+    <option value="">auto</option>
+    <option value="oauth">oauth / subscription</option>
+    <option value="key">api key</option>
+  </select>
+  <input id="key" type="password" placeholder="client key (blank on LAN)" autocomplete="off" style="width:160px">
+  <button id="clear" title="new conversation">clear</button>
+</header>
+<main>
+  <div class="col left">
+    <div class="colhead" id="lefthead">chat</div>
+    <div id="msgs"></div>
+    <div class="composer">
+      <textarea id="input" placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send">send</button>
+    </div>
+  </div>
+  <div class="col">
+    <div class="colhead">raw items (request / response)</div>
+    <div id="raw"></div>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  const provider = qs.get("provider") || "";
+  const credParam = qs.get("cred") || "";
+
+  $("key").value = localStorage.getItem("cerber_key") || "";
+  $("key").addEventListener("change", () => localStorage.setItem("cerber_key", $("key").value));
+  const authHeaders = () => {
+    const h = { "Content-Type": "application/json" };
+    if ($("key").value) h.Authorization = "Bearer " + $("key").value;
+    const c = $("cred").value;
+    if (c) h["X-Cerber-Cred"] = c;
+    return h;
+  };
+
+  // If a specific credential/subscription was passed, pin it.
+  if (credParam) {
+    const opt = document.createElement("option");
+    opt.value = credParam; opt.textContent = credParam + " (pinned)";
+    $("cred").appendChild(opt); $("cred").value = credParam;
+  }
+  $("lefthead").textContent = "chat" + (provider ? " · " + provider : "") + (credParam ? " · " + credParam : "");
+
+  const messages = [];
+
+  function addMsg(role, text, cls) {
+    const d = document.createElement("div");
+    d.className = "msg " + (role === "user" ? "user " : "") + (cls || "");
+    d.innerHTML = `<div class="who">${role}</div><div class="body"></div>`;
+    d.querySelector(".body").textContent = text;
+    $("msgs").appendChild(d); $("msgs").scrollTop = $("msgs").scrollHeight;
+    return d;
+  }
+  function addRaw(label, obj, cls) {
+    const d = document.createElement("div"); d.className = "item";
+    const pre = document.createElement("pre"); pre.className = cls || "";
+    pre.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+    d.innerHTML = `<div class="lbl">${label}</div>`; d.appendChild(pre);
+    $("raw").appendChild(d); $("raw").scrollTop = $("raw").scrollHeight;
+  }
+
+  async function loadModels() {
+    try {
+      const r = await fetch("/v1/models", { headers: authHeaders() });
+      if (!r.ok) return;
+      const d = await r.json();
+      const dl = $("models"); dl.innerHTML = "";
+      (d.data || [])
+        .filter(m => !provider || m.owned_by === provider)
+        .forEach(m => { const o = document.createElement("option"); o.value = m.id; o.label = m.owned_by; dl.appendChild(o); });
+      if (!$("model").value) {
+        const first = (d.data || []).find(m => !provider || m.owned_by === provider);
+        if (first) $("model").value = first.id;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function send() {
+    const text = $("input").value.trim();
+    const model = $("model").value.trim();
+    if (!text) return;
+    if (!model) { addMsg("system", "pick a model first", "err"); return; }
+    $("input").value = "";
+    messages.push({ role: "user", content: text });
+    addMsg("user", text);
+    const body = { model, messages };
+    addRaw("→ request", body, "req");
+    const pending = addMsg("assistant", "…");
+    try {
+      const r = await fetch("/v1/chat/completions", { method: "POST", headers: authHeaders(), body: JSON.stringify(body) });
+      const raw = await r.text();
+      let data; try { data = JSON.parse(raw); } catch { data = raw; }
+      if (!r.ok) {
+        pending.classList.add("err");
+        pending.querySelector(".body").textContent = "HTTP " + r.status + " — see raw";
+        addRaw("← error " + r.status, data, "bad");
+        return;
+      }
+      addRaw("← response", data, "res");
+      const reply = data.choices?.[0]?.message?.content ?? "(no content)";
+      pending.querySelector(".body").textContent = reply;
+      messages.push({ role: "assistant", content: reply });
+    } catch (e) {
+      pending.classList.add("err");
+      pending.querySelector(".body").textContent = String(e);
+    }
+  }
+
+  $("send").addEventListener("click", send);
+  $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+  $("clear").addEventListener("click", () => { messages.length = 0; $("msgs").innerHTML = ""; $("raw").innerHTML = ""; });
+
+  loadModels();
+</script>
+</body>
+</html>

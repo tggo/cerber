@@ -64,6 +64,14 @@ func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer) 
 // Name identifies this provider.
 func (p *Provider) Name() string { return p.name }
 
+// headerGet safely reads a header value (clientHeader may be nil).
+func headerGet(h http.Header, key string) string {
+	if h == nil {
+		return ""
+	}
+	return h.Get(key)
+}
+
 // SetOAuthRefresh enables OAuth-token refresh for this provider's credentials
 // (used for xAI/Grok subscription tokens). refresh exchanges a refresh token for
 // new tokens; persist (optional) saves them to disk. Call before serving.
@@ -99,7 +107,8 @@ func (p *Provider) BaseURL() string { return p.baseURL }
 // Images forwards an OpenAI-format image-generation request upstream (rotating
 // credentials) and returns the response unchanged. Non-streaming.
 func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.Header) (*provider.Response, error) {
-	resp, credName, err := provider.Rotate(ctx, p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
+	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
+	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, func(cred *credential.Credential) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ImagesPath, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("openai: build image request: %w", err)
@@ -166,7 +175,8 @@ func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential
 // Chat forwards an OpenAI chat-completions request upstream, rotating across
 // credentials, and returns the OpenAI-format response unchanged.
 func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
-	resp, credName, err := provider.Rotate(ctx, p.store, p.cooldown, func(cred *credential.Credential) (*http.Response, error) {
+	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
+	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, func(cred *credential.Credential) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ChatPath, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("openai: build request: %w", err)
