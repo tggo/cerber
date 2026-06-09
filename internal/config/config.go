@@ -182,6 +182,13 @@ func DefaultAnthropic() *Anthropic {
 	}
 }
 
+// DefaultGrok returns a Grok provider config with defaults and no credentials.
+// Used when the config omits the grok block but xAI OAuth tokens are present on
+// disk (auth_dir/xai).
+func DefaultGrok() *Grok {
+	return &Grok{BaseURL: defaultGrokBase, Timeout: Duration(defaultProviderWaitNS)}
+}
+
 // Load reads, parses, defaults and validates the config at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

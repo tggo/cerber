@@ -5,6 +5,7 @@ package login
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tggo/cerber/internal/auth/claude"
+	"github.com/tggo/cerber/internal/auth/xai"
 	"github.com/tggo/cerber/internal/provider"
 )
 
@@ -26,6 +28,9 @@ type Options struct {
 	Out       io.Writer          // user-facing messages
 	Now       func() time.Time   // clock (for token expiry)
 	Timeout   time.Duration      // how long to wait for the callback (default 5m)
+	// PollInterval overrides the device-flow poll interval (Grok only). 0 = use
+	// the server-provided interval. Mainly for tests.
+	PollInterval time.Duration
 }
 
 type callback struct {
@@ -117,6 +122,69 @@ func Claude(ctx context.Context, opt Options) (claude.Tokens, error) {
 			return claude.Tokens{}, fmt.Errorf("login: state mismatch (possible CSRF)")
 		}
 		return claude.Exchange(ctx, opt.HTTP, cb.code, state, pkce.Verifier, opt.Port, opt.Now)
+	}
+}
+
+// Grok runs the xAI / Grok Build OAuth device flow: it shows the user a
+// verification URL + code, then polls the token endpoint until authorized. No
+// local callback server is needed (works headless/remote). Returns the tokens.
+func Grok(ctx context.Context, opt Options) (xai.Tokens, error) {
+	if opt.HTTP == nil {
+		opt.HTTP = http.DefaultClient
+	}
+	if opt.OpenURL == nil {
+		opt.OpenURL = openBrowser
+	}
+	if opt.Out == nil {
+		opt.Out = io.Discard
+	}
+	if opt.Timeout == 0 {
+		opt.Timeout = 5 * time.Minute
+	}
+
+	dc, err := xai.StartDevice(ctx, opt.HTTP)
+	if err != nil {
+		return xai.Tokens{}, err
+	}
+	visit := dc.VerificationURIComplete
+	if visit == "" {
+		visit = dc.VerificationURI
+	}
+	fmt.Fprintf(opt.Out, "To authorize cerber with your Grok (SuperGrok / X Premium+) account:\n\n  1. Open: %s\n  2. Enter code: %s\n\n", dc.VerificationURI, dc.UserCode)
+	if !opt.NoBrowser {
+		if err := opt.OpenURL(visit); err != nil {
+			fmt.Fprintf(opt.Out, "(could not open browser automatically: %v)\n", err)
+		}
+	}
+	fmt.Fprintf(opt.Out, "Waiting for authorization...\n")
+
+	deadline := time.After(opt.Timeout)
+	interval := time.Duration(dc.Interval) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	if opt.PollInterval > 0 {
+		interval = opt.PollInterval
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return xai.Tokens{}, ctx.Err()
+		case <-deadline:
+			return xai.Tokens{}, fmt.Errorf("login: timed out waiting for Grok authorization after %s", opt.Timeout)
+		case <-time.After(interval):
+		}
+		tok, err := xai.PollToken(ctx, opt.HTTP, dc.DeviceCode, opt.Now)
+		switch {
+		case err == nil:
+			return tok, nil
+		case errors.Is(err, xai.ErrAuthorizationPending):
+			// keep waiting
+		case errors.Is(err, xai.ErrSlowDown):
+			interval += 5 * time.Second
+		default:
+			return xai.Tokens{}, err
+		}
 	}
 }
 

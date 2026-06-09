@@ -19,6 +19,7 @@ import (
 	"github.com/tggo/cerber/internal/access"
 	"github.com/tggo/cerber/internal/auth/claude"
 	"github.com/tggo/cerber/internal/auth/login"
+	"github.com/tggo/cerber/internal/auth/xai"
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/logging"
@@ -41,7 +42,8 @@ func main() {
 	authDir := flag.String("auth-dir", "", "directory for OAuth tokens (default: config auth_dir or ./auths)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	claudeLogin := flag.Bool("claude-login", false, "run the Claude Code OAuth login and save tokens, then exit")
-	noBrowser := flag.Bool("no-browser", false, "with --claude-login: print the URL instead of opening a browser")
+	xaiLogin := flag.Bool("xai-login", false, "run the xAI/Grok (SuperGrok/X Premium+) OAuth device login and save tokens, then exit")
+	noBrowser := flag.Bool("no-browser", false, "with --claude-login/--xai-login: print the URL instead of opening a browser")
 	loginPort := flag.Int("login-port", claude.DefaultCallbackPort, "with --claude-login: local OAuth callback port")
 	genCert := flag.Bool("gen-cert", false, "generate a CA + cert for TLS impersonation (DOCKER ONLY), then exit")
 	certDir := flag.String("cert-dir", "./certs", "with --gen-cert: output directory")
@@ -66,6 +68,11 @@ func main() {
 			dir = "./auths"
 		}
 		runSeedClaudeCreds(dir, *credsOut)
+		return
+	}
+
+	if *xaiLogin {
+		runXAILogin(*authDir, *noBrowser)
 		return
 	}
 
@@ -195,15 +202,43 @@ func main() {
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
 	}
 
-	if k := cfg.Providers.Grok; k != nil {
-		kstore, err := credential.NewStore(k.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+	// Grok = config API keys + xAI OAuth (Grok Build / SuperGrok subscription)
+	// tokens written by --xai-login to auth_dir/xai. Enable the provider if either
+	// is present.
+	xaiDir := filepath.Join(cfg.AuthDir, "xai")
+	xaiCreds, xerr := tokenstore.Load(xaiDir)
+	if xerr != nil {
+		logger.Fatal("load xai tokens", zap.Error(xerr))
+	}
+	if k := cfg.Providers.Grok; k != nil || len(xaiCreds) > 0 {
+		if k == nil {
+			k = config.DefaultGrok()
+		}
+		merged := append(append([]config.Credential{}, k.Credentials...), xaiCreds...)
+		kstore, err := credential.NewStore(merged, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
 		if err != nil {
 			logger.Fatal("grok credentials", zap.Error(err))
 		}
 		// xAI/Grok is OpenAI-compatible: reuse the OpenAI provider, named "grok".
-		srv.RegisterChatter(openai.New("grok", k.BaseURL, kstore, &http.Client{Timeout: k.Timeout.Std()}))
+		grokHTTP := &http.Client{Timeout: k.Timeout.Std()}
+		grokProv := openai.New("grok", k.BaseURL, kstore, grokHTTP)
+		// Refresh subscription (OAuth) tokens before they expire and persist them.
+		grokProv.SetOAuthRefresh(func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error) {
+			t, e := xai.Refresh(ctx, grokHTTP, refreshToken, time.Now)
+			if e != nil {
+				return credential.OAuthTokens{}, e
+			}
+			return credential.OAuthTokens{AccessToken: t.AccessToken, RefreshToken: t.RefreshToken, ExpiresAt: t.ExpiresAt}, nil
+		}, func(name string, tok credential.OAuthTokens) {
+			if _, perr := tokenstore.Save(xaiDir, name, tokenstore.Record{
+				Name: name, AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, ExpiresAt: tok.ExpiresAt,
+			}); perr != nil {
+				logger.Warn("persist refreshed xai token", zap.String("credential", name), zap.Error(perr))
+			}
+		})
+		srv.RegisterChatter(grokProv)
 		srv.RegisterProviderStore("grok", kstore)
-		logger.Info("grok provider enabled", zap.Int("credentials", kstore.Len()))
+		logger.Info("grok provider enabled", zap.Int("credentials", kstore.Len()), zap.Int("oauth_subscription", len(xaiCreds)))
 	}
 
 	if o := cfg.Providers.Ollama; o != nil {
@@ -391,6 +426,26 @@ func runSeedClaudeCreds(authDir, out string) {
 		}
 	}
 	fmt.Printf("Seeded Claude Code credentials at %s and state at %s (from %s)\n", out, stateFile, tok.Name)
+}
+
+// runXAILogin performs the xAI/Grok OAuth device flow and saves the token under
+// auth_dir/xai, where it is picked up as a Grok OAuth credential at startup.
+func runXAILogin(authDir string, noBrowser bool) {
+	if authDir == "" {
+		authDir = "./auths"
+	}
+	tok, err := login.Grok(context.Background(), login.Options{NoBrowser: noBrowser, Out: os.Stdout})
+	if err != nil {
+		fatal("xai login: %v", err)
+	}
+	dir := filepath.Join(authDir, "xai")
+	path, err := tokenstore.Save(dir, "xai", tokenstore.Record{
+		Name: "xai", AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, ExpiresAt: tok.ExpiresAt,
+	})
+	if err != nil {
+		fatal("save xai tokens: %v", err)
+	}
+	fmt.Printf("\nGrok login successful. Token saved to %s\n", path)
 }
 
 // runClaudeLogin performs the interactive OAuth flow and saves the tokens.

@@ -270,6 +270,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Unknown model or `anthropic` (no image gen) → 400; a routed provider that can't generate images → 501. Usage records request/error counts (no token cost for images).
 **Verified:** `internal/provider/openai` TestImages_Passthrough + `internal/server` TestImages_RoutedToProvider / ProviderWithoutImageSupport; live grok image via cerber — 2026-06-09.
 
+## xAI / Grok OAuth login (`--xai-login`, device flow)
+**What:** log in with a Grok Build / SuperGrok / X Premium+ subscription and use it for Grok inference (chat + images) instead of a pay-per-token API key — the xAI analogue of `--claude-login`.
+**DoD:**
+- `cerber --xai-login` runs the xAI OAuth2 **device** flow (`auth.x.ai`, public Grok CLI client, scopes incl. `offline_access grok-cli:access`): prints a verification URL + user code (opens a browser unless `--no-browser`), polls the token endpoint, and saves the token under `auth_dir/xai/`. Works headless/remote (no localhost callback).
+- At startup the Grok provider merges `auth_dir/xai` OAuth tokens with config API keys into one rotating store; if only OAuth tokens exist (no `providers.grok` block) the provider is still enabled (`config.DefaultGrok`, base `https://api.x.ai`).
+- The OpenAI provider sends `Bearer <access_token>` for OAuth credentials (api keys unchanged) and proactively refreshes them before expiry (`offline_access` refresh token), persisting the result. Subscription tokens drive chat + `/v1/images/generations`.
+- Trust: only xAI hosts (`auth.x.ai`, `api.x.ai`) are contacted; tokens live in `auth_dir/xai` (0600), never logged.
+**Verified:** `internal/auth/xai` (device/poll/refresh) + `internal/auth/login` (Grok device flow) + `internal/provider/openai` (oauth bearer + refresh) tests; device-code start confirmed live against auth.x.ai — 2026-06-09.
+
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).
 **DoD:**

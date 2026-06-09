@@ -40,6 +40,13 @@ type Provider struct {
 	store    *credential.Store
 	http     provider.HTTPDoer
 	cooldown time.Duration
+
+	// Optional OAuth refresh (e.g. xAI/Grok subscription tokens). nil = api-key
+	// only. refreshSkew refreshes this long before expiry.
+	refresh     func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error)
+	persist     func(name string, tok credential.OAuthTokens)
+	refreshSkew time.Duration
+	now         func() time.Time
 }
 
 // New builds a Provider with the given name (e.g. "openai", "grok") and base URL
@@ -57,6 +64,35 @@ func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer) 
 // Name identifies this provider.
 func (p *Provider) Name() string { return p.name }
 
+// SetOAuthRefresh enables OAuth-token refresh for this provider's credentials
+// (used for xAI/Grok subscription tokens). refresh exchanges a refresh token for
+// new tokens; persist (optional) saves them to disk. Call before serving.
+func (p *Provider) SetOAuthRefresh(refresh func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error), persist func(name string, tok credential.OAuthTokens)) {
+	p.refresh = refresh
+	p.persist = persist
+	p.refreshSkew = 60 * time.Second
+	p.now = time.Now
+}
+
+// bearer returns the Authorization bearer value for a credential: the OAuth
+// access token (refreshing it first if near expiry) or the API key.
+func (p *Provider) bearer(ctx context.Context, cred *credential.Credential) string {
+	if cred.Kind() != credential.KindOAuth {
+		return cred.APIKey()
+	}
+	if p.refresh != nil && p.now != nil && cred.NeedsRefresh(p.now(), p.refreshSkew) {
+		if tok, err := p.refresh(ctx, cred.RefreshToken()); err == nil {
+			p.store.UpdateOAuth(cred, tok)
+			if p.persist != nil {
+				p.persist(cred.Name(), tok)
+			}
+		}
+		// On refresh error, fall through with the current token; a 401 will
+		// rotate/cooldown it via Rotate.
+	}
+	return cred.AccessToken()
+}
+
 // BaseURL returns the configured upstream base URL (safe to display).
 func (p *Provider) BaseURL() string { return p.baseURL }
 
@@ -70,7 +106,7 @@ func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.He
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Authorization", "Bearer "+cred.APIKey())
+		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
 		return p.http.Do(req)
 	})
 	if err != nil {
@@ -94,8 +130,10 @@ func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential
 		return nil, fmt.Errorf("openai: build models request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if c != nil && c.APIKey() != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey())
+	if c != nil {
+		if tok := p.bearer(ctx, c); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
@@ -134,7 +172,7 @@ func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHea
 			return nil, fmt.Errorf("openai: build request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+cred.APIKey())
+		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
 		if stream {
 			req.Header.Set("Accept", "text/event-stream")
 		} else {

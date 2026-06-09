@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
@@ -189,5 +190,66 @@ func TestImages_Passthrough(t *testing.T) {
 	b, _ := io.ReadAll(out.Body)
 	if out.Status != 200 || !strings.Contains(string(b), "https://img/x.jpg") {
 		t.Errorf("relay = %d %s", out.Status, b)
+	}
+}
+
+func oauthStore(t *testing.T, access, refresh string, exp time.Time) *credential.Store {
+	t.Helper()
+	s, err := credential.NewStore([]config.Credential{{
+		Type: config.CredentialOAuth, Name: "sub", AccessToken: access, RefreshToken: refresh, ExpiresAt: exp,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestChat_OAuthBearerAndRefresh(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var auth string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		auth = r.Header.Get("Authorization")
+		return resp(200, `{"ok":true}`), nil
+	})
+	// token already expired -> refresh must run and the NEW access token is used
+	p := New("grok", "https://api.x.ai", oauthStore(t, "old-at", "rt", time.Unix(1, 0)), doer)
+	var refreshed bool
+	p.SetOAuthRefresh(func(_ context.Context, rt string) (credential.OAuthTokens, error) {
+		refreshed = (rt == "rt")
+		return credential.OAuthTokens{AccessToken: "new-at", RefreshToken: "rt2", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	}, nil)
+
+	out, err := p.Chat(context.Background(), []byte(`{"model":"grok-4.3"}`), false, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	out.Body.Close()
+	if !refreshed {
+		t.Error("expected refresh to run for expired oauth token")
+	}
+	if auth != "Bearer new-at" {
+		t.Errorf("auth = %q, want Bearer new-at", auth)
+	}
+}
+
+func TestChat_OAuthNoRefreshWhenFresh(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var auth string
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		auth = r.Header.Get("Authorization")
+		return resp(200, `{}`), nil
+	})
+	p := New("grok", "https://api.x.ai", oauthStore(t, "fresh-at", "rt", time.Now().Add(time.Hour)), doer)
+	p.SetOAuthRefresh(func(context.Context, string) (credential.OAuthTokens, error) {
+		t.Fatal("refresh must NOT run for a fresh token")
+		return credential.OAuthTokens{}, nil
+	}, nil)
+	out, err := p.Chat(context.Background(), []byte(`{}`), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Body.Close()
+	if auth != "Bearer fresh-at" {
+		t.Errorf("auth = %q", auth)
 	}
 }

@@ -28,7 +28,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Anthropic / Claude | ✅ | api_key + OAuth (refresh + Claude Code spoof) |
 | OpenAI | ✅ | api_key (passthrough) |
 | Gemini | ✅ | api_key (OpenAI↔Gemini translate) |
-| Grok / xAI | ✅ | api_key (OpenAI-compatible passthrough) |
+| Grok / xAI | ✅ | api_key + OAuth (Grok Build / SuperGrok subscription, device flow) |
 | Ollama / vLLM (local) | ✅ | keyless (OpenAI-compatible passthrough) |
 | Codex, Kimi, Vertex, Antigravity, Gemini-CLI OAuth, OpenRouter | ❌ | |
 
@@ -57,7 +57,8 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | allow_localhost | ✅ |
 | Separate management key for /admin | ✅ `access.management_key` |
 | Interactive `--claude-login` (PKCE) | ✅ |
-| Per-provider OAuth logins (codex/gemini/xai/kimi) | ❌ |
+| Interactive `--xai-login` (OAuth device flow, SuperGrok) | ✅ |
+| Per-provider OAuth logins (codex/gemini/kimi) | ❌ |
 
 ## Observability (cpa-usage-keeper territory)
 

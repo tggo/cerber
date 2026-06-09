@@ -147,3 +147,37 @@ func TestClaude_PortInUse(t *testing.T) {
 		t.Fatal("expected port-in-use error")
 	}
 }
+
+func TestGrok_DeviceFlow(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	calls := 0
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body := func(s string) *http.Response {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(s)), Header: http.Header{}}
+		}
+		switch {
+		case strings.Contains(r.URL.String(), "/device/code"):
+			return body(`{"device_code":"dev","user_code":"AAAA-BBBB","verification_uri":"https://accounts.x.ai/oauth2/device","interval":1,"expires_in":900}`), nil
+		default: // token endpoint: pending once, then success
+			if calls == 2 {
+				return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"error":"authorization_pending"}`)), Header: http.Header{}}, nil
+			}
+			return body(`{"access_token":"at","refresh_token":"rt","expires_in":3600}`), nil
+		}
+	})
+	var out strings.Builder
+	tok, err := Grok(context.Background(), Options{
+		HTTP: doer, OpenURL: func(string) error { return nil }, Out: &out,
+		PollInterval: time.Millisecond, Now: func() time.Time { return time.Unix(0, 0) },
+	})
+	if err != nil {
+		t.Fatalf("Grok: %v", err)
+	}
+	if tok.AccessToken != "at" || tok.RefreshToken != "rt" {
+		t.Errorf("tok = %+v", tok)
+	}
+	if !strings.Contains(out.String(), "AAAA-BBBB") {
+		t.Errorf("user code not shown: %s", out.String())
+	}
+}
