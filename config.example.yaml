@@ -24,6 +24,15 @@ access:
     - "change-me-client-key"
   # management_key: if set, /admin/* requires this key (not the client keys above).
   # management_key: "change-me-admin-key"
+  # default_key_limits: budgets/rate-limits applied to NEW dashboard-minted keys
+  # (cer_… keys). Static keys above and loopback bypass governance. Edit a key's
+  # limits at runtime via POST /admin/keys/{name}/limits. Zero = unlimited.
+  # default_key_limits:
+  #   max_cost_usd: 50          # cost cap (from usage.pricing) per budget_period
+  #   budget_period: month      # minute|hour|day|week|month (default month)
+  #   max_requests: 600         # request cap per rate_period
+  #   max_tokens: 2000000       # input+output token cap per rate_period
+  #   rate_period: minute       # minute|hour|day|week|month (default minute)
 
 # Persist usage to disk (survives restart) and price models for cost reporting.
 usage:

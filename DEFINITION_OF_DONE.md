@@ -259,6 +259,16 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Mutations persist atomically; last-used is stamped on auth and flushed by the periodic saver. The embedded dashboard has a client-keys section (create + reveal-once, enable/disable, delete).
 **Verified:** `internal/access` store tests + `internal/server` CRUD/not-configured tests — 2026-06-08.
 
+## Client-key governance — per-key budgets & rate limits
+**What:** each managed (dashboard) client key may carry a rolling cost budget plus rolling request/token rate limits, enforced per request. Static config keys and loopback callers are the operator's own and bypass governance (unlimited).
+**DoD:**
+- A key's limits are `max_cost_usd` over `budget_period` (default `month`) and `max_requests` / `max_tokens` over `rate_period` (default `minute`); periods are one of `minute|hour|day|week|month` (rolling spans, not calendar-aligned). A zero/absent value for a dimension means unlimited for that dimension.
+- Per request, after the key is identified: if its cost window is at/over `max_cost_usd` → **402**; if its request or token window is at/over the limit → **429**; otherwise one request is reserved and the request proceeds. Cost is computed from the configured model pricing (`usage.pricing`); cost+tokens are charged back to the key after the response.
+- Counters reset when their rolling window elapses, and are **persisted with the key** (survive restart) and flushed by the periodic saver (not on every request).
+- `POST /admin/keys/{name}/limits` (admin-authed) sets a key's limits from an `access.Limits` JSON body (empty body clears them → unlimited); unknown name → 404, unrecognised period → 400. `GET /admin/keys` and the key store expose each key's `limits` and current-window `usage` (redacted, no secret).
+- `access.default_key_limits` in config seeds the limits of **newly-created** dashboard keys; existing keys keep their own. Invalid default periods fail config validation.
+**Verified:** `internal/access` limits tests (Admit/Charge/window-reset/Validate/SetLimits/defaults) + `internal/server` governance tests (402/429/charge-from-pricing/admin set) — 2026-06-10.
+
 ## Self-describing usage doc (`GET /llm.md`)
 **What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
 **DoD:**

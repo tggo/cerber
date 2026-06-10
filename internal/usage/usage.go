@@ -114,6 +114,14 @@ func (t *Tracker) SetPricing(p map[string]Price) {
 	}
 }
 
+// Cost returns the configured cost for a model's input/output tokens, or 0 when
+// no pricing is set for the model. Used by per-key budget enforcement.
+func (t *Tracker) Cost(model string, in, out int64) float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.modelCost(model, Stat{InputTokens: in, OutputTokens: out})
+}
+
 // modelCost computes the cost for a model's tokens (0 if no pricing).
 func (t *Tracker) modelCost(model string, s Stat) float64 {
 	p, ok := t.pricing[model]

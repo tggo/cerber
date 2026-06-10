@@ -26,22 +26,30 @@ var ErrNotFound = errors.New("access: no key with that name")
 
 // KeyInfo is a redacted view of a managed key — never contains the secret. Last4
 // is the final four characters of the key, enough to tell keys apart in the UI.
+// Limits and Usage expose the key's governance config and current window state so
+// the dashboard can render budgets/rate-limits without revealing the secret.
 type KeyInfo struct {
 	Name       string    `json:"name"`
 	Enabled    bool      `json:"enabled"`
 	Last4      string    `json:"last4"`
 	CreatedAt  time.Time `json:"created_at"`
 	LastUsedAt time.Time `json:"last_used_at,omitempty"`
+	Limits     Limits    `json:"limits"`
+	Usage      Usage     `json:"usage"`
 }
 
 // keyEntry is the persisted form, including the secret. It is only ever written
-// to the keys file (0600) and never returned through the API.
+// to the keys file (0600) and never returned through the API. Limits is the
+// per-key governance config; counters is its rolling-window runtime state
+// (persisted so budgets/rate-limits survive a restart).
 type keyEntry struct {
 	Name       string    `json:"name"`
 	Key        string    `json:"key"`
 	Enabled    bool      `json:"enabled"`
 	CreatedAt  time.Time `json:"created_at"`
 	LastUsedAt time.Time `json:"last_used_at"`
+	Limits     Limits    `json:"limits,omitempty"`
+	Counters   counters  `json:"counters,omitempty"`
 }
 
 // Store is a mutable, file-backed set of client API keys managed at runtime
@@ -49,10 +57,20 @@ type keyEntry struct {
 // addition to the static config keys, so an env-seeded key keeps working
 // regardless of the store's contents. Safe for concurrent use.
 type Store struct {
-	mu      sync.Mutex
-	path    string
-	entries []*keyEntry
-	now     func() time.Time
+	mu       sync.Mutex
+	path     string
+	entries  []*keyEntry
+	now      func() time.Time
+	defaults Limits // applied to newly-created keys when no explicit limits are given
+}
+
+// SetDefaultLimits sets the limits applied to keys created via Add (i.e. through
+// the dashboard) when no explicit limits are supplied. A zero Limits means new
+// keys are unlimited. Existing keys are unaffected.
+func (s *Store) SetDefaultLimits(l Limits) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.defaults = l
 }
 
 // LoadStore reads the keys file at path (JSON array of entries). A missing file
@@ -101,6 +119,33 @@ func (s *Store) Allow(presented string) bool {
 	return false
 }
 
+// Identify returns the name of the enabled managed key matching presented, and
+// whether one matched. Like Allow it scans every entry and stamps the matched
+// key's last-used time, but additionally yields the key's name so the caller can
+// enforce per-key governance (Admit/Charge). The scan is constant-time.
+func (s *Store) Identify(presented string) (string, bool) {
+	if s == nil || presented == "" {
+		return "", false
+	}
+	pb := []byte(presented)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	matchedIdx := -1
+	for i, e := range s.entries {
+		if !e.Enabled {
+			continue
+		}
+		if subtle.ConstantTimeCompare(pb, []byte(e.Key)) == 1 {
+			matchedIdx = i
+		}
+	}
+	if matchedIdx >= 0 {
+		s.entries[matchedIdx].LastUsedAt = s.now()
+		return s.entries[matchedIdx].Name, true
+	}
+	return "", false
+}
+
 // Add creates a new enabled key with a freshly generated secret and persists the
 // store. It returns the full secret (the only time it is ever exposed) and a
 // redacted info record. Names must be unique and non-empty.
@@ -120,7 +165,7 @@ func (s *Store) Add(name string) (string, KeyInfo, error) {
 			return "", KeyInfo{}, ErrNameTaken
 		}
 	}
-	e := &keyEntry{Name: name, Key: key, Enabled: true, CreatedAt: s.now()}
+	e := &keyEntry{Name: name, Key: key, Enabled: true, CreatedAt: s.now(), Limits: s.defaults}
 	s.entries = append(s.entries, e)
 	info := infoOf(e)
 	err = s.saveLocked()
@@ -211,6 +256,7 @@ func infoOf(e *keyEntry) KeyInfo {
 	return KeyInfo{
 		Name: e.Name, Enabled: e.Enabled, Last4: last4,
 		CreatedAt: e.CreatedAt, LastUsedAt: e.LastUsedAt,
+		Limits: e.Limits, Usage: e.Counters.usage(),
 	}
 }
 

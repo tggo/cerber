@@ -141,6 +141,14 @@ func main() {
 	if kerr != nil {
 		logger.Fatal("client keys", zap.Error(kerr))
 	}
+	dl := cfg.Access.DefaultKeyLimits
+	keyStore.SetDefaultLimits(access.Limits{
+		MaxCostUSD:   dl.MaxCostUSD,
+		BudgetPeriod: dl.BudgetPeriod,
+		MaxRequests:  dl.MaxRequests,
+		MaxTokens:    dl.MaxTokens,
+		RatePeriod:   dl.RatePeriod,
+	})
 
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
 	srv.SetClientKeyStore(keyStore)

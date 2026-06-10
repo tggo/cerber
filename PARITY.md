@@ -54,6 +54,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Feature | Status |
 |---|---|
 | Client API keys | ✅ |
+| Per-key budgets (cost $) + rate-limits (requests/tokens per window) | ✅ `POST /admin/keys/{name}/limits` · `access.default_key_limits` |
 | allow_localhost | ✅ |
 | Separate management key for /admin | ✅ `access.management_key` |
 | Interactive `--claude-login` (PKCE) | ✅ |

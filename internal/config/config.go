@@ -70,6 +70,31 @@ type Access struct {
 	AllowLocalhost bool     `yaml:"allow_localhost"`
 	ManagementKey  string   `yaml:"management_key"` // if set, /admin/* requires this key (not client keys)
 	KeysFile       string   `yaml:"keys_file"`      // persisted store of dashboard-managed client keys
+	// DefaultKeyLimits is applied to newly-created dashboard keys when no explicit
+	// limits are given. A zero value means new keys are unlimited. Existing keys
+	// keep their own limits (edit via POST /admin/keys/{name}/limits).
+	DefaultKeyLimits KeyLimits `yaml:"default_key_limits"`
+}
+
+// KeyLimits mirrors access.Limits in config form: a rolling cost budget plus
+// rolling request/token rate limits applied per managed client key.
+type KeyLimits struct {
+	MaxCostUSD   float64 `yaml:"max_cost_usd"`
+	BudgetPeriod string  `yaml:"budget_period"` // minute|hour|day|week|month (default month)
+	MaxRequests  int64   `yaml:"max_requests"`
+	MaxTokens    int64   `yaml:"max_tokens"`
+	RatePeriod   string  `yaml:"rate_period"` // minute|hour|day|week|month (default minute)
+}
+
+// validKeyPeriod reports whether p is a recognised limit window (empty is valid
+// and takes the documented default).
+func validKeyPeriod(p string) bool {
+	switch p {
+	case "", "minute", "hour", "day", "week", "month":
+		return true
+	default:
+		return false
+	}
 }
 
 // Providers groups upstream provider configuration. Only configured providers
@@ -303,6 +328,9 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(k) == "" {
 			return fmt.Errorf("config: access.keys[%d] is empty", i)
 		}
+	}
+	if l := c.Access.DefaultKeyLimits; !validKeyPeriod(l.BudgetPeriod) || !validKeyPeriod(l.RatePeriod) {
+		return fmt.Errorf("config: access.default_key_limits period must be minute|hour|day|week|month")
 	}
 	p := c.Providers
 	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.Ollama == nil {

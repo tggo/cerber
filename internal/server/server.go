@@ -264,6 +264,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/keys/{name}/disable", s.handleSetKey(false))
 	mux.HandleFunc("DELETE /admin/keys/{name}", s.handleKeyDelete)
 	mux.HandleFunc("POST /admin/keys/{name}/delete", s.handleKeyDelete)
+	mux.HandleFunc("POST /admin/keys/{name}/limits", s.handleKeyLimits)
 	// /metrics is unauthenticated (standard for Prometheus scraping); it exposes
 	// counts and credential names, never secrets.
 	mux.Handle("GET /metrics", metrics.Handler(s.usage))
@@ -796,6 +797,44 @@ func (s *Server) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "deleted": true})
 }
 
+// handleKeyLimits sets the budget/rate-limit governance config for a managed
+// client key. The body is an access.Limits JSON object; an empty object clears
+// all limits (makes the key unlimited).
+func (s *Server) handleKeyLimits(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	if s.keys == nil {
+		writeError(w, http.StatusServiceUnavailable, "client-key store not configured")
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var lim access.Limits
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &lim); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	name := r.PathValue("name")
+	if err := s.keys.SetLimits(name, lim); err != nil {
+		switch {
+		case errors.Is(err, access.ErrNotFound):
+			writeError(w, http.StatusNotFound, "no client key named "+name)
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	s.log.Info("client key limits changed", zap.String("name", name))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "limits": lim})
+}
+
 // handleNative passes an Anthropic Messages request straight through, injecting a
 // credential and relaying the (possibly streaming) response unchanged.
 func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
@@ -815,13 +854,13 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 		return s.upstream.Send(r.Context(), body, stream, c, r.Header)
 	})
 	if err != nil {
-		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 		s.relayError(w, resp)
 		return
 	}
@@ -829,12 +868,12 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	if !stream {
 		body, rerr := io.ReadAll(resp.Body)
 		if rerr != nil {
-			s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+			s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 			writeError(w, http.StatusBadGateway, "read upstream response")
 			return
 		}
 		in, out := anthropicUsage(body)
-		s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
 		copyUpstreamHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
@@ -846,7 +885,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	in, out := streamRelayAnthropicUsage(w, resp.Body)
 	s.log.Debug("native usage", zap.String("credential", cred), zap.Int64("input", in), zap.Int64("output", out), zap.Bool("stream", true))
-	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+	s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
 }
 
 // streamRelayAnthropicUsage copies an Anthropic SSE stream to the client
@@ -937,31 +976,31 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	model := extractModel(body)
 	target := s.route(model)
 	if target == "" || target == "anthropic" {
-		s.usage.Record(usage.Event{Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("no image-generation provider for model %q", model))
 		return
 	}
 	gen, ok := s.chatters[target].(provider.ImageGenerator)
 	if !ok {
-		s.usage.Record(usage.Event{Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusNotImplemented, "provider "+target+" does not support image generation")
 		return
 	}
 	resp, err := gen.Images(r.Context(), body, r.Header)
 	if err != nil {
-		s.usage.Record(usage.Event{Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeUpstreamError(w, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.Status >= 400 {
-		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model, IsError: true})
 		copyUpstreamHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.Status)
 		_, _ = io.Copy(w, resp.Body)
 		return
 	}
-	s.usage.Record(usage.Event{Credential: resp.Credential, Model: model})
+	s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model})
 	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.Status)
 	_, _ = io.Copy(w, resp.Body)
@@ -982,7 +1021,7 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return s.upstream.CountTokens(r.Context(), body, c, r.Header)
 	})
 	if err != nil {
-		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
 		return
 	}
@@ -1013,14 +1052,14 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	// Anthropic; non-Anthropic models go to their provider (OpenAI-format).
 	target := s.route(model)
 	if target == "" {
-		s.usage.Record(usage.Event{Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("no provider configured for model %q", model))
 		return
 	}
 	if target != "anthropic" {
 		chatter, ok := s.chatters[target]
 		if !ok {
-			s.usage.Record(usage.Event{Model: model, IsError: true})
+			s.record(r.Context(), usage.Event{Model: model, IsError: true})
 			writeError(w, http.StatusNotImplemented, "provider "+target+" is not configured")
 			return
 		}
@@ -1031,7 +1070,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	anthropicBody, streamA, err := s.tr.OpenAIToAnthropic(body)
 	stream = streamA
 	if err != nil {
-		s.usage.Record(usage.Event{Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1039,7 +1078,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		return s.upstream.Send(r.Context(), anthropicBody, stream, c, r.Header)
 	})
 	if err != nil {
-		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 		writeUpstreamError(w, err)
 		return
 	}
@@ -1047,13 +1086,13 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	// Upstream errors are relayed as-is (already JSON).
 	if resp.StatusCode != http.StatusOK {
-		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 		s.relayError(w, resp)
 		return
 	}
 
 	if stream {
-		s.usage.Record(usage.Event{Credential: cred, Model: model})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model})
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
@@ -1066,12 +1105,12 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	upstreamBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		s.usage.Record(usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
 		writeError(w, http.StatusBadGateway, "read upstream response")
 		return
 	}
 	in, out := anthropicUsage(upstreamBody)
-	s.usage.Record(usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+	s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
 	translated, err := s.tr.AnthropicToOpenAI(upstreamBody)
 	if err != nil {
 		s.log.Warn("translate upstream response failed", zap.Error(err),
@@ -1285,7 +1324,25 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	presented := access.FromRequest(r)
-	if s.access.Allow(presented) || s.keys.Allow(presented) {
+	// Static config keys are the operator's own and bypass per-key governance.
+	if s.access.Allow(presented) {
+		return true
+	}
+	// Managed (dashboard) keys carry optional budgets/rate-limits: identify the
+	// key, enforce its limits, and stash its name on the context so the response
+	// path can charge cost/tokens back to it (see record).
+	if name, ok := s.keys.Identify(presented); ok {
+		switch s.keys.Admit(name) {
+		case access.DeniedBudget:
+			s.log.Warn("client key budget exceeded", zap.String("key", name))
+			writeError(w, http.StatusPaymentRequired, "client key budget exceeded")
+			return false
+		case access.DeniedRate:
+			s.log.Warn("client key rate limit exceeded", zap.String("key", name))
+			writeError(w, http.StatusTooManyRequests, "client key rate limit exceeded")
+			return false
+		}
+		*r = *r.WithContext(withClientKey(r.Context(), name))
 		return true
 	}
 	// Diagnostic without leaking secrets: which auth the client sent and how long
@@ -1303,6 +1360,32 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	)
 	writeError(w, http.StatusUnauthorized, "invalid or missing client API key")
 	return false
+}
+
+// clientKeyCtxKey is the context key under which the matched managed client-key
+// name is stored, so the response path can charge usage back to it.
+type clientKeyCtxKey struct{}
+
+// withClientKey returns a context carrying the managed client-key name.
+func withClientKey(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, clientKeyCtxKey{}, name)
+}
+
+// clientKeyFrom extracts the managed client-key name from the context, if any.
+func clientKeyFrom(ctx context.Context) (string, bool) {
+	name, ok := ctx.Value(clientKeyCtxKey{}).(string)
+	return name, ok && name != ""
+}
+
+// record forwards an event to the usage tracker and, when the request was made
+// with a managed client key, charges its cost (from configured pricing) and
+// tokens against that key's budget/rate window. It is the single point through
+// which all handlers record usage.
+func (s *Server) record(ctx context.Context, e usage.Event) {
+	s.usage.Record(e)
+	if name, ok := clientKeyFrom(ctx); ok {
+		s.keys.Charge(name, s.usage.Cost(e.Model, e.InputTokens, e.OutputTokens), e.InputTokens+e.OutputTokens)
+	}
 }
 
 // isLoopback reports whether a "host:port" remote address is a loopback IP.
@@ -1383,7 +1466,7 @@ func streamCopy(w http.ResponseWriter, body io.Reader) {
 func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider.Chatter, body []byte, model string, stream bool) {
 	resp, err := c.Chat(r.Context(), body, stream, r.Header)
 	if err != nil {
-		s.usage.Record(usage.Event{Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		var bad *provider.BadRequestError
 		if errors.As(err, &bad) {
 			writeError(w, http.StatusBadRequest, bad.Error())
@@ -1397,7 +1480,7 @@ func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider
 	ct := resp.Header.Get("Content-Type")
 	if resp.Status != http.StatusOK {
 		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model, IsError: true})
 		s.log.Warn("provider error response", zap.String("provider", c.Name()),
 			zap.Int("status", resp.Status), zap.String("body", string(buf)))
 		if ct != "" {
@@ -1409,7 +1492,7 @@ func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider
 	}
 
 	if stream {
-		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model})
+		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model})
 		if ct == "" {
 			ct = "text/event-stream"
 		}
@@ -1421,12 +1504,12 @@ func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider
 
 	buf, err := io.ReadAll(resp.Body)
 	if err != nil {
-		s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model, IsError: true})
 		writeError(w, http.StatusBadGateway, "read provider response")
 		return
 	}
 	in, out := openaiUsage(buf)
-	s.usage.Record(usage.Event{Credential: resp.Credential, Model: model, InputTokens: in, OutputTokens: out})
+	s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model, InputTokens: in, OutputTokens: out})
 	if ct == "" {
 		ct = "application/json"
 	}
