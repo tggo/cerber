@@ -1669,23 +1669,6 @@ func streamCopy(w http.ResponseWriter, body io.Reader) {
 	}
 }
 
-// serveChatter delegates an OpenAI-format request to a non-Anthropic provider and
-// relays/records the OpenAI-format response.
-func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider.Chatter, body []byte, model string, stream bool) {
-	resp, err := c.Chat(r.Context(), body, stream, r.Header)
-	if err != nil {
-		s.record(r.Context(), usage.Event{Model: model, IsError: true})
-		var bad *provider.BadRequestError
-		if errors.As(err, &bad) {
-			writeError(w, http.StatusBadRequest, bad.Error())
-			return
-		}
-		writeUpstreamError(w, err)
-		return
-	}
-	s.relayChatter(w, r, resp, c.Name(), model, stream)
-}
-
 // relayChatter writes an already-obtained provider.Response (OpenAI-format) to
 // the client: error status relayed as-is, success streamed or buffered (with
 // token usage recorded). It closes resp.Body.

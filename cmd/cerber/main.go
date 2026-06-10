@@ -149,6 +149,13 @@ func main() {
 		MaxTokens:    dl.MaxTokens,
 		RatePeriod:   dl.RatePeriod,
 	})
+	// Governance is only tamper-proof when a separate management_key gates /admin.
+	// Without it, /admin falls back to the client-key check, so a capped key could
+	// lift its own limits via POST /admin/keys/{name}/limits. Warn loudly.
+	if cfg.Access.ManagementKey == "" && keyStoreHasLimits(keyStore, dl) {
+		logger.Warn("per-key limits configured without access.management_key: " +
+			"a managed client key can edit its own limits via /admin — set a management_key for multi-tenant use")
+	}
 
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
 	srv.SetClientKeyStore(keyStore)
@@ -516,4 +523,19 @@ func startHealthProbe(srv *server.Server, interval time.Duration, logger *zap.Lo
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// keyStoreHasLimits reports whether per-key governance is in effect: either a
+// non-zero default applied to new keys, or any existing managed key carrying a
+// budget/rate limit.
+func keyStoreHasLimits(st *access.Store, def config.KeyLimits) bool {
+	if def.MaxCostUSD > 0 || def.MaxRequests > 0 || def.MaxTokens > 0 {
+		return true
+	}
+	for _, k := range st.List() {
+		if k.Limits.MaxCostUSD > 0 || k.Limits.MaxRequests > 0 || k.Limits.MaxTokens > 0 {
+			return true
+		}
+	}
+	return false
 }
