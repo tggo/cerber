@@ -132,7 +132,16 @@ func TestProbeCredential(t *testing.T) {
 	var gotURL string
 	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
 		gotURL = r.URL.String()
-		return resp(200, `{"models":[{"name":"models/gemini-2.5-flash"},{"name":"models/gemini-2.5-pro"}]}`), nil
+		// Mix generateContent models with the junk Google also lists: an
+		// embedding model, an Imagen model, and a live (bidi-only) model — all
+		// must be filtered out so /v1/models never offers a model that 4xxes.
+		return resp(200, `{"models":[
+			{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent","countTokens"]},
+			{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent"]},
+			{"name":"models/gemini-embedding-001","supportedGenerationMethods":["embedContent"]},
+			{"name":"models/imagen-4.0-generate-001","supportedGenerationMethods":["predict"]},
+			{"name":"models/gemini-3.1-flash-live-preview","supportedGenerationMethods":["bidiGenerateContent"]}
+		]}`), nil
 	})
 	p := New("https://generativelanguage.googleapis.com", store(t, "gk"), doer)
 	cred, _ := p.store.Next()
@@ -144,7 +153,7 @@ func TestProbeCredential(t *testing.T) {
 		t.Errorf("url = %s", gotURL)
 	}
 	if len(models) != 2 || models[0] != "gemini-2.5-flash" || models[1] != "gemini-2.5-pro" {
-		t.Errorf("models = %v (models/ prefix must be stripped)", models)
+		t.Errorf("models = %v (want only the two generateContent models, models/ stripped)", models)
 	}
 }
 

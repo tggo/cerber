@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -75,17 +76,26 @@ func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential
 	}
 	var out struct {
 		Models []struct {
-			Name string `json:"name"`
+			Name                       string   `json:"name"`
+			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("gemini: decode models: %w", err)
 	}
+	// Google's /v1beta/models lists everything the key can see — embeddings
+	// (embedContent), Imagen (predict), Veo (predictLongRunning), AQA
+	// (generateAnswer) and live/native-audio (bidiGenerateContent) models. None
+	// of those serve the :generateContent path cerber routes chat/messages to,
+	// so they'd surface in /v1/models only to 4xx on use. Keep only models that
+	// advertise generateContent.
 	models := make([]string, 0, len(out.Models))
 	for _, m := range out.Models {
-		if id := strings.TrimPrefix(m.Name, "models/"); id != "" {
-			models = append(models, id)
+		id := strings.TrimPrefix(m.Name, "models/")
+		if id == "" || !slices.Contains(m.SupportedGenerationMethods, "generateContent") {
+			continue
 		}
+		models = append(models, id)
 	}
 	return models, nil
 }
