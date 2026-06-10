@@ -76,7 +76,8 @@ type Server struct {
 	provMu         sync.Mutex
 	provModels     map[string][]string // provider name -> discovered model IDs (from ProbeAll)
 	routes         []config.Route
-	catalog        *catalog.Catalog // model alias -> canonical resolution
+	fallbacks      []config.Fallback // cross-provider/model fallback chains (OpenAI endpoint)
+	catalog        *catalog.Catalog  // model alias -> canonical resolution
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
 	mgmt           *access.Checker // if set, /admin/* requires this key
@@ -147,6 +148,10 @@ func (s *Server) SetRoutes(routes []config.Route) { s.routes = routes }
 func (s *Server) SetModelAliases(aliases map[string]string) {
 	s.catalog = catalog.New(aliases)
 }
+
+// SetFallbacks installs cross-provider/model fallback chains for the
+// OpenAI-compatible endpoint. Call before Handler().
+func (s *Server) SetFallbacks(fb []config.Fallback) { s.fallbacks = fb }
 
 // SetTokenPersister installs a callback invoked with refreshed OAuth tokens so
 // they can be persisted to disk (keyed by credential name).
@@ -1077,49 +1082,145 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	body, model := s.canonicalModel(body)
 	stream := wantsStream(body)
 
-	// Route by model. Unknown models are rejected rather than silently sent to
-	// Anthropic; non-Anthropic models go to their provider (OpenAI-format).
-	target := s.route(model)
-	if target == "" {
-		s.record(r.Context(), usage.Event{Model: model, IsError: true})
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("no provider configured for model %q", model))
-		return
+	// Try the requested model, then any fallback targets, until one succeeds or is
+	// a non-retryable (client) error. Fallback only kicks in before any bytes are
+	// written, so a started stream is never re-attempted.
+	targets := s.openAITargets(r, model)
+	for i, tgt := range targets {
+		if s.tryOpenAITarget(w, r, body, tgt, stream, i == len(targets)-1) {
+			return
+		}
+		s.log.Info("openai fallback: target failed, trying next",
+			zap.String("failed_model", tgt))
 	}
+}
+
+// openAITargets returns the ordered models to try for an OpenAI request: the
+// requested model first, then fallbacks. A request header X-Cerber-Fallback
+// (comma-separated model names) overrides the configured fallback chains.
+func (s *Server) openAITargets(r *http.Request, model string) []string {
+	targets := []string{model}
+	if h := strings.TrimSpace(r.Header.Get("X-Cerber-Fallback")); h != "" {
+		for _, t := range strings.Split(h, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				targets = append(targets, t)
+			}
+		}
+		return targets
+	}
+	for _, f := range s.fallbacks {
+		if model == f.Model || strings.HasPrefix(model, f.Model) {
+			for _, t := range f.To {
+				if t = strings.TrimSpace(t); t != "" {
+					targets = append(targets, t)
+				}
+			}
+			break
+		}
+	}
+	return targets
+}
+
+// tryOpenAITarget attempts to satisfy an OpenAI-format request for one target
+// model. It returns true when the exchange is finished — success relayed, or a
+// non-retryable/final error written — and false when a retryable failure
+// occurred with no bytes written, so the caller should try the next target.
+// A retryable failure is: no credential available / transport error, or an
+// upstream 5xx. Client (4xx) errors and successes are terminal. last marks the
+// final target, after which even retryable failures are surfaced to the client.
+func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []byte, tgtModel string, stream, last bool) bool {
+	target := s.route(tgtModel)
+	if target == "" {
+		if last {
+			s.record(r.Context(), usage.Event{Model: tgtModel, IsError: true})
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("no provider configured for model %q", tgtModel))
+			return true
+		}
+		return false
+	}
+	// Point the request body at this target's model.
+	tbody := body
+	if extractModel(body) != tgtModel {
+		if rb, ok := setModelField(body, tgtModel); ok {
+			tbody = rb
+		}
+	}
+
 	if target != "anthropic" {
 		chatter, ok := s.chatters[target]
 		if !ok {
-			s.record(r.Context(), usage.Event{Model: model, IsError: true})
-			writeError(w, http.StatusNotImplemented, "provider "+target+" is not configured")
-			return
+			if last {
+				s.record(r.Context(), usage.Event{Model: tgtModel, IsError: true})
+				writeError(w, http.StatusNotImplemented, "provider "+target+" is not configured")
+				return true
+			}
+			return false
 		}
-		s.serveChatter(w, r, chatter, body, model, stream)
-		return
+		resp, err := chatter.Chat(r.Context(), tbody, stream, r.Header)
+		if err != nil {
+			var bad *provider.BadRequestError
+			if errors.As(err, &bad) {
+				// Deterministic client error: surface it, don't burn fallbacks.
+				s.record(r.Context(), usage.Event{Model: tgtModel, IsError: true})
+				writeError(w, http.StatusBadRequest, bad.Error())
+				return true
+			}
+			if !last {
+				return false
+			}
+			s.record(r.Context(), usage.Event{Model: tgtModel, IsError: true})
+			writeUpstreamError(w, err)
+			return true
+		}
+		if resp.Status >= 500 && !last {
+			_ = resp.Body.Close()
+			return false
+		}
+		s.relayChatter(w, r, resp, chatter.Name(), tgtModel, stream)
+		return true
 	}
 
-	anthropicBody, streamA, err := s.tr.OpenAIToAnthropic(body)
-	stream = streamA
+	// Anthropic target: translate the request and dispatch through pooled creds.
+	anthropicBody, streamA, err := s.tr.OpenAIToAnthropic(tbody)
 	if err != nil {
-		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		if !last {
+			return false
+		}
+		s.record(r.Context(), usage.Event{Model: tgtModel, IsError: true})
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		return true
 	}
-	resp, cred, err := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
-		return s.upstream.Send(r.Context(), anthropicBody, stream, c, r.Header)
+	resp, cred, derr := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
+		return s.upstream.Send(r.Context(), anthropicBody, streamA, c, r.Header)
 	})
-	if err != nil {
-		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
-		writeUpstreamError(w, err)
-		return
+	if derr != nil {
+		if !last {
+			return false
+		}
+		s.record(r.Context(), usage.Event{Credential: cred, Model: tgtModel, IsError: true})
+		writeUpstreamError(w, derr)
+		return true
 	}
-	defer resp.Body.Close()
-
-	// Upstream errors are relayed as-is (already JSON).
+	if resp.StatusCode >= 500 && !last {
+		_ = resp.Body.Close()
+		return false
+	}
 	if resp.StatusCode != http.StatusOK {
-		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
+		s.record(r.Context(), usage.Event{Credential: cred, Model: tgtModel, IsError: true})
 		s.relayError(w, resp)
-		return
+		_ = resp.Body.Close()
+		return true
 	}
+	s.relayAnthropicAsOpenAI(w, r, resp, cred, tgtModel, streamA)
+	return true
+}
 
+// relayAnthropicAsOpenAI relays a successful (2xx) Anthropic Messages response to
+// an OpenAI-format client: streaming via the Anthropic->OpenAI SSE translator, or
+// non-streaming by buffering, translating, and recording token usage. It closes
+// resp.Body.
+func (s *Server) relayAnthropicAsOpenAI(w http.ResponseWriter, r *http.Request, resp *http.Response, cred, model string, stream bool) {
+	defer resp.Body.Close()
 	if stream {
 		s.record(r.Context(), usage.Event{Credential: cred, Model: model})
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1131,7 +1232,6 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-
 	upstreamBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		s.record(r.Context(), usage.Event{Credential: cred, Model: model, IsError: true})
@@ -1541,13 +1641,20 @@ func (s *Server) serveChatter(w http.ResponseWriter, r *http.Request, c provider
 		writeUpstreamError(w, err)
 		return
 	}
+	s.relayChatter(w, r, resp, c.Name(), model, stream)
+}
+
+// relayChatter writes an already-obtained provider.Response (OpenAI-format) to
+// the client: error status relayed as-is, success streamed or buffered (with
+// token usage recorded). It closes resp.Body.
+func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *provider.Response, providerName, model string, stream bool) {
 	defer resp.Body.Close()
 
 	ct := resp.Header.Get("Content-Type")
 	if resp.Status != http.StatusOK {
 		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model, IsError: true})
-		s.log.Warn("provider error response", zap.String("provider", c.Name()),
+		s.log.Warn("provider error response", zap.String("provider", providerName),
 			zap.Int("status", resp.Status), zap.String("body", string(buf)))
 		if ct != "" {
 			w.Header().Set("Content-Type", ct)

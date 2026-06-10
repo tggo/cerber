@@ -154,6 +154,7 @@ func main() {
 	srv.SetClientKeyStore(keyStore)
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetModelAliases(cfg.Providers.ModelAliases)
+	srv.SetFallbacks(cfg.Providers.Fallbacks)
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 	srv.SetManagementKey(cfg.Access.ManagementKey)
 

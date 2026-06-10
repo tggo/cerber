@@ -277,6 +277,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `providersForModel(model)` returns the sorted set of providers whose discovered models include the exact name (basis for fallback).
 **Verified:** `internal/catalog` tests (resolve/single-hop/nil/copy) + `internal/server` alias tests (upstream body rewrite, untouched-when-no-alias, setModelField) — 2026-06-10.
 
+## Cross-provider/model fallback (OpenAI endpoint)
+**What:** on `/v1/chat/completions`, a request whose primary model fails with a retryable error is automatically retried against an ordered list of fallback models (which may live on other providers), before any response bytes are written.
+**DoD:**
+- Targets are: the requested model first, then either the per-request `X-Cerber-Fallback` header (comma-separated model names, overrides config) or, absent the header, the first `providers.fallbacks` entry whose `model` matches the request model (exact or prefix) — its `to` list in order. Each target is a model name, routed like any other (so a target can resolve to a different provider).
+- A target is retried (fall through to the next) only on a **retryable** failure: no credential available / transport error, or an upstream **5xx**. A **4xx** client error and a **2xx** success are terminal (no fallback). Governance 402/429 happen before routing and never trigger fallback.
+- Fallback only occurs **before** the response is committed; once streaming/relay has started it is never re-attempted. An unroutable or unconfigured fallback target is skipped; if every target fails, the **last** target's error is surfaced.
+- Scope: the OpenAI-compatible endpoint only (output is always OpenAI-format, so cross-provider is coherent). Native `/v1/messages` is unchanged — its resilience remains per-credential rotation (an Anthropic response can't be re-expressed from another provider). Empty `fallbacks[].model`/`to` → config validation error.
+**Verified:** `internal/server` fallback tests (anthropic-5xx→chatter, 4xx terminal, header override, all-exhausted→last error, skip-unroutable) + `internal/config` validation — 2026-06-10.
+
 ## Self-describing usage doc (`GET /llm.md`)
 **What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
 **DoD:**

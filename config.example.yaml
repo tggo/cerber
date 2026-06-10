@@ -56,6 +56,11 @@ providers:
   # model_aliases:
   #   opus: "claude-opus-4-20250514"
   #   sonnet: "claude-sonnet-4-20250514"
+  # fallbacks: on /v1/chat/completions, retry a failed model (5xx / no credential
+  # available) against the next model in `to` — which may be another provider.
+  # Clients can override per-request with `X-Cerber-Fallback: gpt-4o,gemini-2.0`.
+  # fallbacks:
+  #   - { model: "claude", to: ["gpt-4o", "gemini-2.0-flash"] }
 
   # openai:
   #   base_url: "https://api.openai.com"

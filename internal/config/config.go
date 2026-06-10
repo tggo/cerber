@@ -107,7 +107,8 @@ type Providers struct {
 	Grok      *Grok      `yaml:"grok"`
 	Ollama    *Ollama    `yaml:"ollama"`
 	Routing   []Route    `yaml:"routing"`
-	Strategy  string     `yaml:"strategy"` // credential selection: "round-robin" (default) | "fill-first"
+	Fallbacks []Fallback `yaml:"fallbacks"` // cross-provider/model fallback chains (OpenAI endpoint)
+	Strategy  string     `yaml:"strategy"`  // credential selection: "round-robin" (default) | "fill-first"
 	// ModelAliases maps a stable client-facing model name to the canonical model
 	// a provider actually serves (e.g. "opus" -> "claude-opus-4-20250514"). The
 	// alias is resolved before routing and before the request reaches upstream.
@@ -119,6 +120,15 @@ type Providers struct {
 type Route struct {
 	Prefix   string `yaml:"prefix"`
 	Provider string `yaml:"provider"`
+}
+
+// Fallback declares a cross-provider/model fallback chain for the
+// OpenAI-compatible endpoint: when a request whose model matches Model (exact or
+// prefix) fails with a retryable error, cerber retries it against each model in
+// To (in order). Each target is a model name, routed like any other model.
+type Fallback struct {
+	Model string   `yaml:"model"`
+	To    []string `yaml:"to"`
 }
 
 // Anthropic configures the Anthropic upstream.
@@ -387,6 +397,19 @@ func (c *Config) Validate() error {
 	for alias, canon := range p.ModelAliases {
 		if strings.TrimSpace(alias) == "" || strings.TrimSpace(canon) == "" {
 			return fmt.Errorf("config: providers.model_aliases has an empty alias or target")
+		}
+	}
+	for i, f := range p.Fallbacks {
+		if strings.TrimSpace(f.Model) == "" {
+			return fmt.Errorf("config: providers.fallbacks[%d].model is empty", i)
+		}
+		if len(f.To) == 0 {
+			return fmt.Errorf("config: providers.fallbacks[%d].to is empty", i)
+		}
+		for j, t := range f.To {
+			if strings.TrimSpace(t) == "" {
+				return fmt.Errorf("config: providers.fallbacks[%d].to[%d] is empty", i, j)
+			}
 		}
 	}
 	return nil

@@ -21,6 +21,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Tools / function calling | 🟡 | native passthrough yes; OpenAI→Anthropic translate no |
 | Multimodal (images) | 🟡 | text+image in translators; image GEN via /v1/images/generations (grok); no video |
 | Model aliases (alias→canonical) | ✅ | `providers.model_aliases`; resolved pre-routing + pre-upstream |
+| Cross-provider/model fallback chains | ✅ | OpenAI endpoint; `providers.fallbacks` + `X-Cerber-Fallback`; retryable-only (5xx/no-cred), pre-commit |
 
 ## Providers
 
