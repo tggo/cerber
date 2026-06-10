@@ -15,7 +15,8 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | `/v1/models` (list models) | ✅ | aggregated from per-provider discovery |
 | `/v1/messages/count_tokens` | ✅ | proxied to Anthropic via pooled creds |
 | `/v1/images/generations` (image gen) | ✅ | passthrough (grok-imagine-*, openai gpt-image/dall-e) |
-| `/v1/completions`, `/v1/responses`, video gen | ❌ | |
+| `/v1/embeddings`, `/v1/completions`, `/v1/responses` | ✅ | OpenAI passthrough to routed provider (Forwarder); not Anthropic |
+| video gen | ❌ | |
 | Streaming SSE + flush | ✅ | |
 | Request/response header passthrough | ✅ | incl. anthropic-ratelimit-* |
 | Tools / function calling | 🟡 | native passthrough yes; OpenAI→Anthropic translate no |

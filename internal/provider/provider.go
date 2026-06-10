@@ -63,6 +63,14 @@ type ImageGenerator interface {
 	Images(ctx context.Context, openaiBody []byte, clientHeader http.Header) (*Response, error)
 }
 
+// Forwarder is an optional capability: a provider that can pass an
+// OpenAI-compatible request through to a fixed sub-path (e.g. /v1/embeddings,
+// /v1/completions, /v1/responses) with credential rotation, relaying the body
+// unchanged. stream toggles SSE for endpoints that support it.
+type Forwarder interface {
+	Forward(ctx context.Context, subpath string, openaiBody []byte, stream bool, clientHeader http.Header) (*Response, error)
+}
+
 // BadRequestError marks a client-side error (e.g. an untranslatable request) so
 // callers can map it to HTTP 400 instead of a 502 upstream error.
 type BadRequestError struct{ Err error }

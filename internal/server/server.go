@@ -266,6 +266,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
 	mux.HandleFunc("POST /v1/images/generations", s.handleImages)
+	mux.HandleFunc("POST /v1/embeddings", s.handleForward("/v1/embeddings"))
+	mux.HandleFunc("POST /v1/completions", s.handleForward("/v1/completions"))
+	mux.HandleFunc("POST /v1/responses", s.handleForward("/v1/responses"))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
 	mux.HandleFunc("GET /admin/usage.csv", s.handleUsageCSV)
@@ -1038,6 +1041,45 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.Status)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// handleForward returns a handler that passes an OpenAI-compatible request
+// through to a fixed sub-path (e.g. /v1/embeddings, /v1/completions,
+// /v1/responses) on the provider that serves the model, with credential
+// rotation. The response (OpenAI-format, possibly streaming) is relayed
+// unchanged via relayChatter, recording token usage. Anthropic does not serve
+// these endpoints; an unrouted/unsupported model → 400/501.
+func (s *Server) handleForward(subpath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(w, r) {
+			return
+		}
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		body, model := s.canonicalModel(body)
+		stream := wantsStream(body)
+		target := s.route(model)
+		if target == "" || target == "anthropic" {
+			s.record(r.Context(), usage.Event{Model: model, IsError: true})
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("no provider for model %q on %s", model, subpath))
+			return
+		}
+		fwd, ok := s.chatters[target].(provider.Forwarder)
+		if !ok {
+			s.record(r.Context(), usage.Event{Model: model, IsError: true})
+			writeError(w, http.StatusNotImplemented, "provider "+target+" does not support "+subpath)
+			return
+		}
+		resp, err := fwd.Forward(r.Context(), subpath, body, stream, r.Header)
+		if err != nil {
+			s.record(r.Context(), usage.Event{Model: model, IsError: true})
+			writeUpstreamError(w, err)
+			return
+		}
+		s.relayChatter(w, r, resp, target, model, stream)
+	}
 }
 
 // handleCountTokens proxies Anthropic's /v1/messages/count_tokens through the

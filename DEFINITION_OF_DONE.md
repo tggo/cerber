@@ -286,6 +286,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Scope: the OpenAI-compatible endpoint only (output is always OpenAI-format, so cross-provider is coherent). Native `/v1/messages` is unchanged — its resilience remains per-credential rotation (an Anthropic response can't be re-expressed from another provider). Empty `fallbacks[].model`/`to` → config validation error.
 **Verified:** `internal/server` fallback tests (anthropic-5xx→chatter, 4xx terminal, header override, all-exhausted→last error, skip-unroutable) + `internal/config` validation — 2026-06-10.
 
+## OpenAI passthrough endpoints (embeddings, completions, responses)
+**What:** `/v1/embeddings`, `/v1/completions`, and `/v1/responses` pass an OpenAI-compatible request through to the provider that serves the model, with credential rotation, relaying the response unchanged.
+**DoD:**
+- Each endpoint (authed like the API) resolves the model alias, routes by model via `route()`, and forwards the body unchanged to the same sub-path on the target provider using a rotated Bearer credential (the OpenAI/grok/ollama providers implement `provider.Forwarder`). The response (OpenAI-format JSON, or SSE when `stream:true`) is relayed via the shared chatter relay, recording request/error and token usage (`usage.prompt_tokens`/`completion_tokens`).
+- Unknown model or a model routed to `anthropic` (which serves none of these) → 400; a routed provider lacking `Forwarder` → 501; upstream error status is relayed as-is.
+**Verified:** `internal/provider/openai` Forward tests (passthrough URL/auth/body, stream Accept) + `internal/server` endpoint tests (route-to-provider for all three, anthropic/unknown → 400, non-forwarder → 501, upstream-error relay) — 2026-06-10.
+
 ## Self-describing usage doc (`GET /llm.md`)
 **What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
 **DoD:**

@@ -70,6 +70,55 @@ func TestChat_Passthrough(t *testing.T) {
 	}
 }
 
+func TestForward_Passthrough(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	var sentBody []byte
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		sentBody, _ = io.ReadAll(r.Body)
+		return resp(200, `{"object":"list","data":[{"embedding":[0.1]}]}`), nil
+	})
+	p := New("openai", "https://api.openai.com/", store(t, "sk-key"), doer)
+
+	in := []byte(`{"model":"text-embedding-3-small","input":"hi"}`)
+	out, err := p.Forward(context.Background(), "/v1/embeddings", in, false, nil)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	defer out.Body.Close()
+	if captured.URL.String() != "https://api.openai.com/v1/embeddings" {
+		t.Errorf("url = %s", captured.URL)
+	}
+	if captured.Header.Get("Authorization") != "Bearer sk-key" {
+		t.Errorf("auth = %q", captured.Header.Get("Authorization"))
+	}
+	if string(sentBody) != string(in) {
+		t.Errorf("body forwarded = %q", sentBody)
+	}
+	if out.Status != 200 || out.Credential != "a" {
+		t.Errorf("response = %+v", out)
+	}
+}
+
+func TestForward_StreamAccept(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return resp(200, "data: x"), nil
+	})
+	p := New("openai", "https://api.openai.com", store(t, "k"), doer)
+	out, err := p.Forward(context.Background(), "/v1/responses", []byte(`{"stream":true}`), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Body.Close()
+	if got := captured.Header.Get("Accept"); got != "text/event-stream" {
+		t.Errorf("accept = %q", got)
+	}
+}
+
 func TestChat_StreamAccept(t *testing.T) {
 	doer := mocks.NewHTTPDoer(t)
 	var captured *http.Request

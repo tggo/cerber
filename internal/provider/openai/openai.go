@@ -129,6 +129,37 @@ func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.He
 	}, nil
 }
 
+// Forward passes an OpenAI-compatible request through to a fixed sub-path on the
+// provider (e.g. /v1/embeddings, /v1/completions, /v1/responses) with credential
+// rotation, relaying the body unchanged. stream sets the Accept header so SSE
+// passes through for endpoints that support it.
+func (p *Provider) Forward(ctx context.Context, subpath string, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
+	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
+	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, func(cred *credential.Credential) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+subpath, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("openai: build forward request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
+		if stream {
+			req.Header.Set("Accept", "text/event-stream")
+		} else {
+			req.Header.Set("Accept", "application/json")
+		}
+		return p.http.Do(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &provider.Response{
+		Status:     resp.StatusCode,
+		Header:     resp.Header,
+		Body:       resp.Body,
+		Credential: credName,
+	}, nil
+}
+
 // ProbeCredential validates a single credential by calling GET /v1/models with
 // its key and returns the model IDs it can access. A 401/403 yields
 // provider.ErrInvalidCredential; other non-200 / transport / decode failures
