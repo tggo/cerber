@@ -153,6 +153,7 @@ func main() {
 	srv := server.New(access.New(cfg.Access.Keys), store, client, refresher, logger)
 	srv.SetClientKeyStore(keyStore)
 	srv.SetRoutes(cfg.Providers.Routing)
+	srv.SetModelAliases(cfg.Providers.ModelAliases)
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 	srv.SetManagementKey(cfg.Access.ManagementKey)
 

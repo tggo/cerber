@@ -51,6 +51,11 @@ providers:
   # routing:
   #   - { prefix: "gpt", provider: openai }
   #   - { prefix: "gemini", provider: gemini }
+  # model_aliases: map a stable client-facing name to the canonical model a
+  # provider serves; resolved before routing and before the upstream call.
+  # model_aliases:
+  #   opus: "claude-opus-4-20250514"
+  #   sonnet: "claude-sonnet-4-20250514"
 
   # openai:
   #   base_url: "https://api.openai.com"

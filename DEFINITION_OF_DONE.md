@@ -269,6 +269,14 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `access.default_key_limits` in config seeds the limits of **newly-created** dashboard keys; existing keys keep their own. Invalid default periods fail config validation.
 **Verified:** `internal/access` limits tests (Admit/Charge/window-reset/Validate/SetLimits/defaults) + `internal/server` governance tests (402/429/charge-from-pricing/admin set) — 2026-06-10.
 
+## Model catalog — aliases & multi-provider lookup
+**What:** a stable client-facing model name can be aliased to the canonical model a provider actually serves, resolved before routing and before the request reaches upstream; the server can also report every provider that serves a given model (for fallback chains).
+**DoD:**
+- `providers.model_aliases` (config) maps `alias -> canonical`; resolution is single-hop and case-sensitive. A request whose `model` matches an alias is rewritten so the **canonical** name is used for routing, usage attribution, and the upstream body; all other body fields are preserved. A model with no alias leaves the body byte-for-byte untouched.
+- Empty alias or empty target → config validation error.
+- `providersForModel(model)` returns the sorted set of providers whose discovered models include the exact name (basis for fallback).
+**Verified:** `internal/catalog` tests (resolve/single-hop/nil/copy) + `internal/server` alias tests (upstream body rewrite, untouched-when-no-alias, setModelField) — 2026-06-10.
+
 ## Self-describing usage doc (`GET /llm.md`)
 **What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
 **DoD:**

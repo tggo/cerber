@@ -108,6 +108,10 @@ type Providers struct {
 	Ollama    *Ollama    `yaml:"ollama"`
 	Routing   []Route    `yaml:"routing"`
 	Strategy  string     `yaml:"strategy"` // credential selection: "round-robin" (default) | "fill-first"
+	// ModelAliases maps a stable client-facing model name to the canonical model
+	// a provider actually serves (e.g. "opus" -> "claude-opus-4-20250514"). The
+	// alias is resolved before routing and before the request reaches upstream.
+	ModelAliases map[string]string `yaml:"model_aliases"`
 }
 
 // Route maps a model-name prefix to a provider name
@@ -378,6 +382,11 @@ func (c *Config) Validate() error {
 		}
 		if strings.TrimSpace(r.Prefix) == "" {
 			return fmt.Errorf("config: providers.routing[%d].prefix is empty", i)
+		}
+	}
+	for alias, canon := range p.ModelAliases {
+		if strings.TrimSpace(alias) == "" || strings.TrimSpace(canon) == "" {
+			return fmt.Errorf("config: providers.model_aliases has an empty alias or target")
 		}
 	}
 	return nil

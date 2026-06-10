@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/tggo/cerber/internal/access"
+	"github.com/tggo/cerber/internal/catalog"
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/metrics"
@@ -75,6 +76,7 @@ type Server struct {
 	provMu         sync.Mutex
 	provModels     map[string][]string // provider name -> discovered model IDs (from ProbeAll)
 	routes         []config.Route
+	catalog        *catalog.Catalog // model alias -> canonical resolution
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
 	mgmt           *access.Checker // if set, /admin/* requires this key
@@ -110,6 +112,7 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		chatters:    map[string]provider.Chatter{},
 		provStores:  map[string]*credential.Store{},
 		provModels:  map[string][]string{},
+		catalog:     catalog.New(nil),
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
@@ -137,6 +140,13 @@ func (s *Server) RegisterProviderStore(name string, store *credential.Store) {
 
 // SetRoutes installs model-prefix routing overrides.
 func (s *Server) SetRoutes(routes []config.Route) { s.routes = routes }
+
+// SetModelAliases installs the model alias -> canonical map. Aliases are resolved
+// before routing and before the request body reaches upstream. Call before
+// Handler().
+func (s *Server) SetModelAliases(aliases map[string]string) {
+	s.catalog = catalog.New(aliases)
+}
 
 // SetTokenPersister installs a callback invoked with refreshed OAuth tokens so
 // they can be persisted to disk (keyed by credential name).
@@ -428,6 +438,25 @@ func (s *Server) providerForModel(model string) string {
 		}
 	}
 	return ""
+}
+
+// providersForModel returns every provider whose discovered models include the
+// exact model, sorted for determinism. Used to build fallback chains (a model
+// served by more than one provider can fail over between them).
+func (s *Server) providersForModel(model string) []string {
+	s.provMu.Lock()
+	defer s.provMu.Unlock()
+	var out []string
+	for name, models := range s.provModels {
+		for _, m := range models {
+			if m == model {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // proberFor returns the Prober for a provider name: the Anthropic upstream for
@@ -845,7 +874,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	model := extractModel(body)
+	body, model := s.canonicalModel(body)
 	stream := wantsStream(body)
 	s.log.Debug("native request", append(debugRequestFields(body, stream),
 		zap.String("anthropic_beta", r.Header.Get("anthropic-beta")))...)
@@ -973,7 +1002,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	model := extractModel(body)
+	body, model := s.canonicalModel(body)
 	target := s.route(model)
 	if target == "" || target == "anthropic" {
 		s.record(r.Context(), usage.Event{Model: model, IsError: true})
@@ -1016,7 +1045,7 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	model := extractModel(body)
+	body, model := s.canonicalModel(body)
 	resp, cred, err := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
 		return s.upstream.CountTokens(r.Context(), body, c, r.Header)
 	})
@@ -1045,7 +1074,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	model := extractModel(body)
+	body, model := s.canonicalModel(body)
 	stream := wantsStream(body)
 
 	// Route by model. Unknown models are rejected rather than silently sent to
@@ -1282,6 +1311,43 @@ func extractModel(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &probe)
 	return probe.Model
+}
+
+// canonicalModel resolves the request's model through the alias catalog and, when
+// an alias actually applies, rewrites the body's "model" field so the canonical
+// name reaches both routing and the upstream provider. When no alias applies the
+// body is returned untouched (zero risk for the common case). It returns the
+// (possibly rewritten) body and the canonical model name.
+func (s *Server) canonicalModel(body []byte) ([]byte, string) {
+	model := extractModel(body)
+	canon := s.catalog.Canonical(model)
+	if canon == model {
+		return body, model
+	}
+	if rewritten, ok := setModelField(body, canon); ok {
+		return rewritten, canon
+	}
+	return body, canon
+}
+
+// setModelField returns body with its top-level "model" field set to model,
+// preserving all other fields (nested values are kept verbatim). ok is false if
+// the body is not a JSON object. Field order is not guaranteed.
+func setModelField(body []byte, model string) ([]byte, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return body, false
+	}
+	quoted, err := json.Marshal(model)
+	if err != nil {
+		return body, false
+	}
+	obj["model"] = quoted
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body, false
+	}
+	return out, true
 }
 
 // anthropicUsage extracts input/output token counts from an Anthropic Messages

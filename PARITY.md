@@ -20,6 +20,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Request/response header passthrough | ✅ | incl. anthropic-ratelimit-* |
 | Tools / function calling | 🟡 | native passthrough yes; OpenAI→Anthropic translate no |
 | Multimodal (images) | 🟡 | text+image in translators; image GEN via /v1/images/generations (grok); no video |
+| Model aliases (alias→canonical) | ✅ | `providers.model_aliases`; resolved pre-routing + pre-upstream |
 
 ## Providers
 
