@@ -294,12 +294,12 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Unknown model or a model routed to `anthropic` (which serves none of these) → 400; a routed provider lacking `Forwarder` → 501; upstream error status is relayed as-is.
 **Verified:** `internal/provider/openai` Forward tests (passthrough URL/auth/body, stream Accept) + `internal/server` endpoint tests (route-to-provider for all three, anthropic/unknown → 400, non-forwarder → 501, upstream-error relay) — 2026-06-10.
 
-## Self-describing usage doc (`GET /llm.md`)
-**What:** a live markdown guide so an agent given only the base URL + a key learns how to connect, which endpoints/dialects exist, how models route, and exactly which models each provider serves.
+## Self-describing docs (`GET /llm.md`, `GET /docs`)
+**What:** two live, **public** (no key) self-describing guides reflecting this instance's config — `/llm.md` (concise markdown for agents) and `/docs` (full HTML reference of every mechanic for humans). Both expose only how to use the API, never secrets.
 **DoD:**
-- `GET /llm.md` (alias `GET /llms.txt`) returns `text/markdown`, **public** (no key) so a plain browser/agent can read it — it exposes no secrets, only how to use the API (which still needs a key from the public side).
-- Content is dynamic: base URL is derived from the request host/scheme (honours `X-Forwarded-Proto`); the model list reflects discovered models per provider (e.g. ollama), with routing rules and curl/SDK examples.
-**Verified:** `internal/server` TestLLMDoc (auth, content-type, endpoints, discovered models, host) — 2026-06-08.
+- `GET /llm.md` (alias `GET /llms.txt`) returns `text/markdown`; `GET /docs` returns `text/html` (self-contained, inline CSS, **no external/CDN assets** per no-phone-home). Both derive the base URL from the request host/scheme (honours `X-Forwarded-Proto`).
+- Both cover: all endpoints (incl. `/v1/embeddings`, `/v1/completions`, `/v1/responses`), the two dialects, model routing + the instance's **aliases**, automatic **fallback** + `X-Cerber-Fallback` (and configured chains), governance **402/429** budgets/rate-limits, the `X-Cerber-*` headers, discovered models per provider, and the admin API. `/docs` additionally shows a warning when no `management_key` gates `/admin`.
+**Verified:** `internal/server` TestLLMDoc (+ aliases/fallback), TestDocs (public, html, endpoints, headers, dynamic aliases/fallback/models, no-mgmt warning), TestDocs_ManagementKeyHidesWarning — 2026-06-11.
 
 ## Model list, token counting, usage export
 **What:** OpenAI-style model listing, Anthropic token counting, and a CSV usage export.

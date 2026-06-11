@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -262,6 +263,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /favicon.svg", s.handleFavicon)
 	mux.HandleFunc("GET /llm.md", s.handleLLMDoc)
 	mux.HandleFunc("GET /llms.txt", s.handleLLMDoc) // common convention alias
+	mux.HandleFunc("GET /docs", s.handleDocs)
 	mux.HandleFunc("POST /v1/messages", s.handleNative)
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleOpenAI)
@@ -624,14 +626,20 @@ func (s *Server) handleFavicon(w http.ResponseWriter, _ *http.Request) {
 // design — it exposes no secrets, just how to use the API (which still needs a
 // key from the public side). Being unauthenticated also lets a plain browser GET
 // it (browsers can't attach an Authorization header to a navigation).
-func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
+// baseURLOf derives the externally-visible base URL from the request, honouring
+// an X-Forwarded-Proto set by a fronting proxy (e.g. Caddy).
+func baseURLOf(r *http.Request) string {
 	scheme := "https"
 	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
 		scheme = xf
 	} else if r.TLS == nil {
 		scheme = "http"
 	}
-	base := scheme + "://" + r.Host
+	return scheme + "://" + r.Host
+}
+
+func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
+	base := baseURLOf(r)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# cerber — LLM proxy usage\n\n")
@@ -650,8 +658,12 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native messages. Point the Anthropic SDK at base_url `%s`.\n", base)
 	fmt.Fprintf(&b, "- `POST /v1/messages/count_tokens` — Anthropic token counting.\n")
 	fmt.Fprintf(&b, "- `POST /v1/images/generations` — image generation (OpenAI Images shape; e.g. `grok-imagine-image`).\n")
+	fmt.Fprintf(&b, "- `POST /v1/embeddings` — OpenAI embeddings (passthrough to the provider serving the model).\n")
+	fmt.Fprintf(&b, "- `POST /v1/completions` — legacy OpenAI text completions (passthrough).\n")
+	fmt.Fprintf(&b, "- `POST /v1/responses` — OpenAI Responses API (passthrough; supports streaming).\n")
 	fmt.Fprintf(&b, "- `GET /v1/models` — list available model ids (use these exact strings as `model`).\n")
-	fmt.Fprintf(&b, "- `GET /llm.md` — this document.\n\n")
+	fmt.Fprintf(&b, "- `GET /llm.md` — this document. `GET /docs` — full HTML reference of every mechanic.\n\n")
+	fmt.Fprintf(&b, "Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama), not Anthropic; an unsupported model → 400/501.\n\n")
 
 	fmt.Fprintf(&b, "## Recommended models\n\n")
 	fmt.Fprintf(&b, "- Default: `claude-sonnet-4-6` (strong; works on `/v1/chat/completions` and `/v1/messages`).\n")
@@ -661,6 +673,36 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(&b, "## Picking a specific account / subscription\n\n")
 	fmt.Fprintf(&b, "Send header `X-Cerber-Cred: <value>` to pin which credential serves the request: `oauth` (a subscription token), `key` (an API key), or an exact account name from `GET /admin/accounts`. Omit it to let cerber rotate.\n\n")
+
+	if aliases := s.catalog.Aliases(); len(aliases) > 0 {
+		fmt.Fprintf(&b, "## Model aliases\n\n")
+		fmt.Fprintf(&b, "These short names resolve to a canonical model (use either; the alias is rewritten before routing):\n\n")
+		anames := make([]string, 0, len(aliases))
+		for a := range aliases {
+			anames = append(anames, a)
+		}
+		sort.Strings(anames)
+		for _, a := range anames {
+			fmt.Fprintf(&b, "- `%s` → `%s`\n", a, aliases[a])
+		}
+		b.WriteString("\n")
+	}
+
+	fmt.Fprintf(&b, "## Automatic fallback (OpenAI endpoint)\n\n")
+	fmt.Fprintf(&b, "On `POST /v1/chat/completions`, if the chosen model fails with a retryable error (provider 5xx, or all accounts rate-limited/unavailable) cerber transparently retries the next model in a fallback chain before any bytes are sent. 4xx client errors are returned as-is. ")
+	fmt.Fprintf(&b, "Override per request with header `X-Cerber-Fallback: model2,model3` (comma-separated; each routed like any model, so it may cross providers).")
+	if len(s.fallbacks) > 0 {
+		b.WriteString(" Configured chains:\n\n")
+		for _, f := range s.fallbacks {
+			fmt.Fprintf(&b, "- `%s*` → %s\n", f.Model, strings.Join(f.To, ", "))
+		}
+		b.WriteString("\n")
+	} else {
+		b.WriteString(" No server-side chains are configured; use the header.\n\n")
+	}
+
+	fmt.Fprintf(&b, "## Rate limits & budgets\n\n")
+	fmt.Fprintf(&b, "Your key may carry a cost budget and request/token rate limits. If you hit them you'll get **402** (budget exhausted) or **429** (rate limit) with a JSON error — back off or ask the operator to raise the limit. Limits reset on a rolling window (minute/hour/day/week/month).\n\n")
 
 	fmt.Fprintf(&b, "## Model routing\n\n")
 	fmt.Fprintf(&b, "Just set `model`; cerber routes by name:\n\n")
@@ -707,6 +749,240 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "Streaming is supported on both endpoints (`\"stream\": true`).\n")
 
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, b.String())
+}
+
+// docsCSS is the inline stylesheet for /docs. Kept inline (no external/CDN
+// assets) per the no-phone-home principle.
+const docsCSS = `:root{--bg:#0f1115;--card:#171a21;--fg:#e6e9ef;--mut:#9aa4b2;--acc:#7aa2f7;--ok:#9ece6a;--warn:#e0af68;--bd:#272b35;--code:#1b1f27}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:30px;margin:0 0 4px}h2{font-size:21px;margin:38px 0 12px;padding-top:10px;border-top:1px solid var(--bd)}h3{font-size:16px;margin:20px 0 8px;color:var(--acc)}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.sub{color:var(--mut);margin:0 0 18px}
+code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
+code{background:var(--code);padding:1px 5px;border-radius:4px}
+pre{background:var(--code);border:1px solid var(--bd);border-radius:8px;padding:14px;overflow:auto}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd);vertical-align:top}
+th{color:var(--mut);font-weight:600}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px 18px;margin:14px 0}
+.pill{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#1f2430;color:var(--acc);margin-right:6px}
+.method{font-weight:700;color:var(--ok)}
+.warn{color:var(--warn)}.mut{color:var(--mut)}
+.toc{columns:2;font-size:14px}.toc a{display:block;padding:2px 0}
+.grid{display:flex;flex-wrap:wrap;gap:8px}`
+
+// handleDocs serves a comprehensive, self-describing HTML reference of every
+// cerber mechanic, reflecting this instance's live config (providers, models,
+// aliases, fallback chains). Public (no key) like /llm.md and the dashboard — it
+// exposes no secrets, only how the proxy behaves.
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	base := baseURLOf(r)
+	esc := html.EscapeString
+	mgmtSet := s.mgmt != nil
+
+	var b strings.Builder
+	p := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
+
+	p(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
+	p(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	p(`<title>cerber — docs</title><style>%s</style></head><body><div class="wrap">`, docsCSS)
+
+	p(`<h1>cerber</h1>`)
+	p(`<p class="sub">A trust-first, multi-provider AI gateway. Speaks the OpenAI <em>and</em> Anthropic API dialects, pools multiple accounts per provider, and routes each request to the right upstream.</p>`)
+	p(`<div class="card"><strong>Base URL</strong><br><code>%s</code>`, esc(base))
+	p(` &nbsp;·&nbsp; <a href="%s/v1">/v1</a> for OpenAI SDKs &nbsp;·&nbsp; <a href="/llm.md">/llm.md</a> (agent guide) &nbsp;·&nbsp; <a href="/dashboard">/dashboard</a> &nbsp;·&nbsp; <a href="/chat">/chat</a></div>`, esc(base))
+
+	// Table of contents
+	p(`<h2>Contents</h2><div class="toc">`)
+	for _, t := range [][2]string{
+		{"#auth", "Authentication"}, {"#endpoints", "API endpoints"}, {"#dialects", "Two dialects"},
+		{"#routing", "Model routing & aliases"}, {"#fallback", "Automatic fallback"},
+		{"#limits", "Rate limits & budgets"}, {"#headers", "Request headers"},
+		{"#providers", "Providers & models"}, {"#admin", "Admin API"},
+		{"#observability", "Observability"}, {"#examples", "Examples"}, {"#trust", "Trust principles"},
+	} {
+		p(`<a href="%s">%s</a>`, t[0], t[1])
+	}
+	p(`</div>`)
+
+	// Auth
+	p(`<h2 id="auth">Authentication</h2>`)
+	p(`<ul><li>From the local network (loopback/LAN): typically no key required.</li>`)
+	p(`<li>From outside: send <code>Authorization: Bearer &lt;KEY&gt;</code> or <code>x-api-key: &lt;KEY&gt;</code>.</li>`)
+	p(`<li>Keys are minted &amp; managed by the operator in the dashboard. Invalid/missing key → <code>401</code>.</li></ul>`)
+
+	// Endpoints
+	p(`<h2 id="endpoints">API endpoints</h2><table><tr><th>Method &amp; path</th><th>Dialect</th><th>What it does</th></tr>`)
+	type ep struct{ m, path, dia, desc string }
+	for _, e := range []ep{
+		{"POST", "/v1/chat/completions", "OpenAI", "Chat for every provider incl. Claude. Supports streaming + fallback."},
+		{"POST", "/v1/messages", "Anthropic", "Native Anthropic Messages, transparent passthrough (streaming)."},
+		{"POST", "/v1/messages/count_tokens", "Anthropic", "Token counting via pooled credentials."},
+		{"POST", "/v1/embeddings", "OpenAI", "Embeddings, passthrough to the provider serving the model."},
+		{"POST", "/v1/completions", "OpenAI", "Legacy text completions, passthrough."},
+		{"POST", "/v1/responses", "OpenAI", "Responses API, passthrough (streaming)."},
+		{"POST", "/v1/images/generations", "OpenAI", "Image generation (e.g. grok-imagine-*, gpt-image-*)."},
+		{"GET", "/v1/models", "OpenAI", "List discovered model ids per provider."},
+		{"GET", "/llm.md", "—", "Concise agent-facing usage guide (markdown)."},
+		{"GET", "/docs", "—", "This reference."},
+		{"GET", "/healthz", "—", "Liveness probe."},
+	} {
+		p(`<tr><td><span class="method">%s</span> <code>%s</code></td><td>%s</td><td>%s</td></tr>`, e.m, e.path, e.dia, e.desc)
+	}
+	p(`</table><p class="mut">Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama). A model that routes to Anthropic, or an unknown model, → <code>400</code>; a provider lacking the capability → <code>501</code>.</p>`)
+
+	// Dialects
+	p(`<h2 id="dialects">Two dialects, one gateway</h2>`)
+	p(`<p>Point an <strong>OpenAI</strong> SDK at <code>%s/v1</code> or an <strong>Anthropic</strong> SDK at <code>%s</code>. cerber translates OpenAI⇄Anthropic and OpenAI⇄Gemini under the hood, so you can call a Claude model through the OpenAI endpoint and get OpenAI-shaped responses, or use the native Anthropic endpoint for byte-faithful passthrough.</p>`, esc(base), esc(base))
+
+	// Routing + aliases
+	p(`<h2 id="routing">Model routing &amp; aliases</h2>`)
+	p(`<p>Just set <code>model</code>; cerber routes by name:</p><table><tr><th>Model prefix</th><th>Provider</th></tr>`)
+	for _, rr := range [][2]string{{"gpt*, o1*, o3*, o4*, chatgpt*", "OpenAI"}, {"gemini*", "Gemini"}, {"grok*", "xAI (Grok)"}, {"claude*", "Anthropic"}, {"(discovered local names)", "ollama / vLLM"}} {
+		p(`<tr><td><code>%s</code></td><td>%s</td></tr>`, rr[0], rr[1])
+	}
+	p(`</table><p class="mut">Configured <code>routing</code> prefixes and discovered model names take precedence; an unmatched model → <code>400</code>.</p>`)
+	if aliases := s.catalog.Aliases(); len(aliases) > 0 {
+		anames := make([]string, 0, len(aliases))
+		for a := range aliases {
+			anames = append(anames, a)
+		}
+		sort.Strings(anames)
+		p(`<h3>Aliases on this instance</h3><p class="mut">A stable short name resolved to the canonical model before routing &amp; upstream.</p><table><tr><th>Alias</th><th>→ Canonical</th></tr>`)
+		for _, a := range anames {
+			p(`<tr><td><code>%s</code></td><td><code>%s</code></td></tr>`, esc(a), esc(aliases[a]))
+		}
+		p(`</table>`)
+	}
+
+	// Fallback
+	p(`<h2 id="fallback">Automatic fallback <span class="mut">(OpenAI endpoint)</span></h2>`)
+	p(`<p>On <code>/v1/chat/completions</code>, if the model fails with a <strong>retryable</strong> error — provider <code>5xx</code>, or every account rate-limited/unavailable — cerber retries the next model in a fallback chain <em>before any bytes are sent</em>. A <code>4xx</code> client error is returned as-is, and a stream already in progress is never re-attempted.</p>`)
+	p(`<p>Per-request override: header <code>X-Cerber-Fallback: model2,model3</code> (each routed like any model, so it can cross providers).</p>`)
+	if len(s.fallbacks) > 0 {
+		p(`<h3>Configured chains</h3><table><tr><th>Model</th><th>→ Fallbacks (in order)</th></tr>`)
+		for _, f := range s.fallbacks {
+			p(`<tr><td><code>%s*</code></td><td><code>%s</code></td></tr>`, esc(f.Model), esc(strings.Join(f.To, ", ")))
+		}
+		p(`</table>`)
+	} else {
+		p(`<p class="mut">No server-side chains configured on this instance; use the header.</p>`)
+	}
+
+	// Limits / governance
+	p(`<h2 id="limits">Rate limits &amp; budgets</h2>`)
+	p(`<p>A managed key may carry a rolling <strong>cost budget</strong> (USD, from configured model pricing) and <strong>rate limits</strong> (requests &amp; tokens per window). On exhaustion you get:</p>`)
+	p(`<table><tr><th>Status</th><th>Meaning</th></tr><tr><td><code>402</code></td><td>Cost budget exhausted for the window.</td></tr><tr><td><code>429</code></td><td>Request or token rate limit exceeded.</td></tr></table>`)
+	p(`<p class="mut">Windows are rolling: minute / hour / day / week / month. Counters persist across restarts. Streamed responses currently count requests but not cost/tokens.</p>`)
+
+	// Headers
+	p(`<h2 id="headers">Request headers</h2><table><tr><th>Header</th><th>Effect</th></tr>`)
+	for _, hh := range [][2]string{
+		{"Authorization: Bearer &lt;KEY&gt;", "Client API key (or x-api-key)."},
+		{"X-Cerber-Cred: oauth|key|&lt;name&gt;", "Pin which pooled credential serves the request; omit to rotate."},
+		{"X-Cerber-Fallback: m2,m3", "Per-request fallback chain (OpenAI endpoint)."},
+		{"X-Cerber-Management: &lt;KEY&gt;", "Management key for /admin/* (if configured)."},
+		{"anthropic-version, anthropic-beta", "Passed through to Anthropic on the native endpoint."},
+	} {
+		p(`<tr><td><code>%s</code></td><td>%s</td></tr>`, hh[0], hh[1])
+	}
+	p(`</table>`)
+
+	// Providers & models (dynamic)
+	p(`<h2 id="providers">Providers &amp; models on this instance</h2>`)
+	nameSet := map[string]struct{}{}
+	for name := range s.accountStores() {
+		nameSet[name] = struct{}{}
+	}
+	for name := range s.chatters {
+		nameSet[name] = struct{}{}
+	}
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		p(`<p class="mut">No providers configured.</p>`)
+	}
+	for _, name := range names {
+		models := s.providerModels(name)
+		p(`<h3>%s`, esc(name))
+		if len(models) > 0 {
+			p(` <span class="mut">(%d models)</span>`, len(models))
+		}
+		p(`</h3>`)
+		if len(models) > 0 {
+			p(`<div class="grid">`)
+			for _, m := range models {
+				p(`<code>%s</code>`, esc(m))
+			}
+			p(`</div>`)
+		} else {
+			p(`<p class="mut">Use this provider's standard model names (routed by the prefixes above).</p>`)
+		}
+	}
+
+	// Admin API
+	p(`<h2 id="admin">Admin API</h2>`)
+	if mgmtSet {
+		p(`<p>Gated by a dedicated management key (send it as <code>X-Cerber-Management</code>, Bearer, or x-api-key).</p>`)
+	} else {
+		p(`<p class="warn">⚠ No management key configured — <code>/admin/*</code> currently accepts any valid client key. Set <code>access.management_key</code> for multi-tenant deployments, otherwise a capped key could lift its own limits.</p>`)
+	}
+	p(`<table><tr><th>Method &amp; path</th><th>What it does</th></tr>`)
+	for _, e := range []ep{
+		{"GET", "/admin/stats", "", "Usage snapshot (JSON): totals, per-credential, per-model, hourly series, cost."},
+		{"GET", "/admin/usage.csv", "", "Usage export (CSV)."},
+		{"GET", "/admin/accounts", "", "Pooled credentials: state, health, usage."},
+		{"GET", "/admin/providers", "", "Provider health + discovered models."},
+		{"POST", "/admin/accounts/{name}/enable|disable", "", "Toggle a credential at runtime."},
+		{"GET", "/admin/keys", "", "List managed client keys (redacted, with limits + window usage)."},
+		{"POST", "/admin/keys", "", "Mint a key; the secret is shown once."},
+		{"POST", "/admin/keys/{name}/enable|disable", "", "Toggle a client key."},
+		{"DELETE", "/admin/keys/{name}", "", "Delete a client key."},
+		{"POST", "/admin/keys/{name}/limits", "", "Set budget/rate limits (access.Limits JSON; empty = unlimited)."},
+	} {
+		p(`<tr><td><span class="method">%s</span> <code>%s</code></td><td>%s</td></tr>`, e.m, e.path, e.desc)
+	}
+	p(`</table>`)
+
+	// Observability
+	p(`<h2 id="observability">Observability</h2>`)
+	p(`<ul><li><code>GET /metrics</code> — Prometheus metrics (counts + credential names, no secrets).</li>`)
+	p(`<li><code>GET /dashboard</code> — usage, accounts, cost, per-hour chart, key management.</li>`)
+	p(`<li><code>GET /admin/stats</code> &amp; <code>/admin/usage.csv</code> — JSON/CSV snapshots.</li></ul>`)
+
+	// Examples
+	p(`<h2 id="examples">Examples</h2>`)
+	p(`<h3>OpenAI dialect (curl)</h3><pre><code>curl %s/v1/chat/completions \
+  -H 'Authorization: Bearer $KEY' -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
+	p(`<h3>With per-request fallback</h3><pre><code>curl %s/v1/chat/completions \
+  -H 'Authorization: Bearer $KEY' -H 'X-Cerber-Fallback: gpt-4o,gemini-2.0-flash' \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
+	p(`<h3>Anthropic dialect (curl)</h3><pre><code>curl %s/v1/messages \
+  -H 'Authorization: Bearer $KEY' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
+	p(`<h3>OpenAI Python SDK</h3><pre><code>from openai import OpenAI
+client = OpenAI(base_url="%s/v1", api_key="$KEY")
+client.chat.completions.create(model="claude-sonnet-4-6",
+    messages=[{"role":"user","content":"hi"}])</code></pre>`, esc(base))
+
+	// Trust
+	p(`<h2 id="trust">Trust principles</h2>`)
+	p(`<ul><li><strong>No phone-home.</strong> cerber makes outbound calls only to the provider APIs a request is routed to — no telemetry, no analytics, no remote asset fetch.</li>`)
+	p(`<li><strong>Credentials never leave the box</strong> except as the documented auth header to the provider that owns them.</li>`)
+	p(`<li><strong>Pinned, opt-in, never silent.</strong> No feature fetches and runs remote content automatically.</li></ul>`)
+
+	p(`<p class="mut" style="margin-top:40px">cerber · <a href="https://github.com/tggo/cerber">github.com/tggo/cerber</a></p>`)
+	p(`</div></body></html>`)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, b.String())
 }

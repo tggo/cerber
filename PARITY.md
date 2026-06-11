@@ -83,6 +83,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Feature | Status |
 |---|---|
 | Usage dashboard | ✅ (basic) |
+| Self-describing docs (`/llm.md` agent guide + `/docs` full HTML reference) | ✅ | public, dynamic (providers/models/aliases/fallback) |
 | Account management UI (enable/disable) | ✅ | dashboard accounts table |
 | Config editing via UI/API | ❌ |
 | Quota/cost dashboard | ✅ | cost card + requests/hour chart + 5h quota |

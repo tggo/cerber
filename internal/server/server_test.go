@@ -1088,6 +1088,8 @@ func TestLLMDoc(t *testing.T) {
 	for _, want := range []string{
 		"/v1/chat/completions", "/v1/messages", "Authorization: Bearer",
 		"claude*", "llama3.1:8b", "supergemma4-26b:latest", // discovered models listed
+		"/v1/embeddings", "/v1/responses", // new passthrough endpoints
+		"X-Cerber-Fallback", "402", "429", "/docs", // fallback + governance + docs link
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("llm.md missing %q\n%s", want, body)
@@ -1096,6 +1098,60 @@ func TestLLMDoc(t *testing.T) {
 	// the request host appears as the base URL
 	if !strings.Contains(body, "example.com") {
 		t.Errorf("base URL (host) not reflected: %s", body)
+	}
+}
+
+func TestLLMDoc_AliasesAndFallback(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.SetModelAliases(map[string]string{"opus": "claude-opus-4-x"})
+	s.SetFallbacks([]config.Fallback{{Model: "claude", To: []string{"gpt-4o"}}})
+	body := do(t, s.Handler(), "GET", "/llm.md", "", clientKey).Body.String()
+	for _, want := range []string{"Model aliases", "opus", "claude-opus-4-x", "claude*", "gpt-4o"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("llm.md missing dynamic %q", want)
+		}
+	}
+}
+
+func TestDocs(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	registerOllama(t, s, "llama3.1:8b")
+	s.SetModelAliases(map[string]string{"opus": "claude-opus-4-x"})
+	s.SetFallbacks([]config.Fallback{{Model: "claude", To: []string{"gpt-4o"}}})
+	h := s.Handler()
+
+	// public (no key), HTML.
+	rec := do(t, h, "GET", "/docs", "", "")
+	if rec.Code != 200 {
+		t.Fatalf("/docs = %d, want 200 (public)", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("content-type = %q", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<html", "</html>", "cerber", "example.com",
+		"/v1/embeddings", "/v1/responses", "X-Cerber-Cred", "X-Cerber-Fallback",
+		"Automatic fallback", "Rate limits", "claude-opus-4-x", "gpt-4o",
+		"llama3.1:8b", "/admin/keys/{name}/limits", "No phone-home",
+		// no management key configured in this test → warning shown
+		"No management key configured",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/docs missing %q", want)
+		}
+	}
+}
+
+func TestDocs_ManagementKeyHidesWarning(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	s.SetManagementKey("mgmt-secret")
+	body := do(t, s.Handler(), "GET", "/docs", "", "").Body.String()
+	if strings.Contains(body, "No management key configured") {
+		t.Error("/docs shows the no-mgmt-key warning even though one is set")
+	}
+	if !strings.Contains(body, "dedicated management key") {
+		t.Error("/docs should note admin is gated by a management key")
 	}
 }
 
