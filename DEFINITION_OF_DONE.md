@@ -294,6 +294,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Unknown model or a model routed to `anthropic` (which serves none of these) → 400; a routed provider lacking `Forwarder` → 501; upstream error status is relayed as-is.
 **Verified:** `internal/provider/openai` Forward tests (passthrough URL/auth/body, stream Accept) + `internal/server` endpoint tests (route-to-provider for all three, anthropic/unknown → 400, non-forwarder → 501, upstream-error relay) — 2026-06-10.
 
+## Recent-request log (who called what) + cumulative cost
+**What:** a bounded, in-memory log of recent API requests — time, client identity, IP, User-Agent, endpoint, model, upstream account, tokens in/out, and cost — so the operator can see e.g. which agent is hitting ollama. The cumulative dollar value of all priced tokens through cerber is exposed alongside.
+**DoD:**
+- Every model request (chat/messages/embeddings/completions/responses/images/count_tokens) appends one event to a ring buffer of the last N (config `usage.recent_log`, default 1000); oldest dropped past the cap. The buffer is **in-memory only — never written to disk** (it holds client IPs/UAs).
+- Each event captures: time, client (`config` for a static key, `localhost` for loopback, else the managed key name), IP (honouring `X-Forwarded-For` first hop behind a proxy), User-Agent, endpoint path, model, upstream credential, input/output tokens, computed cost, and an error flag.
+- `GET /admin/requests` (admin-authed) returns the events newest-first as JSON with `count` and `total_cost`; `?model=<id>` filters to one model and `?limit=<n>` caps the count (default 200). The dashboard renders a "recent requests" table (User-Agent/IP HTML-escaped).
+- `total_cost` (also in `/admin/stats`) is the cumulative $ of all priced tokens (per `usage.pricing`); it is derived from the persisted aggregates, so it survives restarts even though the per-request log does not.
+**Verified:** `internal/usage` reqlog tests (ring/order/filter/limit/default-cap) + `internal/server` tests (captures client/IP/UA/model/tokens/cost via /admin/requests, model filter) — 2026-06-12.
+
 ## Self-describing docs (`GET /llm.md`, `GET /docs`)
 **What:** two live, **public** (no key) self-describing guides reflecting this instance's config — `/llm.md` (concise markdown for agents) and `/docs` (full HTML reference of every mechanic for humans). Both expose only how to use the API, never secrets.
 **DoD:**

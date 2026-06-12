@@ -1,7 +1,10 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tggo/cerber/internal/access"
@@ -75,6 +78,73 @@ func TestGovernance_ChargeFromPricing(t *testing.T) {
 	// Pricing is 1.0 per token (1e6 per 1M); 7 tokens => $7 charged to the key.
 	if u := s.keys.List()[0].Usage; u.CostUSD != 7 || u.Tokens != 7 {
 		t.Errorf("charged usage = %+v, want cost 7 tokens 7", u)
+	}
+}
+
+func TestRequestsLog_CapturesWhoAndCost(t *testing.T) {
+	s, up, key := managedKeyServer(t, access.Limits{})
+	s.usage.SetPricing(map[string]usage.Price{"claude": {Input: 1_000_000, Output: 1_000_000}})
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json",
+			`{"id":"m","usage":{"input_tokens":3,"output_tokens":4}}`), nil).Once()
+	h := s.Handler()
+
+	// A model request from a specific IP + User-Agent.
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude","stream":false}`))
+	r.Header.Set("Authorization", "Bearer "+key)
+	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	r.Header.Set("User-Agent", "sneaky-agent/1.0")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request = %d", rec.Code)
+	}
+
+	// The recent-requests log must show who called what, with cost.
+	body := do(t, h, "GET", "/admin/requests", "", key).Body.String()
+	var out struct {
+		Requests []usage.RequestEvent `json:"requests"`
+		Count    int                  `json:"count"`
+		Total    float64              `json:"total_cost"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, body)
+	}
+	if len(out.Requests) == 0 {
+		t.Fatal("no requests logged")
+	}
+	e := out.Requests[0]
+	if e.IP != "203.0.113.9" {
+		t.Errorf("ip = %q, want first XFF hop", e.IP)
+	}
+	if e.UserAgent != "sneaky-agent/1.0" {
+		t.Errorf("ua = %q", e.UserAgent)
+	}
+	if e.Client != "mk" {
+		t.Errorf("client = %q, want managed key name", e.Client)
+	}
+	if e.Model != "claude" || e.InputTokens != 3 || e.OutputTokens != 4 {
+		t.Errorf("event = %+v", e)
+	}
+	if e.Cost != 7 || out.Total != 7 { // 7 tokens at $1/token
+		t.Errorf("cost = %v, total = %v, want 7", e.Cost, out.Total)
+	}
+}
+
+func TestRequestsLog_ModelFilter(t *testing.T) {
+	s, up, key := managedKeyServer(t, access.Limits{})
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"m"}`), nil).Once()
+	h := s.Handler()
+	do(t, h, "POST", "/v1/messages", `{"model":"claude","stream":false}`, key)
+
+	body := do(t, h, "GET", "/admin/requests?model=nonesuch&limit=10", "", key).Body.String()
+	var out struct {
+		Count int `json:"count"`
+	}
+	_ = json.Unmarshal([]byte(body), &out)
+	if out.Count != 0 {
+		t.Errorf("filtered count = %d, want 0", out.Count)
 	}
 }
 

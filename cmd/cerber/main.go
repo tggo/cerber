@@ -167,10 +167,10 @@ func main() {
 
 	// Persistent usage + per-model pricing (cost). Loaded from disk, saved
 	// periodically and on shutdown.
-	tracker, terr := usage.Load(cfg.Usage.File)
+	tracker, terr := usage.Load(cfg.Usage.File, usage.WithRecentCap(cfg.Usage.RecentLog))
 	if terr != nil {
 		logger.Warn("load usage", zap.Error(terr))
-		tracker = usage.New()
+		tracker = usage.New(usage.WithRecentCap(cfg.Usage.RecentLog))
 	}
 	if len(cfg.Usage.Pricing) > 0 {
 		pricing := map[string]usage.Price{}

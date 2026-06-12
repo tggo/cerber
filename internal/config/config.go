@@ -28,8 +28,9 @@ type Config struct {
 
 // Usage configures usage persistence and per-model pricing (for cost reporting).
 type Usage struct {
-	File    string           `yaml:"file"`    // where to persist aggregates (empty = in-memory only)
-	Pricing map[string]Price `yaml:"pricing"` // model -> cost per 1M tokens
+	File      string           `yaml:"file"`       // where to persist aggregates (empty = in-memory only)
+	Pricing   map[string]Price `yaml:"pricing"`    // model -> cost per 1M tokens
+	RecentLog int              `yaml:"recent_log"` // # of recent per-request events kept in memory (0 = default 1000)
 }
 
 // Price is per-model cost per 1,000,000 tokens.

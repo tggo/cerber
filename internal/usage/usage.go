@@ -78,6 +78,8 @@ type Tracker struct {
 	since        time.Time
 	now          func() time.Time
 	pricing      map[string]Price
+	recent       []RequestEvent // bounded ring of per-request events (in-memory only)
+	recentCap    int
 }
 
 // Option customizes a Tracker.
@@ -88,6 +90,16 @@ func WithClock(now func() time.Time) Option {
 	return func(t *Tracker) { t.now = now }
 }
 
+// WithRecentCap sets how many recent per-request events are retained in memory
+// (default 1000). n<=0 keeps the default.
+func WithRecentCap(n int) Option {
+	return func(t *Tracker) {
+		if n > 0 {
+			t.recentCap = n
+		}
+	}
+}
+
 // New builds an empty Tracker.
 func New(opts ...Option) *Tracker {
 	t := &Tracker{
@@ -96,6 +108,7 @@ func New(opts ...Option) *Tracker {
 		buckets:      map[int64]*Stat{},
 		pricing:      map[string]Price{},
 		now:          time.Now,
+		recentCap:    defaultRecentCap,
 	}
 	for _, o := range opts {
 		o(t)

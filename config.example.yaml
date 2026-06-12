@@ -40,6 +40,8 @@ usage:
   # pricing:                       # cost per 1,000,000 tokens
   #   claude-sonnet-4-6: { input: 3, output: 15 }
   #   gpt-4o-mini:       { input: 0.15, output: 0.6 }
+  # recent_log: 1000               # # of recent per-request events kept in memory
+  #                                # (GET /admin/requests: who/IP/UA/model/tokens/cost)
 
 providers:
   # Multiple providers can be enabled; on /v1/chat/completions cerber routes by

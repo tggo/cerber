@@ -273,6 +273,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/responses", s.handleForward("/v1/responses"))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
+	mux.HandleFunc("GET /admin/requests", s.handleRequestsLog)
 	mux.HandleFunc("GET /admin/usage.csv", s.handleUsageCSV)
 	mux.HandleFunc("GET /admin/accounts", s.handleAccounts)
 	mux.HandleFunc("GET /admin/providers", s.handleProviders)
@@ -361,6 +362,31 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(s.usage.Snapshot())
+}
+
+// handleRequestsLog returns the recent per-request log (newest first) — who
+// (client + IP + User-Agent) called which model, when, and the tokens/cost — so
+// the operator can see e.g. which agent is hitting ollama. Optional query:
+// ?model=<id> filters to one model, ?limit=<n> caps the count (default 200).
+// total_cost is the cumulative $ value of all priced tokens through cerber.
+func (s *Server) handleRequestsLog(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	limit := 200
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	events := s.usage.RecentRequests(r.URL.Query().Get("model"), limit)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"requests":   events,
+		"count":      len(events),
+		"total_cost": s.usage.Snapshot().TotalCost,
+	})
 }
 
 // handleUsageCSV exports usage for spreadsheets/analysis: the hourly time-series
@@ -936,7 +962,8 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	p(`<table><tr><th>Method &amp; path</th><th>What it does</th></tr>`)
 	for _, e := range []ep{
-		{"GET", "/admin/stats", "", "Usage snapshot (JSON): totals, per-credential, per-model, hourly series, cost."},
+		{"GET", "/admin/stats", "", "Usage snapshot (JSON): totals, per-credential, per-model, hourly series, total cost."},
+		{"GET", "/admin/requests", "", "Recent per-request log (newest first): time, client, IP, User-Agent, model, account, tokens, cost. ?model= and ?limit= filters."},
 		{"GET", "/admin/usage.csv", "", "Usage export (CSV)."},
 		{"GET", "/admin/accounts", "", "Pooled credentials: state, health, usage."},
 		{"GET", "/admin/providers", "", "Provider health + discovered models."},
@@ -954,8 +981,9 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	// Observability
 	p(`<h2 id="observability">Observability</h2>`)
 	p(`<ul><li><code>GET /metrics</code> — Prometheus metrics (counts + credential names, no secrets).</li>`)
-	p(`<li><code>GET /dashboard</code> — usage, accounts, cost, per-hour chart, key management.</li>`)
-	p(`<li><code>GET /admin/stats</code> &amp; <code>/admin/usage.csv</code> — JSON/CSV snapshots.</li></ul>`)
+	p(`<li><code>GET /dashboard</code> — usage, accounts, total cost, per-hour chart, recent-requests table, key management.</li>`)
+	p(`<li><code>GET /admin/requests</code> — recent per-request log (who/IP/UA/model/tokens/cost), in-memory ring (not persisted, holds IPs).</li>`)
+	p(`<li><code>GET /admin/stats</code> &amp; <code>/admin/usage.csv</code> — JSON/CSV snapshots; <code>total_cost</code> is the cumulative $ of all priced tokens through cerber.</li></ul>`)
 
 	// Examples
 	p(`<h2 id="examples">Examples</h2>`)
@@ -1804,12 +1832,17 @@ func isCredFailure(status int) bool {
 }
 
 func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
+	meta := reqMeta{ip: clientIP(r), ua: r.UserAgent(), endpoint: r.URL.Path}
 	if s.allowLocalhost && isLoopback(r.RemoteAddr) {
+		meta.client = "localhost"
+		*r = *r.WithContext(withReqMeta(r.Context(), meta))
 		return true
 	}
 	presented := access.FromRequest(r)
 	// Static config keys are the operator's own and bypass per-key governance.
 	if s.access.Allow(presented) {
+		meta.client = "config"
+		*r = *r.WithContext(withReqMeta(r.Context(), meta))
 		return true
 	}
 	// Managed (dashboard) keys carry optional budgets/rate-limits: identify the
@@ -1826,7 +1859,8 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 			writeError(w, http.StatusTooManyRequests, "client key rate limit exceeded")
 			return false
 		}
-		*r = *r.WithContext(withClientKey(r.Context(), name))
+		meta.client = name
+		*r = *r.WithContext(withClientKey(withReqMeta(r.Context(), meta), name))
 		return true
 	}
 	// Diagnostic without leaking secrets: which auth the client sent and how long
@@ -1861,15 +1895,54 @@ func clientKeyFrom(ctx context.Context) (string, bool) {
 	return name, ok && name != ""
 }
 
-// record forwards an event to the usage tracker and, when the request was made
-// with a managed client key, charges its cost (from configured pricing) and
-// tokens against that key's budget/rate window. It is the single point through
-// which all handlers record usage.
+// reqMeta is per-request context captured at authorization time for the
+// recent-request log: who/where the call came from.
+type reqMeta struct {
+	ip, ua, client, endpoint string
+}
+
+type reqMetaCtxKey struct{}
+
+func withReqMeta(ctx context.Context, m reqMeta) context.Context {
+	return context.WithValue(ctx, reqMetaCtxKey{}, m)
+}
+
+func reqMetaFrom(ctx context.Context) reqMeta {
+	m, _ := ctx.Value(reqMetaCtxKey{}).(reqMeta)
+	return m
+}
+
+// clientIP returns the caller's IP, honouring X-Forwarded-For (first hop) set by
+// a fronting proxy (e.g. Caddy), else the connection's remote address.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// record forwards an event to the usage tracker, charges per-key budget/rate
+// (when a managed key made the call), and appends a per-request entry to the
+// recent-request log (with client IP/UA/identity from the request context). It
+// is the single point through which all handlers record usage.
 func (s *Server) record(ctx context.Context, e usage.Event) {
 	s.usage.Record(e)
+	cost := s.usage.Cost(e.Model, e.InputTokens, e.OutputTokens)
 	if name, ok := clientKeyFrom(ctx); ok {
-		s.keys.Charge(name, s.usage.Cost(e.Model, e.InputTokens, e.OutputTokens), e.InputTokens+e.OutputTokens)
+		s.keys.Charge(name, cost, e.InputTokens+e.OutputTokens)
 	}
+	m := reqMetaFrom(ctx)
+	s.usage.RecordRequest(usage.RequestEvent{
+		Time: s.now(), IP: m.ip, UserAgent: m.ua, Client: m.client, Endpoint: m.endpoint,
+		Model: e.Model, Credential: e.Credential,
+		InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, Cost: cost, Error: e.IsError,
+	})
 }
 
 // isLoopback reports whether a "host:port" remote address is a loopback IP.
