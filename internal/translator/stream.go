@@ -31,24 +31,39 @@ type openaiDelta struct {
 
 // --- Anthropic streaming event (loose; only fields we read) ---
 
+type anthropicStreamUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+func (u anthropicStreamUsage) totalInput() int64 {
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+}
+
 type anthropicStreamEvent struct {
 	Type    string `json:"type"`
 	Message *struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
+		ID    string               `json:"id"`
+		Model string               `json:"model"`
+		Usage anthropicStreamUsage `json:"usage"`
 	} `json:"message"`
 	Delta *struct {
 		Type       string `json:"type"`
 		Text       string `json:"text"`
 		StopReason string `json:"stop_reason"`
 	} `json:"delta"`
+	Usage *anthropicStreamUsage `json:"usage"` // message_delta carries usage at top level
 }
 
 // StreamAnthropicToOpenAI reads an Anthropic Messages SSE stream from r and
 // writes an OpenAI chat.completion.chunk SSE stream to w, calling flush (if
 // non-nil) after each chunk so bytes reach the client promptly. It always emits
-// a terminating "data: [DONE]" line.
-func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush func()) error {
+// a terminating "data: [DONE]" line. It also returns the token usage parsed from
+// the stream (input from message_start incl. cache, output from message_delta)
+// so the caller can record cost for streamed responses.
+func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush func()) (in, out int64, err error) {
 	created := t.now().Unix()
 	var id, model, finalReason string
 	emittedRole := false
@@ -114,29 +129,38 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 		case "message_start":
 			if ev.Message != nil {
 				id, model = ev.Message.ID, ev.Message.Model
+				if t := ev.Message.Usage.totalInput(); t > 0 {
+					in = t
+				}
+				if ev.Message.Usage.OutputTokens > 0 {
+					out = ev.Message.Usage.OutputTokens
+				}
 			}
 			if !emittedRole {
 				emittedRole = true
 				if err := emit(openaiStreamChoice{Index: 0, Delta: openaiDelta{Role: "assistant"}}); err != nil {
-					return err
+					return in, out, err
 				}
 			}
 		case "content_block_delta":
 			if ev.Delta != nil && ev.Delta.Type == "text_delta" && ev.Delta.Text != "" {
 				if err := emit(openaiStreamChoice{Index: 0, Delta: openaiDelta{Content: ev.Delta.Text}}); err != nil {
-					return err
+					return in, out, err
 				}
 			}
 		case "message_delta":
 			if ev.Delta != nil && ev.Delta.StopReason != "" {
 				finalReason = ev.Delta.StopReason
 			}
+			if ev.Usage != nil && ev.Usage.OutputTokens > 0 {
+				out = ev.Usage.OutputTokens
+			}
 		case "message_stop":
-			return finish()
+			return in, out, finish()
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("translator: read anthropic stream: %w", err)
+		return in, out, fmt.Errorf("translator: read anthropic stream: %w", err)
 	}
-	return finish()
+	return in, out, finish()
 }

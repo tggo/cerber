@@ -1579,14 +1579,14 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 func (s *Server) relayAnthropicAsOpenAI(w http.ResponseWriter, r *http.Request, resp *http.Response, cred, model string, stream bool) {
 	defer resp.Body.Close()
 	if stream {
-		s.record(r.Context(), usage.Event{Credential: cred, Model: model})
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
 		flush := flusher(w)
-		if err := s.tr.StreamAnthropicToOpenAI(w, resp.Body, flush); err != nil {
-			return // client likely went away; nothing more we can do
-		}
+		in, out, err := s.tr.StreamAnthropicToOpenAI(w, resp.Body, flush)
+		// Record the streamed usage (cost/budget) even if the client went away.
+		s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+		_ = err
 		return
 	}
 	upstreamBody, err := io.ReadAll(resp.Body)

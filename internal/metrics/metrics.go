@@ -16,22 +16,24 @@ import (
 type Collector struct {
 	tr *usage.Tracker
 
-	requests   *prometheus.Desc
-	errors     *prometheus.Desc
-	inTokens   *prometheus.Desc
-	outTokens  *prometheus.Desc
-	reqByModel *prometheus.Desc
+	requests    *prometheus.Desc
+	errors      *prometheus.Desc
+	inTokens    *prometheus.Desc
+	outTokens   *prometheus.Desc
+	reqByModel  *prometheus.Desc
+	costByModel *prometheus.Desc
 }
 
 // NewCollector builds a Collector over the given tracker.
 func NewCollector(tr *usage.Tracker) *Collector {
 	return &Collector{
-		tr:         tr,
-		requests:   prometheus.NewDesc("cerber_requests_total", "Total requests per credential.", []string{"credential"}, nil),
-		errors:     prometheus.NewDesc("cerber_errors_total", "Total errored requests per credential.", []string{"credential"}, nil),
-		inTokens:   prometheus.NewDesc("cerber_input_tokens_total", "Total input tokens per credential.", []string{"credential"}, nil),
-		outTokens:  prometheus.NewDesc("cerber_output_tokens_total", "Total output tokens per credential.", []string{"credential"}, nil),
-		reqByModel: prometheus.NewDesc("cerber_requests_by_model_total", "Total requests per model.", []string{"model"}, nil),
+		tr:          tr,
+		requests:    prometheus.NewDesc("cerber_requests_total", "Total requests per credential.", []string{"credential"}, nil),
+		errors:      prometheus.NewDesc("cerber_errors_total", "Total errored requests per credential.", []string{"credential"}, nil),
+		inTokens:    prometheus.NewDesc("cerber_input_tokens_total", "Total input tokens per credential.", []string{"credential"}, nil),
+		outTokens:   prometheus.NewDesc("cerber_output_tokens_total", "Total output tokens per credential.", []string{"credential"}, nil),
+		reqByModel:  prometheus.NewDesc("cerber_requests_by_model_total", "Total requests per model.", []string{"model"}, nil),
+		costByModel: prometheus.NewDesc("cerber_cost_usd_total", "Cumulative cost (USD) per model from configured pricing.", []string{"model"}, nil),
 	}
 }
 
@@ -42,6 +44,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.inTokens
 	ch <- c.outTokens
 	ch <- c.reqByModel
+	ch <- c.costByModel
 }
 
 // Collect implements prometheus.Collector.
@@ -55,6 +58,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, e := range rep.ByModel {
 		ch <- prometheus.MustNewConstMetric(c.reqByModel, prometheus.CounterValue, float64(e.Requests), e.Name)
+		if e.Cost > 0 {
+			ch <- prometheus.MustNewConstMetric(c.costByModel, prometheus.CounterValue, e.Cost, e.Name)
+		}
 	}
 }
 

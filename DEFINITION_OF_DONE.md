@@ -143,8 +143,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 ## Prometheus metrics
 **What:** usage exposed in Prometheus format for scraping.
 **DoD:**
-- `GET /metrics` (unauthenticated; counts + credential/model names only, no secrets) emits `cerber_requests_total`, `cerber_errors_total`, `cerber_input_tokens_total`, `cerber_output_tokens_total` (by credential) and `cerber_requests_by_model_total` (by model).
-**Verified:** `internal/metrics` (100%) + live `/metrics` scrape — 2026-06-07.
+- `GET /metrics` (unauthenticated; counts + credential/model names only, no secrets) emits `cerber_requests_total`, `cerber_errors_total`, `cerber_input_tokens_total`, `cerber_output_tokens_total` (by credential), `cerber_requests_by_model_total` and `cerber_cost_usd_total` (by model, from configured pricing).
+**Verified:** `internal/metrics` (100%) + live `/metrics` scrape — 2026-06-13.
 
 ## Web dashboard
 **What:** a self-contained usage dashboard (no external/CDN assets).
@@ -264,7 +264,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **DoD:**
 - A key's limits are `max_cost_usd` over `budget_period` (default `month`) and `max_requests` / `max_tokens` over `rate_period` (default `minute`); periods are one of `minute|hour|day|week|month` (rolling spans, not calendar-aligned). A zero/absent value for a dimension means unlimited for that dimension.
 - Per request, after the key is identified: if its cost window is at/over `max_cost_usd` → **402**; if its request or token window is at/over the limit → **429**; otherwise one request is reserved and the request proceeds. The request slot is reserved on admission, so a request that then fails upstream still counts against `max_requests`. Cost is computed from the configured model pricing (`usage.pricing`); cost+tokens are charged back to the key after the response.
-- Known gap: **streamed** responses (`stream:true`) record the request but not cost/tokens (no SSE usage parsing on the relay path), so a stream-only key is effectively uncapped on `max_cost_usd`/`max_tokens`. Non-streamed responses are charged in full.
+- Streamed responses are charged: native `/v1/messages` and the OpenAI-endpoint→Anthropic translation both parse token usage from the SSE (input incl. cache, output from `message_delta`) and record cost. Remaining gap: streaming through a non-Anthropic chatter (grok/gemini/openai relayed as-is) still records the request but not cost/tokens, since that would require injecting `stream_options.include_usage` into the client's request.
 - Counters reset when their rolling window elapses, and are **persisted with the key** (survive restart) and flushed by the periodic key-store saver (not on every request).
 - `POST /admin/keys/{name}/limits` sets a key's limits from an `access.Limits` JSON body (empty body clears them → unlimited); unknown name → 404, unrecognised period → 400. `GET /admin/keys` and the key store expose each key's `limits` and current-window `usage` (redacted, no secret). **Security:** this is gated by `adminAuthorized` — tamper-proof only when `access.management_key` is set. Without a management key, `/admin/*` falls back to the client-key check, so a capped key could lift its own limits; cerber logs a startup warning when limits are configured without a management key.
 - `access.default_key_limits` in config seeds the limits of **newly-created** dashboard keys; existing keys keep their own. Invalid default periods fail config validation.

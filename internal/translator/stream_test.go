@@ -7,7 +7,7 @@ import (
 )
 
 const anthropicStream = `event: message_start
-data: {"type":"message_start","message":{"id":"msg_7","model":"claude-x"}}
+data: {"type":"message_start","message":{"id":"msg_7","model":"claude-x","usage":{"input_tokens":10,"cache_read_input_tokens":5}}}
 
 event: ping
 data: {"type":"ping"}
@@ -19,7 +19,7 @@ event: content_block_delta
 data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}
 
 event: message_stop
 data: {"type":"message_stop"}
@@ -28,9 +28,12 @@ data: {"type":"message_stop"}
 func TestStream_FullSequence(t *testing.T) {
 	var buf strings.Builder
 	flushes := 0
-	err := fixedTr().StreamAnthropicToOpenAI(&buf, strings.NewReader(anthropicStream), func() { flushes++ })
+	gotIn, gotOut, err := fixedTr().StreamAnthropicToOpenAI(&buf, strings.NewReader(anthropicStream), func() { flushes++ })
 	if err != nil {
 		t.Fatal(err)
+	}
+	if gotIn != 15 || gotOut != 7 { // input 10 + cache_read 5; output 7
+		t.Errorf("usage = in %d / out %d, want 15 / 7", gotIn, gotOut)
 	}
 	out := buf.String()
 	// role chunk, two content chunks, final stop chunk, DONE
@@ -59,7 +62,7 @@ func TestStream_EOFWithoutMessageStop(t *testing.T) {
 data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}
 `
 	var buf strings.Builder
-	if err := fixedTr().StreamAnthropicToOpenAI(&buf, strings.NewReader(in), nil); err != nil {
+	if _, _, err := fixedTr().StreamAnthropicToOpenAI(&buf, strings.NewReader(in), nil); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -76,7 +79,7 @@ data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}
 data: {"type":"message_stop"}
 `
 	var buf strings.Builder
-	if err := fixedTr().StreamAnthropicToOpenAI(&buf, strings.NewReader(in), nil); err != nil {
+	if _, _, err := fixedTr().StreamAnthropicToOpenAI(&buf, strings.NewReader(in), nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), `"content":"x"`) {
@@ -97,7 +100,7 @@ func (w *errWriter) Write(p []byte) (int, error) {
 
 func TestStream_WriteErrorPropagates(t *testing.T) {
 	// Fails on the very first emit (the role chunk).
-	err := fixedTr().StreamAnthropicToOpenAI(&errWriter{ok: 0}, strings.NewReader(anthropicStream), nil)
+	_, _, err := fixedTr().StreamAnthropicToOpenAI(&errWriter{ok: 0}, strings.NewReader(anthropicStream), nil)
 	if err == nil {
 		t.Fatal("expected write error to propagate")
 	}
@@ -105,7 +108,7 @@ func TestStream_WriteErrorPropagates(t *testing.T) {
 
 func TestStream_WriteErrorDuringDone(t *testing.T) {
 	// Allow role + 2 content + final stop chunk writes, fail on the [DONE] write.
-	err := fixedTr().StreamAnthropicToOpenAI(&errWriter{ok: 4}, strings.NewReader(anthropicStream), nil)
+	_, _, err := fixedTr().StreamAnthropicToOpenAI(&errWriter{ok: 4}, strings.NewReader(anthropicStream), nil)
 	if err == nil {
 		t.Fatal("expected write error on DONE to propagate")
 	}
