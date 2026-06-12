@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -135,9 +136,28 @@ func (t *Tracker) Cost(model string, in, out int64) float64 {
 	return t.modelCost(model, Stat{InputTokens: in, OutputTokens: out})
 }
 
+// priceFor resolves a model's price: an exact match wins, otherwise the
+// longest configured key that is a prefix of the model (so a family key like
+// "claude-opus" prices every dated variant "claude-opus-4-8", "claude-opus-…").
+func (t *Tracker) priceFor(model string) (Price, bool) {
+	if p, ok := t.pricing[model]; ok {
+		return p, true
+	}
+	best := ""
+	for k := range t.pricing {
+		if len(k) > len(best) && strings.HasPrefix(model, k) {
+			best = k
+		}
+	}
+	if best == "" {
+		return Price{}, false
+	}
+	return t.pricing[best], true
+}
+
 // modelCost computes the cost for a model's tokens (0 if no pricing).
 func (t *Tracker) modelCost(model string, s Stat) float64 {
-	p, ok := t.pricing[model]
+	p, ok := t.priceFor(model)
 	if !ok {
 		return 0
 	}

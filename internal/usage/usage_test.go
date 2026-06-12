@@ -80,6 +80,38 @@ func TestPricingCost(t *testing.T) {
 	}
 }
 
+func TestCost_PrefixMatch(t *testing.T) {
+	tr := fixedTracker()
+	tr.SetPricing(map[string]Price{
+		"claude-opus": {Input: 5, Output: 25},
+		"gpt-4o":      {Input: 2.5, Output: 10},
+		"gpt-4o-mini": {Input: 0.15, Output: 0.6},
+		"grok-4":      {Input: 3, Output: 15},
+		"grok-4.20":   {Input: 2, Output: 6},
+	})
+	cases := []struct {
+		model      string
+		in, out    int64
+		wantPerTok float64 // expected cost
+	}{
+		// dated variant matches the family prefix
+		{"claude-opus-4-8", 1_000_000, 0, 5},
+		// exact-and-longest: gpt-4o-mini beats the shorter gpt-4o prefix
+		{"gpt-4o-mini-2026", 1_000_000, 0, 0.15},
+		{"gpt-4o", 1_000_000, 0, 2.5},
+		// longer prefix wins: grok-4.20-... -> grok-4.20, not grok-4
+		{"grok-4.20-0309-non-reasoning", 1_000_000, 0, 2},
+		{"grok-4.3", 1_000_000, 0, 3}, // only grok-4 prefixes it
+		// no prefix -> free
+		{"llama3.1:8b", 1_000_000, 1_000_000, 0},
+	}
+	for _, c := range cases {
+		if got := tr.Cost(c.model, c.in, c.out); got != c.wantPerTok {
+			t.Errorf("Cost(%q) = %v, want %v", c.model, got, c.wantPerTok)
+		}
+	}
+}
+
 func TestSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data", "usage.json")

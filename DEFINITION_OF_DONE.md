@@ -220,7 +220,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 ## Usage persistence, cost, quota, strategy, management key
 **What:** usage survives restarts, has cost, shows per-account quota; credential strategy and admin auth are configurable.
 **DoD:**
-- Usage aggregates persist to `usage.file` (load on start, save every 30s + on SIGINT/SIGTERM); `usage.pricing` (per-1M-token) yields per-model + total cost in `/admin/stats` and the dashboard.
+- Usage aggregates persist to `usage.file` (load on start, save every 30s + on SIGINT/SIGTERM); `usage.pricing` (per-1M-token) yields per-model + total cost in `/admin/stats` and the dashboard. A model is priced by **exact name first, else the longest configured key that is a prefix of it** (so a family key like `claude-opus` prices every dated variant); unpriced models cost 0.
 - `/admin/accounts` includes each account's quota (5h/7d utilization/status/reset) captured passively from Anthropic rate-limit headers.
 - `providers.strategy: fill-first` drains one credential before the next (default round-robin).
 - `access.management_key`, when set, gates `/admin/*` (Bearer/x-api-key/X-Cerber-Management) instead of client keys.
