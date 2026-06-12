@@ -106,6 +106,7 @@
 
   const fmt = (n) => (n ?? 0).toLocaleString();
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const usd = (c) => c ? "$" + (c >= 1 ? c.toFixed(2) : c.toFixed(4)) : "—";
   const ago = (unix) => {
     if (!unix) return "—";
     const s = Math.max(0, Math.floor(Date.now()/1000 - unix));
@@ -114,17 +115,18 @@
     return Math.floor(s/3600) + "h";
   };
 
-  function rows(tbl, items, head) {
+  function rows(tbl, items, head, withCost) {
     const h = "<tr>" + head.map(c => `<th>${c}</th>`).join("") + "</tr>";
     const body = items.map(e => `<tr>
-      <td>${e.name}</td>
+      <td>${esc(e.name)}</td>
       <td>${fmt(e.requests)}</td>
       <td class="${e.errors ? 'err' : 'muted'}">${fmt(e.errors)}</td>
       <td>${fmt(e.input_tokens)}</td>
       <td>${fmt(e.output_tokens)}</td>
+      ${withCost ? `<td class="muted">${usd(e.cost)}</td>` : ""}
       <td class="muted">${ago(e.last_used && Date.parse(e.last_used)/1000)}</td>
     </tr>`).join("");
-    tbl.innerHTML = h + (body || `<tr><td colspan="6" class="muted">no data</td></tr>`);
+    tbl.innerHTML = h + (body || `<tr><td colspan="${head.length}" class="muted">no data</td></tr>`);
   }
 
   async function load() {
@@ -143,9 +145,8 @@
         ["output tokens", fmt(t.output_tokens)],
         ["cost", "$" + (d.total_cost || 0).toFixed(2)],
       ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-      const head = ["name","requests","errors","input","output","last"];
-      rows($("byCred"), d.by_credential || [], head);
-      rows($("byModel"), d.by_model || [], head);
+      rows($("byCred"), d.by_credential || [], ["name","requests","errors","input","output","last"]);
+      rows($("byModel"), d.by_model || [], ["name","requests","errors","input","output","cost","last"], true);
       setOpts($("fModel"), (d.by_model || []).map(m => m.name));
       renderChart(d.series || []);
       loadProviders();
