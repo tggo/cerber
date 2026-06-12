@@ -75,7 +75,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | **Persistent usage (survives restart)** | ✅ | JSON aggregates (not per-event SQLite) |
 | **Quota inspection per account** (5h/7d windows) | ✅ | passive, from Anthropic rate-limit headers |
 | **Cost calculation** (per-model pricing) | ✅ | `usage.pricing`; `total_cost` = cumulative $ through cerber |
-| **Recent-request log** (who/IP/UA/model/tokens/cost) | ✅ | `GET /admin/requests` + dashboard table; in-memory ring (last N, holds IPs → not persisted) |
+| **Recent-request log** (who/IP/UA/provider/model/tokens/cost) | ✅ | `GET /admin/requests` (filter by model/provider/account, paginated) + dashboard endless table; in-memory ring (last N, holds IPs → not persisted) |
 | Usage event log / export / filtering | 🟡 | recent ring + CSV export `/admin/usage.csv` (aggregates); no durable per-event history (SQLite) |
 | Cost/usage history & analytics | 🟡 | hourly time-series + chart (no per-event) |
 

@@ -14,12 +14,35 @@ type RequestEvent struct {
 	UserAgent    string    `json:"user_agent,omitempty"`
 	Client       string    `json:"client,omitempty"` // managed key name / "config" / "localhost"
 	Endpoint     string    `json:"endpoint,omitempty"`
+	Provider     string    `json:"provider,omitempty"` // provider that served the model (anthropic/openai/…)
 	Model        string    `json:"model,omitempty"`
-	Credential   string    `json:"credential,omitempty"` // upstream account/provider used
+	Credential   string    `json:"credential,omitempty"` // upstream account used
 	InputTokens  int64     `json:"input_tokens"`
 	OutputTokens int64     `json:"output_tokens"`
 	Cost         float64   `json:"cost"`
 	Error        bool      `json:"error,omitempty"`
+}
+
+// RequestFilter narrows the recent-request log. Empty fields match anything.
+type RequestFilter struct {
+	Model      string
+	Provider   string
+	Credential string
+	Client     string
+}
+
+func (f RequestFilter) match(e RequestEvent) bool {
+	switch {
+	case f.Model != "" && e.Model != f.Model:
+		return false
+	case f.Provider != "" && e.Provider != f.Provider:
+		return false
+	case f.Credential != "" && e.Credential != f.Credential:
+		return false
+	case f.Client != "" && e.Client != f.Client:
+		return false
+	}
+	return true
 }
 
 // RecordRequest appends a per-request event to the bounded recent-log, dropping
@@ -36,21 +59,28 @@ func (t *Tracker) RecordRequest(e RequestEvent) {
 	}
 }
 
-// RecentRequests returns up to limit most-recent events, newest first,
-// optionally filtered to a single model. limit<=0 returns all retained events.
-func (t *Tracker) RecentRequests(model string, limit int) []RequestEvent {
+// RecentRequests returns a page of recent events matching f, newest first:
+// it skips the first offset matches and returns up to limit of the rest
+// (limit<=0 returns all remaining). The second return value is the total number
+// of matches (for pagination UIs), independent of offset/limit.
+func (t *Tracker) RecentRequests(f RequestFilter, offset, limit int) ([]RequestEvent, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]RequestEvent, 0, len(t.recent))
+	out := make([]RequestEvent, 0, limit)
+	total := 0
 	for i := len(t.recent) - 1; i >= 0; i-- {
 		e := t.recent[i]
-		if model != "" && e.Model != model {
+		if !f.match(e) {
 			continue
 		}
-		out = append(out, e)
-		if limit > 0 && len(out) >= limit {
-			break
+		total++
+		if total <= offset {
+			continue
 		}
+		if limit > 0 && len(out) >= limit {
+			continue // keep counting total, stop collecting
+		}
+		out = append(out, e)
 	}
-	return out
+	return out, total
 }

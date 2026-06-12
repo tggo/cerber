@@ -373,18 +373,29 @@ func (s *Server) handleRequestsLog(w http.ResponseWriter, r *http.Request) {
 	if !s.adminAuthorized(w, r) {
 		return
 	}
+	q := r.URL.Query()
 	limit := 200
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			limit = n
-		}
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+		limit = n
 	}
-	events := s.usage.RecentRequests(r.URL.Query().Get("model"), limit)
+	offset := 0
+	if n, err := strconv.Atoi(q.Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
+	filter := usage.RequestFilter{
+		Model:      q.Get("model"),
+		Provider:   q.Get("provider"),
+		Credential: q.Get("credential"),
+		Client:     q.Get("client"),
+	}
+	events, total := s.usage.RecentRequests(filter, offset, limit)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"requests":   events,
 		"count":      len(events),
+		"total":      total, // total matching the filter (for pagination)
+		"offset":     offset,
 		"total_cost": s.usage.Snapshot().TotalCost,
 	})
 }
@@ -963,7 +974,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	p(`<table><tr><th>Method &amp; path</th><th>What it does</th></tr>`)
 	for _, e := range []ep{
 		{"GET", "/admin/stats", "", "Usage snapshot (JSON): totals, per-credential, per-model, hourly series, total cost."},
-		{"GET", "/admin/requests", "", "Recent per-request log (newest first): time, client, IP, User-Agent, model, account, tokens, cost. ?model= and ?limit= filters."},
+		{"GET", "/admin/requests", "", "Recent per-request log (newest first): time, client, IP, User-Agent, provider, model, account, tokens, cost. Filters: ?model= ?provider= ?credential= ?client=; paginate with ?limit= &amp; ?offset= (returns total)."},
 		{"GET", "/admin/usage.csv", "", "Usage export (CSV)."},
 		{"GET", "/admin/accounts", "", "Pooled credentials: state, health, usage."},
 		{"GET", "/admin/providers", "", "Provider health + discovered models."},
@@ -1940,7 +1951,7 @@ func (s *Server) record(ctx context.Context, e usage.Event) {
 	m := reqMetaFrom(ctx)
 	s.usage.RecordRequest(usage.RequestEvent{
 		Time: s.now(), IP: m.ip, UserAgent: m.ua, Client: m.client, Endpoint: m.endpoint,
-		Model: e.Model, Credential: e.Credential,
+		Provider: s.route(e.Model), Model: e.Model, Credential: e.Credential,
 		InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, Cost: cost, Error: e.IsError,
 	})
 }

@@ -69,10 +69,6 @@
 <main>
   <div class="cards" id="cards"></div>
   <section><h2>requests / hour (last 48h)</h2><div id="chart" class="chart"></div></section>
-  <section>
-    <h2>recent requests <span class="muted" style="font-weight:400">— who called what</span></h2>
-    <table id="requests"></table>
-  </section>
   <section><h2>providers</h2><table id="providers"></table></section>
   <section><h2>accounts (credentials)</h2><table id="accounts"></table></section>
   <section>
@@ -86,6 +82,21 @@
   </section>
   <section><h2>by credential</h2><table id="byCred"></table></section>
   <section><h2>by model</h2><table id="byModel"></table></section>
+  <section id="reqSection">
+    <h2>recent requests <span class="muted" style="font-weight:400">— who called what</span></h2>
+    <div class="keybar">
+      <select id="fModel"><option value="">all models</option></select>
+      <select id="fProvider"><option value="">all providers</option></select>
+      <select id="fCred"><option value="">all accounts</option></select>
+      <button id="reqReset" class="muted">reset</button>
+      <span class="grow"></span>
+      <span id="reqInfo" class="muted"></span>
+    </div>
+    <table id="requests"></table>
+    <div style="text-align:center;margin-top:10px">
+      <button id="reqMore">load more</button>
+    </div>
+  </section>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
@@ -135,11 +146,12 @@
       const head = ["name","requests","errors","input","output","last"];
       rows($("byCred"), d.by_credential || [], head);
       rows($("byModel"), d.by_model || [], head);
+      setOpts($("fModel"), (d.by_model || []).map(m => m.name));
       renderChart(d.series || []);
       loadProviders();
       loadAccounts();
       loadKeys();
-      loadRequests();
+      refreshRequests();
       $("status").innerHTML = `<span class="ok" style="color:var(--ok)">●</span> updated ${new Date().toLocaleTimeString()}`;
     } catch (e) {
       $("status").innerHTML = `<span class="err">${e}</span>`;
@@ -173,31 +185,77 @@
       + `</svg>`;
   }
 
-  async function loadRequests() {
+  // Recent-requests log: default last 10, endless "load more", filter by
+  // model/provider/account. Auto-refresh only disturbs the list while the user is
+  // at the top (page 1, no filter) so browsing/pagination isn't reset.
+  const REQ_PAGE = 10;
+  let reqRows = [], reqOffset = 0, reqTotal = 0;
+  let reqFilters = { model: "", provider: "", credential: "" };
+  const reqFilterActive = () => reqFilters.model || reqFilters.provider || reqFilters.credential;
+
+  function refreshRequests() {
+    if (reqOffset > REQ_PAGE || reqFilterActive()) return; // user is browsing
+    loadRequests(true);
+  }
+
+  function setOpts(sel, values) {
+    const cur = sel.value, allText = sel.options[0] ? sel.options[0].textContent : "all";
+    const opts = [...new Set(values)].filter(Boolean).sort();
+    sel.innerHTML = `<option value="">${esc(allText)}</option>` +
+      opts.map(v => `<option${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("");
+  }
+
+  async function loadRequests(reset) {
+    if (reset) { reqOffset = 0; reqRows = []; }
+    const qs = new URLSearchParams({ limit: REQ_PAGE, offset: reqOffset });
+    if (reqFilters.model) qs.set("model", reqFilters.model);
+    if (reqFilters.provider) qs.set("provider", reqFilters.provider);
+    if (reqFilters.credential) qs.set("credential", reqFilters.credential);
     try {
-      const r = await fetch("/admin/requests?limit=100", { headers: authHeaders() });
+      const r = await fetch("/admin/requests?" + qs, { headers: authHeaders() });
       if (!r.ok) { $("requests").innerHTML = `<tr><td class="muted">requests: HTTP ${r.status}</td></tr>`; return; }
       const d = await r.json();
-      const head = "<tr><th>when</th><th>client</th><th>ip</th><th>user-agent</th><th>model</th><th>account</th><th>in</th><th>out</th><th>cost</th></tr>";
-      const body = (d.requests || []).map(e => {
-        const t = e.time ? ago(Date.parse(e.time)/1000) : "—";
-        const ua = (e.user_agent || "").slice(0, 48);
-        const mdl = e.error ? `<span class="err" title="errored">${esc(e.model||"—")}</span>` : esc(e.model||"—");
-        return `<tr>
-          <td class="muted" title="${esc(e.time||"")}">${t}</td>
-          <td>${esc(e.client||"—")}</td>
-          <td class="muted">${esc(e.ip||"—")}</td>
-          <td class="muted" title="${esc(e.user_agent||"")}">${esc(ua)}</td>
-          <td>${mdl}</td>
-          <td class="muted">${esc(e.credential||"—")}</td>
-          <td>${fmt(e.input_tokens)}</td>
-          <td>${fmt(e.output_tokens)}</td>
-          <td class="muted">${e.cost ? "$"+e.cost.toFixed(4) : "—"}</td>
-        </tr>`;
-      }).join("");
-      $("requests").innerHTML = head + (body || `<tr><td colspan="9" class="muted">no requests yet</td></tr>`);
+      reqTotal = d.total || 0;
+      reqRows = reqRows.concat(d.requests || []);
+      reqOffset = reqRows.length;
+      renderRequests();
     } catch (e) { $("requests").innerHTML = `<tr><td class="err">${esc(e)}</td></tr>`; }
   }
+
+  function renderRequests() {
+    const head = "<tr><th>when</th><th>client</th><th>ip</th><th>user-agent</th><th>provider</th><th>model</th><th>account</th><th>in</th><th>out</th><th>cost</th></tr>";
+    const body = reqRows.map(e => {
+      const t = e.time ? ago(Date.parse(e.time)/1000) : "—";
+      const ua = (e.user_agent || "").slice(0, 48);
+      const mdl = e.error ? `<span class="err" title="errored">${esc(e.model||"—")}</span>` : esc(e.model||"—");
+      return `<tr>
+        <td class="muted" title="${esc(e.time||"")}">${t}</td>
+        <td>${esc(e.client||"—")}</td>
+        <td class="muted">${esc(e.ip||"—")}</td>
+        <td class="muted" title="${esc(e.user_agent||"")}">${esc(ua)}</td>
+        <td class="muted">${esc(e.provider||"—")}</td>
+        <td>${mdl}</td>
+        <td class="muted">${esc(e.credential||"—")}</td>
+        <td>${fmt(e.input_tokens)}</td>
+        <td>${fmt(e.output_tokens)}</td>
+        <td class="muted">${e.cost ? "$"+e.cost.toFixed(4) : "—"}</td>
+      </tr>`;
+    }).join("");
+    $("requests").innerHTML = head + (body || `<tr><td colspan="10" class="muted">no requests yet</td></tr>`);
+    $("reqInfo").textContent = reqTotal ? `showing ${reqRows.length} of ${reqTotal}` : "";
+    $("reqMore").style.display = reqRows.length < reqTotal ? "" : "none";
+  }
+
+  ["fModel", "fProvider", "fCred"].forEach(id => $(id).addEventListener("change", () => {
+    reqFilters = { model: $("fModel").value, provider: $("fProvider").value, credential: $("fCred").value };
+    loadRequests(true);
+  }));
+  $("reqReset").addEventListener("click", () => {
+    $("fModel").value = ""; $("fProvider").value = ""; $("fCred").value = "";
+    reqFilters = { model: "", provider: "", credential: "" };
+    loadRequests(true);
+  });
+  $("reqMore").addEventListener("click", () => loadRequests(false));
 
   async function loadAccounts() {
     try {
@@ -219,6 +277,8 @@
         return `<tr><td class="muted">${a.provider||"—"}</td><td>${chat}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
       }).join("");
       $("accounts").innerHTML = head + (body || `<tr><td colspan="9" class="muted">no accounts</td></tr>`);
+      setOpts($("fProvider"), (d.accounts || []).map(a => a.provider));
+      setOpts($("fCred"), (d.accounts || []).map(a => a.name));
       $("accounts").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
         await fetch(`/admin/accounts/${encodeURIComponent(b.dataset.n)}/${b.dataset.act}`,
           { method: "POST", headers: authHeaders() });
