@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cerber · Trust-First AI Gateway — Architecture Dossier</title>
+<meta name="description" content="cerber — a from-scratch, trust-first AI gateway in one Go binary. Speaks OpenAI and Anthropic dialects, pools your own provider accounts, and never lets a credential leave the box.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,400..700&family=Newsreader:ital,opsz,wght@0,6..72,300..600;1,6..72,400..500&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#081320;            /* deepest prussian */
+    --ink-2:#0b1a2b;          /* panel */
+    --ink-3:#0f2236;          /* raised panel */
+    --line:#1d3a55;           /* blueprint hairline */
+    --line-2:#2a4f70;
+    --paper:#dbe7f2;          /* primary text */
+    --paper-dim:#92acc4;      /* secondary text */
+    --paper-faint:#5d7894;    /* tertiary */
+    --cyan:#69d2e7;           /* SYSTEM accent (structure, lines) */
+    --cyan-deep:#3fa3bd;
+    --coral:#ff9a6b;          /* UPSTREAM / external accent */
+    --coral-deep:#e87a4a;
+    --gold:#f2c879;           /* CREDENTIALS / cost / warning */
+    --violet:#b39ddb;         /* governance accent */
+    --green:#8fd6a0;          /* OK / pro */
+    --red:#f08a8a;            /* con */
+    --radius:3px;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background-color:var(--ink);
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size:38px 38px;
+    background-position:-1px -1px;
+    color:var(--paper);
+    font-family:"Newsreader", Georgia, serif;
+    font-size:18px;
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+    background:radial-gradient(ellipse 120% 80% at 50% -10%, rgba(105,210,231,.10), transparent 60%),
+               radial-gradient(ellipse 90% 70% at 90% 110%, rgba(255,154,107,.07), transparent 55%);
+  }
+  .wrap{position:relative;z-index:1;max-width:1180px;margin:0 auto;padding:0 28px 140px;}
+
+  .mono{font-family:"JetBrains Mono",monospace;}
+  .tag{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--cyan);font-weight:500;}
+  .tag.coral{color:var(--coral);}.tag.gold{color:var(--gold);}.tag.violet{color:var(--violet);}
+
+  header.hero{padding:96px 0 54px;border-bottom:1px solid var(--line-2);margin-bottom:10px;position:relative;}
+  .hero .corner{position:absolute;top:30px;right:0;text-align:right;
+    font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.1em;color:var(--paper-faint);line-height:1.9;}
+  .hero .corner b{color:var(--cyan);font-weight:500;}
+  .hero .corner a{color:var(--cyan);text-decoration:none;}
+  .hero .kicker{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.42em;
+    text-transform:uppercase;color:var(--coral);margin-bottom:26px;}
+  h1{font-family:"Fraunces",serif;font-weight:300;font-size:clamp(46px,8vw,104px);
+    line-height:.94;margin:0 0 8px;letter-spacing:-.02em;color:#fff;}
+  h1 em{font-style:italic;color:var(--cyan);font-weight:400;}
+  .hero .sub{font-family:"Newsreader",serif;font-style:italic;font-size:clamp(20px,2.6vw,29px);
+    color:var(--paper-dim);max-width:46ch;margin:22px 0 0;font-weight:300;line-height:1.4;}
+  .hero .meta{margin-top:40px;display:flex;flex-wrap:wrap;gap:10px 30px;
+    font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--paper-faint);}
+  .hero .meta b{color:var(--paper);font-weight:500;}
+
+  .layout{display:grid;grid-template-columns:212px 1fr;gap:60px;margin-top:60px;}
+  nav.toc{position:sticky;top:30px;align-self:start;max-height:calc(100vh - 60px);overflow:auto;}
+  nav.toc .toc-h{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--paper-faint);margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--line);}
+  nav.toc a{display:block;font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--paper-dim);
+    text-decoration:none;padding:5px 0 5px 18px;border-left:2px solid var(--line);line-height:1.35;transition:.18s;}
+  nav.toc a:hover{color:var(--cyan);border-left-color:var(--cyan);padding-left:22px;}
+  nav.toc a .n{color:var(--paper-faint);margin-right:8px;}
+  main{min-width:0;}
+
+  section{margin:0 0 86px;scroll-margin-top:28px;}
+  .sec-head{display:flex;align-items:baseline;gap:18px;margin-bottom:8px;border-bottom:1px solid var(--line-2);padding-bottom:18px;}
+  .sec-head .num{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--cyan);font-weight:700;}
+  h2{font-family:"Fraunces",serif;font-weight:400;font-size:clamp(30px,4.4vw,46px);line-height:1.02;margin:0;letter-spacing:-.015em;color:#fff;}
+  h3{font-family:"Fraunces",serif;font-weight:500;font-size:25px;color:var(--cyan);margin:46px 0 4px;letter-spacing:-.01em;}
+  h4{font-family:"JetBrains Mono",monospace;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--coral);margin:34px 0 12px;font-weight:500;}
+  p{margin:14px 0;color:var(--paper);}
+  .lead{font-size:21px;line-height:1.55;color:var(--paper-dim);font-style:italic;font-weight:300;max-width:64ch;}
+  strong{color:#fff;font-weight:600;}
+  em.term{font-style:normal;font-family:"JetBrains Mono",monospace;font-size:.86em;color:var(--cyan);
+    background:rgba(105,210,231,.08);padding:1px 6px;border-radius:3px;border:1px solid rgba(105,210,231,.2);}
+  a.ref{color:var(--coral);text-decoration:none;border-bottom:1px dotted var(--coral-deep);}
+  code{font-family:"JetBrains Mono",monospace;font-size:.82em;color:var(--gold);
+    background:rgba(242,200,121,.08);padding:1px 5px;border-radius:3px;}
+
+  .callout{border:1px solid var(--line-2);border-left:3px solid var(--cyan);background:rgba(15,34,54,.55);
+    padding:18px 22px;border-radius:var(--radius);margin:24px 0;}
+  .callout.coral{border-left-color:var(--coral);}.callout.gold{border-left-color:var(--gold);}.callout.violet{border-left-color:var(--violet);}
+  .callout .lbl{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--cyan);margin-bottom:6px;font-weight:500;}
+  .callout.coral .lbl{color:var(--coral);}.callout.gold .lbl{color:var(--gold);}.callout.violet .lbl{color:var(--violet);}
+  .callout p{margin:6px 0;font-size:16.5px;}
+
+  .grid{display:grid;gap:16px;margin:24px 0;}
+  .grid.c2{grid-template-columns:1fr 1fr;}.grid.c3{grid-template-columns:repeat(3,1fr);}
+  .card{border:1px solid var(--line-2);background:linear-gradient(160deg,var(--ink-3),var(--ink-2));
+    border-radius:var(--radius);padding:20px 22px;position:relative;overflow:hidden;}
+  .card::before{content:"";position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,var(--cyan),transparent);opacity:.5;}
+  .card.coral::before{background:linear-gradient(90deg,var(--coral),transparent);}
+  .card.violet::before{background:linear-gradient(90deg,var(--violet),transparent);}
+  .card.gold::before{background:linear-gradient(90deg,var(--gold),transparent);}
+  .card h5{font-family:"Fraunces",serif;font-weight:600;font-size:19px;margin:0 0 6px;color:#fff;}
+  .card .k{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--cyan);letter-spacing:.08em;margin-bottom:10px;}
+  .card.coral .k{color:var(--coral);}.card.violet .k{color:var(--violet);}.card.gold .k{color:var(--gold);}
+  .card p{font-size:15px;margin:6px 0;color:var(--paper-dim);}
+  .card ul{margin:8px 0 0;padding-left:18px;}
+  .card li{font-size:14.5px;color:var(--paper-dim);margin:4px 0;}
+
+  .tbl-wrap{overflow-x:auto;margin:22px 0;border:1px solid var(--line-2);border-radius:var(--radius);}
+  table{width:100%;border-collapse:collapse;font-size:15px;min-width:560px;}
+  th{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    text-align:left;color:var(--cyan);padding:13px 16px;border-bottom:1px solid var(--line-2);background:rgba(15,34,54,.6);font-weight:500;}
+  td{padding:12px 16px;border-bottom:1px solid var(--line);color:var(--paper-dim);vertical-align:top;}
+  td:first-child{color:var(--paper);}
+  tr:last-child td{border-bottom:none;}
+  tr:hover td{background:rgba(105,210,231,.03);}
+  td code{white-space:nowrap;}
+
+  dl.fields{margin:18px 0;display:grid;grid-template-columns:auto 1fr;gap:0;border:1px solid var(--line-2);border-radius:var(--radius);overflow:hidden;}
+  dl.fields dt{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--gold);padding:9px 16px;border-bottom:1px solid var(--line);background:rgba(15,34,54,.4);white-space:nowrap;}
+  dl.fields dd{margin:0;padding:9px 18px;border-bottom:1px solid var(--line);color:var(--paper-dim);font-size:15px;}
+  dl.fields dt:last-of-type,dl.fields dd:last-of-type{border-bottom:none;}
+
+  .pc{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:22px 0;}
+  .pc .col{border:1px solid var(--line-2);border-radius:var(--radius);padding:6px 22px 18px;}
+  .pc .col.pro{border-top:2px solid var(--green);}.pc .col.con{border-top:2px solid var(--red);}
+  .pc h5{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;}
+  .pc .pro h5{color:var(--green);}.pc .con h5{color:var(--red);}
+  .pc ul{margin:0;padding-left:18px;}
+  .pc li{margin:9px 0;font-size:15.5px;color:var(--paper-dim);}
+  .pc li b{color:var(--paper);}
+
+  .diagram{border:1px solid var(--line-2);border-radius:var(--radius);background:
+    repeating-linear-gradient(0deg,transparent,transparent 23px,rgba(29,58,85,.4) 23px,rgba(29,58,85,.4) 24px),var(--ink-2);
+    padding:30px 26px;margin:26px 0;overflow-x:auto;}
+  .diagram svg{display:block;margin:0 auto;max-width:100%;height:auto;}
+  .diagram .cap{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--paper-faint);letter-spacing:.1em;text-transform:uppercase;margin-bottom:18px;text-align:center;}
+  svg text{font-family:"JetBrains Mono",monospace;}
+
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:24px 0;}
+  ol.steps li{position:relative;padding:0 0 22px 56px;border-left:1px solid var(--line-2);margin-left:18px;}
+  ol.steps li::before{counter-increment:s;content:counter(s);position:absolute;left:-18px;top:-2px;
+    width:36px;height:36px;border-radius:50%;background:var(--ink-3);border:1px solid var(--cyan);color:var(--cyan);
+    font-family:"JetBrains Mono",monospace;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+  ol.steps li:last-child{border-left:1px solid transparent;}
+  ol.steps li b{color:#fff;font-family:"Fraunces",serif;font-weight:600;font-size:18px;}
+  ol.steps li p{margin:6px 0 0;font-size:15.5px;color:var(--paper-dim);}
+  ol.steps li .who{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--coral);margin-left:10px;}
+
+  hr.div{border:none;border-top:1px solid var(--line);margin:40px 0;}
+  .small{font-size:14px;color:var(--paper-faint);}
+  ul.clean{list-style:none;padding:0;}
+  ul.clean li{padding:8px 0 8px 26px;position:relative;border-bottom:1px solid var(--line);font-size:16px;color:var(--paper-dim);}
+  ul.clean li::before{content:"▸";position:absolute;left:2px;color:var(--cyan);}
+  ul.clean li b{color:var(--paper);}
+
+  footer{margin-top:80px;padding-top:30px;border-top:1px solid var(--line-2);
+    font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--paper-faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px;}
+  footer a{color:var(--cyan);text-decoration:none;}
+
+  @media(max-width:920px){
+    .layout{grid-template-columns:1fr;}
+    nav.toc{display:none;}
+    .grid.c2,.grid.c3,.pc{grid-template-columns:1fr;}
+    dl.fields{grid-template-columns:1fr;}
+    dl.fields dt{border-bottom:none;padding-bottom:0;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="corner">
+      REPO&nbsp;<b><a href="https://github.com/tggo/cerber">github.com/tggo/cerber</a></b><br>
+      REV&nbsp;<b>2026-06-13</b><br>
+      LICENSE&nbsp;<b>MIT</b>
+    </div>
+    <div class="kicker">cerber · gateway dossier</div>
+    <h1>The Trust-First<br><em>Gateway</em></h1>
+    <p class="sub">One Go binary in front of every AI provider — it speaks OpenAI <em>and</em> Anthropic, pools your own subscription accounts, and never lets a credential leave the box except as the auth header to the provider that owns it.</p>
+    <div class="meta">
+      <span>STACK&nbsp; <b>Go 1.25 · single static binary</b></span>
+      <span>DIALECTS&nbsp; <b>OpenAI · Anthropic (+Gemini)</b></span>
+      <span>PROVIDERS&nbsp; <b>Claude · OpenAI · Gemini · Grok · local</b></span>
+      <span>DEPLOY&nbsp; <b>Docker · Caddy blue-green</b></span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc">
+      <div class="toc-h">Contents</div>
+      <a href="#idea"><span class="n">00</span>Core idea</a>
+      <a href="#map"><span class="n">01</span>System map</a>
+      <a href="#lifecycle"><span class="n">02</span>Request lifecycle</a>
+      <a href="#pool"><span class="n">03</span>Credential pool</a>
+      <a href="#routing"><span class="n">04</span>Routing &amp; fallback</a>
+      <a href="#dialects"><span class="n">05</span>Dialect translation</a>
+      <a href="#endpoints"><span class="n">06</span>Endpoints</a>
+      <a href="#governance"><span class="n">07</span>Governance</a>
+      <a href="#observability"><span class="n">08</span>Observability &amp; cost</a>
+      <a href="#trust"><span class="n">09</span>Trust principles</a>
+      <a href="#deploy"><span class="n">10</span>Deployment</a>
+      <a href="#tradeoffs"><span class="n">11</span>Trade-offs</a>
+      <a href="#glossary"><span class="n">12</span>Glossary</a>
+    </nav>
+
+    <main>
+
+    <!-- 00 CORE IDEA -->
+    <section id="idea">
+      <div class="sec-head"><span class="num">00</span><h2>The core idea</h2></div>
+      <p class="lead">A team or a household accumulates many AI accounts — Claude Code subscriptions, a SuperGrok login, raw API keys, a local Ollama. cerber turns that pile into <em>one endpoint with one key</em>, routed and load-balanced — without ever handing those credentials to anyone else's server.</p>
+
+      <p>cerber is a <strong>from-scratch</strong> reimplementation that merges three upstream projects into a single binary: a multi-provider proxy (translation + OAuth logins + multi-account rotation), a per-account usage/quota tracker, and a web management UI. The upstreams are read as <em>spec, not source</em> — the credential store is the most security-critical package and is wholly ours, reviewed line by line.</p>
+
+      <div class="grid c2">
+        <div class="card">
+          <div class="k">CONCERN 01 — routing</div>
+          <h5>One key in, the right provider out</h5>
+          <p>A request names a <code>model</code>; cerber routes by name (prefix, alias, or live discovery) to the provider that serves it, translating dialects on the way.</p>
+        </div>
+        <div class="card coral">
+          <div class="k">CONCERN 02 — resilience</div>
+          <h5>Many accounts, one healthy pool</h5>
+          <p>Credentials rotate round-robin or fill-first; a failing account is sidelined with exponential backoff; OAuth tokens refresh themselves. A request fails over to the next account — or the next model.</p>
+        </div>
+        <div class="card violet">
+          <div class="k">CONCERN 03 — governance</div>
+          <h5>Per-key budgets &amp; limits</h5>
+          <p>Each managed key can carry a rolling cost budget and request/token rate limits. Over budget → <code>402</code>; over rate → <code>429</code>.</p>
+        </div>
+        <div class="card gold">
+          <div class="k">CONCERN 04 — the line</div>
+          <h5>Trust, not telemetry</h5>
+          <p>The only outbound calls cerber makes are to the provider a request is routed to. No phone-home, no analytics, no remote code or asset fetch — ever.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <div class="lbl">Why this exists</div>
+        <p>The whole point is that we do <strong>not</strong> trust upstream gateways with our OAuth tokens and API keys. So cerber is written from scratch, vendors no upstream packages, and treats the credential store as the trust boundary. If you can read the code, you can verify your keys never go anywhere they shouldn't.</p>
+      </div>
+    </section>
+
+    <!-- 01 SYSTEM MAP -->
+    <section id="map">
+      <div class="sec-head"><span class="num">01</span><h2>System map</h2></div>
+      <p>Built in <strong>vertical slices</strong> — one provider end-to-end before the next. Every request descends the same stack; the credential pool and the upstream providers are the only places secrets and network egress live.</p>
+
+      <div class="diagram">
+        <div class="cap">Fig.1 — layers &amp; the single egress seam</div>
+        <svg viewBox="0 0 940 540" role="img" aria-label="System map">
+          <defs>
+            <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#69d2e7"/></marker>
+            <marker id="arC" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#ff9a6b"/></marker>
+          </defs>
+          <rect x="30" y="20" width="880" height="70" rx="4" fill="#0f2236" stroke="#2a4f70"/>
+          <text x="48" y="46" fill="#69d2e7" font-size="12" letter-spacing="2">SURFACE — HTTP API</text>
+          <text x="48" y="68" fill="#92acc4" font-size="12">/v1/chat/completions · /v1/messages · /v1/embeddings|completions|responses · /v1/models · /dashboard · /docs · /admin · /metrics</text>
+
+          <rect x="30" y="112" width="880" height="58" rx="4" fill="#0b1a2b" stroke="#1d3a55"/>
+          <text x="48" y="138" fill="#b39ddb" font-size="12" letter-spacing="2">ACCESS &amp; GOVERNANCE</text>
+          <text x="48" y="158" fill="#92acc4" font-size="12">client-key check (constant-time) · per-key budget/rate gate (402/429) · management key for /admin</text>
+
+          <rect x="30" y="192" width="880" height="58" rx="4" fill="#0f2236" stroke="#2a4f70"/>
+          <text x="48" y="218" fill="#69d2e7" font-size="12" letter-spacing="2">ROUTER</text>
+          <text x="48" y="238" fill="#92acc4" font-size="12">model → provider (config prefix · alias · discovery) · fallback chains (retryable-only)</text>
+
+          <rect x="30" y="272" width="430" height="58" rx="4" fill="#0b1a2b" stroke="#1d3a55"/>
+          <text x="48" y="298" fill="#69d2e7" font-size="12" letter-spacing="2">TRANSLATOR</text>
+          <text x="48" y="318" fill="#92acc4" font-size="12">OpenAI ⇄ Anthropic ⇄ Gemini · SSE streaming</text>
+
+          <rect x="480" y="272" width="430" height="58" rx="4" fill="#0f2236" stroke="#f2c879"/>
+          <text x="498" y="298" fill="#f2c879" font-size="12" letter-spacing="2">CREDENTIAL POOL — trust-critical</text>
+          <text x="498" y="318" fill="#92acc4" font-size="12">rotate · cooldown/backoff · OAuth refresh · pin</text>
+
+          <rect x="30" y="352" width="880" height="64" rx="4" fill="#0f2236" stroke="#e87a4a"/>
+          <text x="48" y="378" fill="#ff9a6b" font-size="12" letter-spacing="2">UPSTREAM PROVIDERS — the only network egress</text>
+          <text x="48" y="400" fill="#92acc4" font-size="12">api.anthropic.com · api.openai.com · generativelanguage.googleapis.com · api.x.ai · local ollama / vLLM</text>
+
+          <rect x="30" y="446" width="880" height="64" rx="4" fill="#0b1a2b" stroke="#1d3a55"/>
+          <text x="48" y="472" fill="#69d2e7" font-size="12" letter-spacing="2">OBSERVABILITY — in-process, no egress</text>
+          <text x="48" y="494" fill="#92acc4" font-size="12">usage aggregates (persisted) · recent-request log (ring) · per-account quota · cost · Prometheus /metrics</text>
+
+          <line x1="470" y1="90" x2="470" y2="110" stroke="#69d2e7" stroke-width="1.5" marker-end="url(#ar)"/>
+          <line x1="470" y1="170" x2="470" y2="190" stroke="#69d2e7" stroke-width="1.5" marker-end="url(#ar)"/>
+          <line x1="470" y1="250" x2="470" y2="270" stroke="#69d2e7" stroke-width="1.5" marker-end="url(#ar)"/>
+          <line x1="695" y1="330" x2="695" y2="350" stroke="#ff9a6b" stroke-width="1.5" marker-end="url(#arC)"/>
+          <line x1="245" y1="330" x2="245" y2="350" stroke="#69d2e7" stroke-width="1.5" marker-end="url(#ar)"/>
+        </svg>
+      </div>
+
+      <p>Provider HTTP clients sit behind an interface, so unit tests never touch the network and the whole stack is exercised against generated mocks. The module holds a <strong>&gt;85% coverage gate</strong>; new packages ship with their tests in the same change.</p>
+    </section>
+
+    <!-- 02 LIFECYCLE -->
+    <section id="lifecycle">
+      <div class="sec-head"><span class="num">02</span><h2>One request, end to end</h2></div>
+      <p class="lead">Every model call walks the same path. Nothing is written to the client until a provider answers — which is what makes transparent fallback possible.</p>
+
+      <ol class="steps">
+        <li><b>Authorize<span class="who">access</span></b><p>Constant-time match of the presented key. A managed key then passes its governance gate — if its cost window is spent → <code>402</code>, if its rate window is full → <code>429</code>. The caller identity, IP and User-Agent are stashed on the context.</p></li>
+        <li><b>Resolve the model<span class="who">catalog</span></b><p>An alias (e.g. <code>opus</code>) is rewritten to its canonical name; the body is only touched when an alias actually applies.</p></li>
+        <li><b>Route<span class="who">router</span></b><p>The model picks a provider — configured prefix, then live-discovered names, then built-in prefixes (<code>gpt*→openai</code>, <code>claude*→anthropic</code>, …). An unknown model is rejected, never silently sent somewhere.</p></li>
+        <li><b>Translate<span class="who">translator</span></b><p>If dialects differ (OpenAI client → Claude), the request is converted; native <code>/v1/messages</code> is byte-faithful passthrough.</p></li>
+        <li><b>Dispatch<span class="who">credential pool</span></b><p>Pick a credential (rotate or fill-first); refresh an OAuth token if it's near expiry; send. On a credential failure (401/403/429) sideline it and try the next; on a 401 OAuth, force-refresh and retry once.</p></li>
+        <li><b>Relay<span class="who">server</span></b><p>Stream the SSE through (translating chunks where needed) or relay the JSON, faithfully forwarding the provider's rate-limit headers.</p></li>
+        <li><b>Record<span class="who">usage</span></b><p>One point logs the outcome: tokens (parsed from the stream too), computed cost, and a recent-request entry — who, from where, on which model.</p></li>
+      </ol>
+    </section>
+
+    <!-- 03 POOL -->
+    <section id="pool">
+      <div class="sec-head"><span class="num">03</span><h2>The credential pool</h2></div>
+      <p>The <em>most security-critical package</em>, and the reason cerber exists. A thread-safe store hands out credentials and quietly keeps a broken account from poisoning the rotation.</p>
+
+      <dl class="fields">
+        <dt>rotation</dt><dd><code>round-robin</code> (default) cycles every credential; <code>fill-first</code> drains one before moving on.</dd>
+        <dt>cooldown</dt><dd>a 401/403/429 or transport error sidelines the credential with <strong>exponential backoff</strong> — 60s → 120s → … capped at 30m — so a persistently broken (e.g. unpaid → 403) account is parked, not retried every minute.</dd>
+        <dt>recovery</dt><dd>a successful use clears the streak and cooldown immediately; <code>ErrNoneAvailable</code> only when every credential is cooling.</dd>
+        <dt>OAuth refresh</dt><dd>proactive near expiry and reactive on a 401, behind a <strong>singleflight</strong> so concurrent requests spend the rotating refresh token exactly once (Anthropic rotates it every refresh — clobbering it kills the account).</dd>
+        <dt>pinning</dt><dd>header <code>X-Cerber-Cred: oauth | key | &lt;name&gt;</code> forces which credential serves the request; omit to rotate.</dd>
+      </dl>
+
+      <div class="callout gold">
+        <div class="lbl">Secrets never stringify</div>
+        <p>Credentials are never present in <code>String()</code>, logs, or any API response — they're readable only through explicit accessors, and the redacted views (key <code>last4</code>, account name) are all the dashboard ever sees.</p>
+      </div>
+    </section>
+
+    <!-- 04 ROUTING -->
+    <section id="routing">
+      <div class="sec-head"><span class="num">04</span><h2>Routing, aliases &amp; fallback</h2></div>
+      <p>Set <code>model</code> and cerber finds the provider. Three independent mechanisms, in order:</p>
+      <ul class="clean">
+        <li><b>Config prefixes</b> — <code>providers.routing</code> maps a model-name prefix to a provider.</li>
+        <li><b>Live discovery</b> — providers are probed; whoever advertises the exact model (e.g. an Ollama tag) wins.</li>
+        <li><b>Built-in prefixes</b> — <code>gpt*/o1*/o3*/o4*/chatgpt*→openai</code>, <code>gemini*→gemini</code>, <code>grok*→xAI</code>, <code>claude*→anthropic</code>; anything else → <code>400</code>.</li>
+      </ul>
+
+      <h4>Aliases</h4>
+      <p>A stable client-facing name maps to whatever dated model is current — <code>opus → claude-opus-4-…</code> — resolved before routing and before the upstream call (exact match first, else the longest prefix). Stable names don't break when a provider rolls a new snapshot.</p>
+
+      <h4>Cross-provider fallback</h4>
+      <p>On <code>/v1/chat/completions</code>, a model that fails with a <strong>retryable</strong> error — provider <code>5xx</code>, or every account rate-limited/unavailable — is transparently retried against the next model in a chain, <em>before any bytes are sent</em>. A <code>4xx</code> client error is returned as-is; a started stream is never re-attempted.</p>
+      <div class="callout coral">
+        <div class="lbl">Declared two ways</div>
+        <p>Server-side chains in config (<code>providers.fallbacks</code>, matched by model prefix), or per-request via header <code>X-Cerber-Fallback: gpt-4o,gemini-2.0-flash</code>. Each target is a model routed like any other, so a fallback can cross providers. When every target fails, the last error is surfaced.</p>
+      </div>
+    </section>
+
+    <!-- 05 DIALECTS -->
+    <section id="dialects">
+      <div class="sec-head"><span class="num">05</span><h2>Two dialects, one gateway</h2></div>
+      <p class="lead">Point an OpenAI SDK <em>or</em> an Anthropic SDK at cerber and reach every model. Translation happens in a pure, network-free layer.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>You speak</th><th>Model lives on</th><th>What cerber does</th></tr></thead>
+        <tbody>
+          <tr><td>OpenAI <code>/v1/chat/completions</code></td><td>OpenAI / Grok / Ollama</td><td>passthrough with a rotated key</td></tr>
+          <tr><td>OpenAI <code>/v1/chat/completions</code></td><td>Claude</td><td>translate request → Anthropic, translate (streamed) response back to OpenAI</td></tr>
+          <tr><td>OpenAI <code>/v1/chat/completions</code></td><td>Gemini</td><td>translate OpenAI ⇄ Gemini both ways</td></tr>
+          <tr><td>Anthropic <code>/v1/messages</code></td><td>Claude</td><td>byte-faithful passthrough (streaming, headers, count_tokens)</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="small">Streamed token usage is parsed out of the SSE on both the native and the OpenAI-translated Claude paths, so cost and per-key budgets count streaming traffic, not just buffered replies.</p>
+    </section>
+
+    <!-- 06 ENDPOINTS -->
+    <section id="endpoints">
+      <div class="sec-head"><span class="num">06</span><h2>The surface</h2></div>
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Endpoint</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI-compatible chat for every provider incl. Claude — streaming + fallback</td></tr>
+          <tr><td><code>POST /v1/messages</code></td><td>native Anthropic Messages (transparent passthrough)</td></tr>
+          <tr><td><code>POST /v1/messages/count_tokens</code></td><td>Anthropic token counting via the pool</td></tr>
+          <tr><td><code>POST /v1/embeddings · /v1/completions · /v1/responses</code></td><td>OpenAI passthrough to the routed provider</td></tr>
+          <tr><td><code>POST /v1/images/generations</code></td><td>image generation (grok-imagine-* / gpt-image-*)</td></tr>
+          <tr><td><code>GET /v1/models</code></td><td>discovered model ids per provider</td></tr>
+          <tr><td><code>GET /llm.md · /docs</code></td><td>live, self-describing usage guide (agents) &amp; HTML reference</td></tr>
+          <tr><td><code>GET /admin/*</code></td><td>stats · recent requests · accounts · client-key &amp; limit management</td></tr>
+          <tr><td><code>GET /metrics</code></td><td>Prometheus: requests, errors, tokens, per-model cost</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="small">Every running instance serves its own live reference at <code>/docs</code> and an agent-oriented guide at <code>/llm.md</code> — reflecting that instance's providers, models, aliases and fallback chains.</p>
+    </section>
+
+    <!-- 07 GOVERNANCE -->
+    <section id="governance">
+      <div class="sec-head"><span class="num">07</span><h2>Governance</h2></div>
+      <p>Managed (dashboard-minted) keys can carry a rolling <strong>cost budget</strong> and <strong>rate limits</strong>. Static config keys and loopback callers are the operator's own and bypass governance.</p>
+
+      <div class="grid c3">
+        <div class="card violet">
+          <div class="k">budget</div>
+          <h5>Cost cap</h5>
+          <ul><li><code>max_cost_usd</code> over a period</li><li>minute · hour · day · week · month</li><li>over → <code>402</code></li></ul>
+        </div>
+        <div class="card violet">
+          <div class="k">rate</div>
+          <h5>Throughput cap</h5>
+          <ul><li><code>max_requests</code> / <code>max_tokens</code> per window</li><li>reserved on admit</li><li>over → <code>429</code></li></ul>
+        </div>
+        <div class="card">
+          <div class="k">lifecycle</div>
+          <h5>Self-resetting</h5>
+          <ul><li>rolling windows, persisted with the key</li><li>survives restart</li><li><code>default_key_limits</code> seeds new keys</li></ul>
+        </div>
+      </div>
+      <p class="small">Cost is computed from the configured per-model pricing; counters are flushed lazily by the periodic saver, not on every request. Limits are edited at runtime via <code>POST /admin/keys/{name}/limits</code>.</p>
+    </section>
+
+    <!-- 08 OBSERVABILITY -->
+    <section id="observability">
+      <div class="sec-head"><span class="num">08</span><h2>Observability &amp; cost</h2></div>
+      <p>Everything is measured in-process — no external collector, no data leaves the box.</p>
+
+      <div class="grid c2">
+        <div class="card">
+          <div class="k">aggregates · persisted</div>
+          <h5>Usage &amp; cost</h5>
+          <p>Per-credential and per-model requests / errors / tokens, hourly time-series (~30-day retention), and a cumulative <strong>total cost</strong> from configured pricing — survives restarts.</p>
+        </div>
+        <div class="card gold">
+          <div class="k">ring · in-memory</div>
+          <h5>Recent-request log</h5>
+          <p>Who called what: time, client, IP (honouring <code>X-Forwarded-For</code>), User-Agent, provider, model, account, tokens, cost. Filter by model/provider/account, paginate. Holds IPs → kept in memory only, never on disk.</p>
+        </div>
+        <div class="card coral">
+          <div class="k">passive</div>
+          <h5>Per-account quota</h5>
+          <p>5h / 7d utilization read straight from Anthropic's rate-limit headers, per pooled account.</p>
+        </div>
+        <div class="card">
+          <div class="k">scrape · embed</div>
+          <h5>Prometheus &amp; dashboard</h5>
+          <p><code>/metrics</code> exposes counts + <code>cerber_cost_usd_total</code>; the binary-embedded dashboard shows cards, an hourly chart, per-model cost, accounts, and the recent-request table.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 09 TRUST -->
+    <section id="trust">
+      <div class="sec-head"><span class="num">09</span><h2>Trust principles</h2></div>
+      <p class="lead">These are non-negotiable. They are the reason to run cerber instead of someone else's gateway.</p>
+
+      <div class="callout">
+        <div class="lbl">01 · From scratch</div>
+        <p>No upstream code is copied or vendored. The upstreams are read to understand protocol and behaviour, then reimplemented. The credential store is reviewed line by line.</p>
+      </div>
+      <div class="callout coral">
+        <div class="lbl">02 · No phone-home</div>
+        <p>cerber makes outbound calls to exactly one class of host: the legitimate provider APIs a request is being routed to. No telemetry, no analytics, no version pings, no auto-download of code or assets. A new outbound host is a red flag in review.</p>
+      </div>
+      <div class="callout gold">
+        <div class="lbl">03 · Credentials never leave the box</div>
+        <p>…except as the documented auth header to the provider that owns them. Nowhere else, in no other form.</p>
+      </div>
+      <div class="callout violet">
+        <div class="lbl">04 · Pinned, opt-in, never silent</div>
+        <p>No feature fetches and executes or persists remote content automatically. The upstream auto-updater and update-checks were deliberately dropped.</p>
+      </div>
+    </section>
+
+    <!-- 10 DEPLOY -->
+    <section id="deploy">
+      <div class="sec-head"><span class="num">10</span><h2>Deployment</h2></div>
+      <ul class="clean">
+        <li><b>Single static binary</b> — <code>CGO_ENABLED=0</code>, shipped in a distroless image. Config is YAML + <code>.env</code> + <code>${ENV}</code>; config is the single source of truth for which hosts cerber may talk to.</li>
+        <li><b>Zero-downtime blue-green</b> — two identical containers behind Caddy with active health checks; deploy starts the idle colour and stops the active one, Caddy follows the <code>/healthz</code> probe — no reload.</li>
+        <li><b>Edge allow-list</b> — Caddy fronts the public vhost: only the CDN edge + LAN/WG reach the origin; LAN gets a key injected for keyless local use, the public side presents its own.</li>
+        <li><b>TLS impersonation (opt-in)</b> — a generated CA lets a first-party Claude Code's console/bootstrap calls run on cerber's pooled credential, keeping cerber the sole token owner.</li>
+      </ul>
+    </section>
+
+    <!-- 11 TRADE-OFFS -->
+    <section id="tradeoffs">
+      <div class="sec-head"><span class="num">11</span><h2>Trade-offs of the design</h2></div>
+      <div class="pc">
+        <div class="col pro">
+          <h5>What it buys</h5>
+          <ul>
+            <li><b>Verifiable trust</b> — one small, from-scratch codebase; your keys provably go nowhere but the provider.</li>
+            <li><b>Account pooling</b> — many subscriptions/keys behave as one resilient endpoint with automatic failover.</li>
+            <li><b>Dialect freedom</b> — any OpenAI or Anthropic SDK reaches any model.</li>
+            <li><b>Attribution &amp; cost</b> — who-called-what and the running $ are visible without a third party.</li>
+          </ul>
+        </div>
+        <div class="col con">
+          <h5>What it costs</h5>
+          <ul>
+            <li><b>You run it</b> — no managed SaaS; you own the box, the deploy, and the keys.</li>
+            <li><b>Narrower surface</b> — focused on pooling personal/subscription accounts, not an enterprise feature catalogue.</li>
+            <li><b>Pricing upkeep</b> — cost depends on a per-model pricing table you maintain.</li>
+            <li><b>Translation gaps</b> — OpenAI→Anthropic tool-calling translation is still partial.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 12 GLOSSARY -->
+    <section id="glossary">
+      <div class="sec-head"><span class="num">12</span><h2>Glossary</h2></div>
+      <dl class="fields">
+        <dt>credential</dt><dd>one upstream account: an API key or an OAuth/subscription token, pooled per provider.</dd>
+        <dt>client key</dt><dd>a key a caller presents to cerber. Static (config) or managed (dashboard-minted, <code>cer_…</code>, can carry limits).</dd>
+        <dt>rotation</dt><dd>handing successive requests to different credentials (round-robin / fill-first).</dd>
+        <dt>cooldown</dt><dd>the backoff window a failing credential is sidelined for.</dd>
+        <dt>alias</dt><dd>a stable model name mapped to a provider's canonical (often dated) model id.</dd>
+        <dt>fallback chain</dt><dd>ordered models tried when the primary fails retryably (OpenAI endpoint).</dd>
+        <dt>governance</dt><dd>per-key budgets + rate limits enforced before a request runs.</dd>
+        <dt>recent-request log</dt><dd>in-memory ring of who/where/which-model/tokens/cost for the last N calls.</dd>
+      </dl>
+    </section>
+
+    <footer>
+      <span>cerber · trust-first AI gateway · MIT</span>
+      <span><a href="https://github.com/tggo/cerber">github.com/tggo/cerber</a></span>
+    </footer>
+
+    </main>
+  </div>
+</div>
+</body>
+</html>
