@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tggo/cerber/internal/credential"
@@ -41,6 +43,13 @@ type Provider struct {
 	http     provider.HTTPDoer
 	cooldown time.Duration
 
+	// sem serialises in-flight chat/forward/image requests to respect an
+	// upstream concurrency cap (e.g. ArliAI plans allow N concurrent streams).
+	// nil = unlimited. A slot is held for the whole request — including the time
+	// the client streams the response body — and released when the body is
+	// closed, so queued requests wait until a connection frees.
+	sem chan struct{}
+
 	// Optional OAuth refresh (e.g. xAI/Grok subscription tokens). nil = api-key
 	// only. refreshSkew refreshes this long before expiry.
 	refresh     func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error)
@@ -49,16 +58,101 @@ type Provider struct {
 	now         func() time.Time
 }
 
+// Option configures a Provider at construction.
+type Option func(*Provider)
+
+// WithConcurrency caps the number of in-flight requests this provider sends
+// upstream at once (e.g. an ArliAI plan that allows n concurrent streams).
+// n <= 0 leaves it unlimited. Requests beyond the cap queue and wait for an
+// in-flight one to finish (its response body to be closed).
+func WithConcurrency(n int) Option {
+	return func(p *Provider) {
+		if n > 0 {
+			p.sem = make(chan struct{}, n)
+		}
+	}
+}
+
 // New builds a Provider with the given name (e.g. "openai", "grok") and base URL
 // (e.g. https://api.openai.com, https://api.x.ai).
-func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer) *Provider {
-	return &Provider{
+func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer, opts ...Option) *Provider {
+	p := &Provider{
 		name:     name,
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		store:    store,
 		http:     doer,
 		cooldown: defaultCooldown,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// acquire takes a concurrency slot, blocking (respecting ctx cancellation) until
+// one is free. A no-op when concurrency is unlimited. On success the caller must
+// eventually call release exactly once.
+func (p *Provider) acquire(ctx context.Context) error {
+	if p.sem == nil {
+		return nil
+	}
+	select {
+	case p.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// release frees a concurrency slot taken by acquire.
+func (p *Provider) release() {
+	if p.sem == nil {
+		return
+	}
+	<-p.sem
+}
+
+// gateBody wraps rc so closing it releases the concurrency slot exactly once.
+// When concurrency is unlimited it returns rc unchanged.
+func (p *Provider) gateBody(rc io.ReadCloser) io.ReadCloser {
+	if p.sem == nil {
+		return rc
+	}
+	return &gatedBody{ReadCloser: rc, release: p.release}
+}
+
+// gatedRotate acquires a concurrency slot, rotates across credentials, and (on
+// success) returns a Response whose Body releases the slot when closed. On
+// failure the slot is released immediately. Callers MUST close the returned
+// Body — every server handler does (defer resp.Body.Close()).
+func (p *Provider) gatedRotate(ctx context.Context, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*provider.Response, error) {
+	if err := p.acquire(ctx); err != nil {
+		return nil, err
+	}
+	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, send)
+	if err != nil {
+		p.release()
+		return nil, err
+	}
+	return &provider.Response{
+		Status:     resp.StatusCode,
+		Header:     resp.Header,
+		Body:       p.gateBody(resp.Body),
+		Credential: credName,
+	}, nil
+}
+
+// gatedBody releases a concurrency slot when the underlying body is closed.
+type gatedBody struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (g *gatedBody) Close() error {
+	err := g.ReadCloser.Close()
+	g.once.Do(g.release)
+	return err
 }
 
 // Name identifies this provider.
@@ -108,7 +202,7 @@ func (p *Provider) BaseURL() string { return p.baseURL }
 // credentials) and returns the response unchanged. Non-streaming.
 func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
-	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, func(cred *credential.Credential) (*http.Response, error) {
+	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ImagesPath, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("openai: build image request: %w", err)
@@ -118,15 +212,6 @@ func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.He
 		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
 		return p.http.Do(req)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &provider.Response{
-		Status:     resp.StatusCode,
-		Header:     resp.Header,
-		Body:       resp.Body,
-		Credential: credName,
-	}, nil
 }
 
 // Forward passes an OpenAI-compatible request through to a fixed sub-path on the
@@ -135,7 +220,7 @@ func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.He
 // passes through for endpoints that support it.
 func (p *Provider) Forward(ctx context.Context, subpath string, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
-	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, func(cred *credential.Credential) (*http.Response, error) {
+	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+subpath, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("openai: build forward request: %w", err)
@@ -149,15 +234,6 @@ func (p *Provider) Forward(ctx context.Context, subpath string, body []byte, str
 		}
 		return p.http.Do(req)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &provider.Response{
-		Status:     resp.StatusCode,
-		Header:     resp.Header,
-		Body:       resp.Body,
-		Credential: credName,
-	}, nil
 }
 
 // ProbeCredential validates a single credential by calling GET /v1/models with
@@ -207,7 +283,7 @@ func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential
 // credentials, and returns the OpenAI-format response unchanged.
 func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
-	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, func(cred *credential.Credential) (*http.Response, error) {
+	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ChatPath, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("openai: build request: %w", err)
@@ -221,13 +297,4 @@ func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHea
 		}
 		return p.http.Do(req)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &provider.Response{
-		Status:     resp.StatusCode,
-		Header:     resp.Header,
-		Body:       resp.Body,
-		Credential: credName,
-	}, nil
 }

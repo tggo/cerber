@@ -227,9 +227,9 @@ func main() {
 		if err != nil {
 			logger.Fatal("arliai credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, &http.Client{Timeout: a.Timeout.Std()}))
+		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, &http.Client{Timeout: a.Timeout.Std()}, openai.WithConcurrency(a.Concurrency)))
 		srv.RegisterProviderStore("arliai", astore)
-		logger.Info("arliai provider enabled", zap.Int("credentials", astore.Len()))
+		logger.Info("arliai provider enabled", zap.Int("credentials", astore.Len()), zap.Int("concurrency", a.Concurrency))
 	}
 
 	// Grok = config API keys + xAI OAuth (Grok Build / SuperGrok subscription)

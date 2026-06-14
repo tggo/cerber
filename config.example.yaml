@@ -85,6 +85,7 @@ providers:
 
   # arliai: # arliai.com, OpenAI-compatible; models discovered via /v1/models and
   #   base_url: "https://api.arliai.com"   #   routed by name (e.g. Qwen3.5-27B-Derestricted)
+  #   concurrency: 1                       # plan's concurrent-stream cap (default 1); extra requests queue
   #   credentials:
   #     - { type: api_key, name: arliai, key: "${ARLIAI_API_KEY}" }
 

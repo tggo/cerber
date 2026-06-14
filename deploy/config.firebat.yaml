@@ -72,6 +72,7 @@ providers:
       - { type: api_key, name: grok, key: "${GROK_API_KEY}" }
 
   arliai:                                   # arliai.com (OpenAI-compatible); models via discovery (e.g. Qwen3.5-27B-Derestricted)
+    concurrency: 1                          # plan limit: 1 concurrent stream; raise to 6 after upgrade. Extra requests queue.
     credentials:
       - { type: api_key, name: arliai, key: "${ARLIAI_API_KEY}" }
 

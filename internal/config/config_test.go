@@ -214,6 +214,25 @@ func TestParse_ArliAIDefaults(t *testing.T) {
 	if c.Providers.ArliAI.BaseURL != defaultArliAIBase || c.Providers.ArliAI.Timeout.Std() != defaultProviderWaitNS {
 		t.Errorf("arliai defaults = %+v", c.Providers.ArliAI)
 	}
+	if c.Providers.ArliAI.Concurrency != defaultArliAIConcurrency {
+		t.Errorf("arliai concurrency default = %d, want %d", c.Providers.ArliAI.Concurrency, defaultArliAIConcurrency)
+	}
+}
+
+func TestParse_ArliAIConcurrency(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {arliai: {concurrency: 6, credentials: [{type: api_key, key: x}]}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.ArliAI.Concurrency != 6 {
+		t.Errorf("arliai concurrency = %d, want 6", c.Providers.ArliAI.Concurrency)
+	}
+
+	bad := "access: {keys: [k]}\nproviders: {arliai: {concurrency: -1, credentials: [{type: api_key, key: x}]}}"
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error for negative arliai concurrency")
+	}
 }
 
 func TestParse_ArliAINoCreds(t *testing.T) {

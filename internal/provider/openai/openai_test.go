@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -322,4 +323,120 @@ func TestChat_PinsCredentialByHeader(t *testing.T) {
 	if auth != "Bearer k2" {
 		t.Errorf("auth = %q, want Bearer k2 (pinned cred b)", auth)
 	}
+}
+
+// doerFunc adapts a function to provider.HTTPDoer for concurrency tests.
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestConcurrency_QueuesUntilBodyClosed verifies WithConcurrency(1) serialises
+// requests: a second request stays queued (its upstream Do is never invoked)
+// until the first releases its slot by closing the response body.
+func TestConcurrency_QueuesUntilBodyClosed(t *testing.T) {
+	var calls int32
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return resp(200, `{"ok":1}`), nil
+	})
+	p := New("arliai", "https://api.arliai.com", store(t, "k"), doer, WithConcurrency(1))
+	body := []byte(`{"model":"m","messages":[]}`)
+
+	// A takes the only slot and holds it (body not yet closed).
+	a, err := p.Chat(context.Background(), body, false, nil)
+	if err != nil {
+		t.Fatalf("A Chat: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("after A: Do calls = %d, want 1", got)
+	}
+
+	// B blocks in acquire because A holds the slot.
+	done := make(chan struct{})
+	go func() {
+		b, err := p.Chat(context.Background(), body, false, nil)
+		if err == nil {
+			b.Body.Close()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("B proceeded while A held the slot")
+	case <-time.After(50 * time.Millisecond):
+		// expected: B still queued
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("B's Do ran while queued: calls = %d", got)
+	}
+
+	// Releasing A's slot lets B proceed.
+	a.Body.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("B did not proceed after the slot freed")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("final Do calls = %d, want 2", got)
+	}
+}
+
+// TestConcurrency_QueuedCtxCancel verifies a request waiting for a slot bails
+// out when its context is canceled, without ever hitting the upstream.
+func TestConcurrency_QueuedCtxCancel(t *testing.T) {
+	var calls int32
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return resp(200, `{"ok":1}`), nil
+	})
+	p := New("arliai", "https://api.arliai.com", store(t, "k"), doer, WithConcurrency(1))
+	body := []byte(`{"model":"m","messages":[]}`)
+
+	a, err := p.Chat(context.Background(), body, false, nil)
+	if err != nil {
+		t.Fatalf("A Chat: %v", err)
+	}
+	defer a.Body.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.Chat(ctx, body, false, nil)
+		errc <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // let B reach acquire
+	cancel()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("B err = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("B did not return after ctx cancel")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("canceled B hit upstream: calls = %d", got)
+	}
+}
+
+// TestConcurrency_Unlimited confirms the default (no option) keeps requests
+// unserialised: two can be in flight with neither body closed.
+func TestConcurrency_Unlimited(t *testing.T) {
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		return resp(200, `{"ok":1}`), nil
+	})
+	p := New("openai", "https://api.openai.com", store(t, "k"), doer)
+	body := []byte(`{"model":"m","messages":[]}`)
+
+	a, err := p.Chat(context.Background(), body, false, nil)
+	if err != nil {
+		t.Fatalf("A: %v", err)
+	}
+	b, err := p.Chat(context.Background(), body, false, nil) // must not block
+	if err != nil {
+		t.Fatalf("B: %v", err)
+	}
+	a.Body.Close()
+	b.Body.Close()
 }

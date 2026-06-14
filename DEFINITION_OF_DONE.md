@@ -198,7 +198,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **DoD:**
 - `/v1/chat/completions` with an ArliAI model (e.g. `Qwen3.5-27B-Derestricted`) → forwarded to ArliAI (`https://api.arliai.com`, Bearer key, credential rotation), response relayed unchanged (ArliAI is OpenAI-compatible — reuses the OpenAI provider named "arliai").
 - `providers.arliai` config (base_url default `https://api.arliai.com`, api_key required); `arliai` valid in `routing`. Models are discovered via `GET /v1/models` and routed by name (no built-in prefix).
-**Verified:** reuses `internal/provider/openai` + config arliai tests (defaults/no-creds) — 2026-06-14.
+- `providers.arliai.concurrency` (default 1; must be >= 0, 0 → 1) caps simultaneous in-flight requests to ArliAI to match the plan's allowed concurrent streams. A slot is held for the whole request — including while the client streams the response body — and released when the body is closed; requests beyond the cap queue (FIFO-ish) and a queued request whose client disconnects drops out without hitting upstream. Raise the value when more streams are purchased (e.g. 6).
+**Verified:** reuses `internal/provider/openai` + config arliai tests (defaults/no-creds/concurrency) + openai concurrency tests (serialise-until-body-closed, queued-ctx-cancel, unlimited) `-race` — 2026-06-14.
 
 ## Access — allow_localhost
 **What:** optional open access for loopback clients, so a local Claude Code (which sends its own token) can use cerber without a matching key.

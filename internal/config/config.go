@@ -169,6 +169,10 @@ type ArliAI struct {
 	BaseURL     string       `yaml:"base_url"`
 	Timeout     Duration     `yaml:"timeout"`
 	Credentials []Credential `yaml:"credentials"`
+	// Concurrency caps simultaneous in-flight requests to ArliAI to match the
+	// plan's allowed concurrent streams (default 1; raise when more are bought).
+	// Requests beyond the cap queue until an in-flight one releases its slot.
+	Concurrency int `yaml:"concurrency"`
 }
 
 // Ollama configures a local ollama/vLLM upstream, which is OpenAI-compatible.
@@ -217,6 +221,9 @@ const (
 	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
 	defaultGrokBase        = "https://api.x.ai"
 	defaultArliAIBase      = "https://api.arliai.com"
+	// defaultArliAIConcurrency matches the entry ArliAI plan: one concurrent
+	// stream. Raise via providers.arliai.concurrency when more are purchased.
+	defaultArliAIConcurrency = 1
 	defaultOllamaBase      = "http://localhost:11434"
 	defaultOllamaProbeNS   = 30 * time.Second
 	defaultProviderWaitNS  = 120 * time.Second
@@ -339,6 +346,9 @@ func (c *Config) applyDefaults() {
 		if a.Timeout == 0 {
 			a.Timeout = Duration(defaultProviderWaitNS)
 		}
+		if a.Concurrency == 0 {
+			a.Concurrency = defaultArliAIConcurrency
+		}
 	}
 	if o := c.Providers.Ollama; o != nil {
 		if o.BaseURL == "" {
@@ -396,6 +406,9 @@ func (c *Config) Validate() error {
 	if p.ArliAI != nil {
 		if err := validateCreds("arliai", p.ArliAI.BaseURL, p.ArliAI.Credentials, true); err != nil {
 			return err
+		}
+		if p.ArliAI.Concurrency < 0 {
+			return fmt.Errorf("config: providers.arliai.concurrency must be >= 0 (0 = default 1), got %d", p.ArliAI.Concurrency)
 		}
 	}
 	if p.Ollama != nil {
