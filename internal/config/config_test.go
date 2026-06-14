@@ -202,6 +202,28 @@ func TestParse_GrokDefaults(t *testing.T) {
 	}
 }
 
+func TestParse_ArliAIDefaults(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {arliai: {credentials: [{type: api_key, key: x}]}, routing: [{prefix: Qwen, provider: arliai}]}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.ArliAI == nil {
+		t.Fatal("arliai should be set")
+	}
+	if c.Providers.ArliAI.BaseURL != defaultArliAIBase || c.Providers.ArliAI.Timeout.Std() != defaultProviderWaitNS {
+		t.Errorf("arliai defaults = %+v", c.Providers.ArliAI)
+	}
+}
+
+func TestParse_ArliAINoCreds(t *testing.T) {
+	// ArliAI requires a key: an empty credential list is rejected.
+	y := "access: {keys: [k]}\nproviders: {arliai: {credentials: []}}"
+	if _, err := Parse([]byte(y)); err == nil {
+		t.Fatal("expected error for arliai with no credentials")
+	}
+}
+
 func TestParse_OllamaDefaultsNoCreds(t *testing.T) {
 	// Local ollama needs no key: an empty credential list is valid, and it can
 	// be the only configured provider.

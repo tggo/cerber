@@ -219,6 +219,19 @@ func main() {
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
 	}
 
+	// ArliAI (https://www.arliai.com) is OpenAI-compatible: reuse the OpenAI
+	// provider, named "arliai". Models are discovered via /v1/models and routed
+	// by name (e.g. Qwen3.5-27B-Derestricted).
+	if a := cfg.Providers.ArliAI; a != nil {
+		astore, err := credential.NewStore(a.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		if err != nil {
+			logger.Fatal("arliai credentials", zap.Error(err))
+		}
+		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, &http.Client{Timeout: a.Timeout.Std()}))
+		srv.RegisterProviderStore("arliai", astore)
+		logger.Info("arliai provider enabled", zap.Int("credentials", astore.Len()))
+	}
+
 	// Grok = config API keys + xAI OAuth (Grok Build / SuperGrok subscription)
 	// tokens written by --xai-login to auth_dir/xai. Enable the provider if either
 	// is present.

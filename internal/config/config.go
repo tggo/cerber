@@ -106,6 +106,7 @@ type Providers struct {
 	OpenAI    *OpenAI    `yaml:"openai"`
 	Gemini    *Gemini    `yaml:"gemini"`
 	Grok      *Grok      `yaml:"grok"`
+	ArliAI    *ArliAI    `yaml:"arliai"`
 	Ollama    *Ollama    `yaml:"ollama"`
 	Routing   []Route    `yaml:"routing"`
 	Fallbacks []Fallback `yaml:"fallbacks"` // cross-provider/model fallback chains (OpenAI endpoint)
@@ -117,7 +118,7 @@ type Providers struct {
 }
 
 // Route maps a model-name prefix to a provider name
-// (anthropic|openai|gemini|grok|ollama).
+// (anthropic|openai|gemini|grok|arliai|ollama).
 type Route struct {
 	Prefix   string `yaml:"prefix"`
 	Provider string `yaml:"provider"`
@@ -156,6 +157,15 @@ type Gemini struct {
 
 // Grok configures the xAI (Grok) upstream, which is OpenAI-compatible.
 type Grok struct {
+	BaseURL     string       `yaml:"base_url"`
+	Timeout     Duration     `yaml:"timeout"`
+	Credentials []Credential `yaml:"credentials"`
+}
+
+// ArliAI configures the ArliAI upstream (https://www.arliai.com), which is
+// OpenAI-compatible; models (e.g. Qwen3.5-27B-Derestricted) are discovered via
+// /v1/models and routed by name.
+type ArliAI struct {
 	BaseURL     string       `yaml:"base_url"`
 	Timeout     Duration     `yaml:"timeout"`
 	Credentials []Credential `yaml:"credentials"`
@@ -206,6 +216,7 @@ const (
 	defaultOpenAIBase      = "https://api.openai.com"
 	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
 	defaultGrokBase        = "https://api.x.ai"
+	defaultArliAIBase      = "https://api.arliai.com"
 	defaultOllamaBase      = "http://localhost:11434"
 	defaultOllamaProbeNS   = 30 * time.Second
 	defaultProviderWaitNS  = 120 * time.Second
@@ -321,6 +332,14 @@ func (c *Config) applyDefaults() {
 			g.Timeout = Duration(defaultProviderWaitNS)
 		}
 	}
+	if a := c.Providers.ArliAI; a != nil {
+		if a.BaseURL == "" {
+			a.BaseURL = defaultArliAIBase
+		}
+		if a.Timeout == 0 {
+			a.Timeout = Duration(defaultProviderWaitNS)
+		}
+	}
 	if o := c.Providers.Ollama; o != nil {
 		if o.BaseURL == "" {
 			o.BaseURL = defaultOllamaBase
@@ -348,7 +367,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: access.default_key_limits period must be minute|hour|day|week|month")
 	}
 	p := c.Providers
-	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.Ollama == nil {
+	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.ArliAI == nil && p.Ollama == nil {
 		return fmt.Errorf("config: no providers configured")
 	}
 	if p.Anthropic != nil {
@@ -374,6 +393,11 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if p.ArliAI != nil {
+		if err := validateCreds("arliai", p.ArliAI.BaseURL, p.ArliAI.Credentials, true); err != nil {
+			return err
+		}
+	}
 	if p.Ollama != nil {
 		// Local ollama/vLLM needs no key: credentials are optional.
 		if err := validateCreds("ollama", p.Ollama.BaseURL, p.Ollama.Credentials, false); err != nil {
@@ -387,9 +411,9 @@ func (c *Config) Validate() error {
 	}
 	for i, r := range p.Routing {
 		switch r.Provider {
-		case "anthropic", "openai", "gemini", "grok", "ollama":
+		case "anthropic", "openai", "gemini", "grok", "arliai", "ollama":
 		default:
-			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini|grok|ollama", i, r.Provider)
+			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini|grok|arliai|ollama", i, r.Provider)
 		}
 		if strings.TrimSpace(r.Prefix) == "" {
 			return fmt.Errorf("config: providers.routing[%d].prefix is empty", i)

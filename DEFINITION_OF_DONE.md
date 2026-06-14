@@ -193,6 +193,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `providers.grok` config (base_url default `https://api.x.ai`); `grok` valid in `routing`.
 **Verified:** reuses `internal/provider/openai` (93%) + config grok tests + live `make integration` (grok route → "pong" via real api.x.ai, model grok-4.3) — 2026-06-07.
 
+## ArliAI provider
+**What:** ArliAI (https://www.arliai.com) supported as an upstream on the OpenAI-compatible endpoint.
+**DoD:**
+- `/v1/chat/completions` with an ArliAI model (e.g. `Qwen3.5-27B-Derestricted`) → forwarded to ArliAI (`https://api.arliai.com`, Bearer key, credential rotation), response relayed unchanged (ArliAI is OpenAI-compatible — reuses the OpenAI provider named "arliai").
+- `providers.arliai` config (base_url default `https://api.arliai.com`, api_key required); `arliai` valid in `routing`. Models are discovered via `GET /v1/models` and routed by name (no built-in prefix).
+**Verified:** reuses `internal/provider/openai` + config arliai tests (defaults/no-creds) — 2026-06-14.
+
 ## Access — allow_localhost
 **What:** optional open access for loopback clients, so a local Claude Code (which sends its own token) can use cerber without a matching key.
 **DoD:**
