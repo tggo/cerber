@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -439,4 +440,67 @@ func TestConcurrency_Unlimited(t *testing.T) {
 	}
 	a.Body.Close()
 	b.Body.Close()
+}
+
+// fakeQM records QueueMetrics callbacks for assertions.
+type fakeQM struct {
+	mu                 sync.Mutex
+	depthInc, depthDec int
+	inflInc, inflDec   int
+	waits              []float64
+}
+
+func (q *fakeQM) QueueDepthInc(string) { q.mu.Lock(); q.depthInc++; q.mu.Unlock() }
+func (q *fakeQM) QueueDepthDec(string) { q.mu.Lock(); q.depthDec++; q.mu.Unlock() }
+func (q *fakeQM) QueueWait(_ string, s float64) {
+	q.mu.Lock()
+	q.waits = append(q.waits, s)
+	q.mu.Unlock()
+}
+func (q *fakeQM) InflightInc(string) { q.mu.Lock(); q.inflInc++; q.mu.Unlock() }
+func (q *fakeQM) InflightDec(string) { q.mu.Lock(); q.inflDec++; q.mu.Unlock() }
+
+// TestQueueMetrics_LifecycleSuccess verifies a successful request reports queue
+// depth in/out, a wait sample, in-flight inc on start and dec on body close.
+func TestQueueMetrics_LifecycleSuccess(t *testing.T) {
+	qm := &fakeQM{}
+	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(200, `{"ok":1}`), nil })
+	p := New("arliai", "https://api.arliai.com", store(t, "k"), doer, WithConcurrency(1), WithQueueMetrics(qm))
+
+	out, err := p.Chat(context.Background(), []byte(`{"model":"m","messages":[]}`), false, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	qm.mu.Lock()
+	if qm.depthInc != 1 || qm.depthDec != 1 || qm.inflInc != 1 || len(qm.waits) != 1 {
+		t.Errorf("after Chat: depth(%d/%d) infl+%d waits=%d", qm.depthInc, qm.depthDec, qm.inflInc, len(qm.waits))
+	}
+	if qm.inflDec != 0 {
+		t.Errorf("inflight decremented before body close: %d", qm.inflDec)
+	}
+	qm.mu.Unlock()
+
+	out.Body.Close()
+	qm.mu.Lock()
+	if qm.inflDec != 1 {
+		t.Errorf("inflight not decremented on body close: %d", qm.inflDec)
+	}
+	qm.mu.Unlock()
+}
+
+// TestQueueMetrics_RotateError verifies the in-flight slot is released (decremented)
+// immediately when the upstream send fails (no body to close).
+func TestQueueMetrics_RotateError(t *testing.T) {
+	qm := &fakeQM{}
+	doer := doerFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("boom") })
+	p := New("arliai", "https://api.arliai.com", store(t, "k"), doer, WithConcurrency(1), WithQueueMetrics(qm))
+
+	if _, err := p.Chat(context.Background(), []byte(`{"model":"m","messages":[]}`), false, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+	if qm.inflInc != 1 || qm.inflDec != 1 {
+		t.Errorf("inflight inc/dec = %d/%d, want 1/1", qm.inflInc, qm.inflDec)
+	}
 }

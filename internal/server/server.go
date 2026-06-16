@@ -36,6 +36,7 @@ import (
 	"github.com/tggo/cerber/internal/quota"
 	"github.com/tggo/cerber/internal/translator"
 	"github.com/tggo/cerber/internal/usage"
+	"github.com/tggo/cerber/internal/version"
 
 	"go.uber.org/zap"
 )
@@ -72,6 +73,7 @@ type Server struct {
 	log            *zap.Logger
 	usage          *usage.Tracker
 	quota          *quota.Tracker
+	metrics        *metrics.Metrics
 	chatters       map[string]provider.Chatter
 	provStores     map[string]*credential.Store // provider name -> its credential store (for the accounts view)
 	provMu         sync.Mutex
@@ -111,6 +113,7 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		log:         logger,
 		usage:       usage.New(),
 		quota:       quota.New(),
+		metrics:     metrics.NewMetrics(),
 		chatters:    map[string]provider.Chatter{},
 		provStores:  map[string]*credential.Store{},
 		provModels:  map[string][]string{},
@@ -123,6 +126,10 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 
 // Usage returns the usage tracker (for metrics and the dashboard).
 func (s *Server) Usage() *usage.Tracker { return s.usage }
+
+// Metrics returns the live metrics instruments, to wire into providers that
+// report concurrency-gate behaviour (see openai.WithQueueMetrics).
+func (s *Server) Metrics() *metrics.Metrics { return s.metrics }
 
 // SetUsageTracker replaces the usage tracker (e.g. one loaded from disk with
 // pricing). Call before Handler().
@@ -288,7 +295,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/keys/{name}/limits", s.handleKeyLimits)
 	// /metrics is unauthenticated (standard for Prometheus scraping); it exposes
 	// counts and credential names, never secrets.
-	mux.Handle("GET /metrics", metrics.Handler(s.usage))
+	mux.Handle("GET /metrics", metrics.Handler(s.usage, version.String(), s.metrics))
 	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(dashboardHTML)
@@ -303,18 +310,39 @@ func (s *Server) Handler() http.Handler {
 	return s.logRequests(mux)
 }
 
-// logRequests logs one line per request (method, path, status, latency).
+// reqTag carries the provider a request resolved to, filled by handlers via
+// tagProvider and read back by logRequests for per-provider metrics.
+type reqTag struct{ provider string }
+
+type ctxKey int
+
+const tagKey ctxKey = 0
+
+// tagProvider records the provider a request was routed to (read by the metrics
+// middleware). Safe to call with any context; a no-op if none is attached.
+func tagProvider(ctx context.Context, provider string) {
+	if t, ok := ctx.Value(tagKey).(*reqTag); ok && t != nil {
+		t.provider = provider
+	}
+}
+
+// logRequests logs one line per request and records HTTP latency/status metrics
+// (labelled by path, resolved provider, and status).
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := s.now()
+		tag := &reqTag{}
+		r = r.WithContext(context.WithValue(r.Context(), tagKey, tag))
 		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		dur := s.now().Sub(start)
 		s.log.Info("request",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
 			zap.Int("status", rec.status),
-			zap.Duration("latency", s.now().Sub(start)),
+			zap.Duration("latency", dur),
 		)
+		s.metrics.ObserveHTTP(r.URL.Path, tag.provider, rec.status, dur.Seconds())
 	})
 }
 
@@ -1193,6 +1221,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(w, r) {
 		return
 	}
+	tagProvider(r.Context(), "anthropic")
 	body, ok := readBody(w, r)
 	if !ok {
 		return
@@ -1327,6 +1356,7 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	}
 	body, model := s.canonicalModel(body)
 	target := s.route(model)
+	tagProvider(r.Context(), target)
 	if target == "" || target == "anthropic" {
 		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("no image-generation provider for model %q", model))
@@ -1376,6 +1406,7 @@ func (s *Server) handleForward(subpath string) http.HandlerFunc {
 		body, model := s.canonicalModel(body)
 		stream := wantsStream(body)
 		target := s.route(model)
+		tagProvider(r.Context(), target)
 		if target == "" || target == "anthropic" {
 			s.record(r.Context(), usage.Event{Model: model, IsError: true})
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("no provider for model %q on %s", model, subpath))
@@ -1403,6 +1434,7 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(w, r) {
 		return
 	}
+	tagProvider(r.Context(), "anthropic")
 	body, ok := readBody(w, r)
 	if !ok {
 		return
@@ -1495,6 +1527,7 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 		}
 		return false
 	}
+	tagProvider(r.Context(), target)
 	// Point the request body at this target's model.
 	tbody := body
 	if extractModel(body) != tgtModel {

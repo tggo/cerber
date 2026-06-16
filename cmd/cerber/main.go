@@ -214,7 +214,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("openai credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(openai.New("openai", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
+		srv.RegisterChatter(openai.New("openai", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}, openai.WithQueueMetrics(srv.Metrics())))
 		srv.RegisterProviderStore("openai", ostore)
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
 	}
@@ -227,7 +227,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("arliai credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, &http.Client{Timeout: a.Timeout.Std()}, openai.WithConcurrency(a.Concurrency)))
+		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, &http.Client{Timeout: a.Timeout.Std()}, openai.WithConcurrency(a.Concurrency), openai.WithQueueMetrics(srv.Metrics())))
 		srv.RegisterProviderStore("arliai", astore)
 		logger.Info("arliai provider enabled", zap.Int("credentials", astore.Len()), zap.Int("concurrency", a.Concurrency))
 	}
@@ -251,7 +251,7 @@ func main() {
 		}
 		// xAI/Grok is OpenAI-compatible: reuse the OpenAI provider, named "grok".
 		grokHTTP := &http.Client{Timeout: k.Timeout.Std()}
-		grokProv := openai.New("grok", k.BaseURL, kstore, grokHTTP)
+		grokProv := openai.New("grok", k.BaseURL, kstore, grokHTTP, openai.WithQueueMetrics(srv.Metrics()))
 		// Refresh subscription (OAuth) tokens before they expire and persist them.
 		grokProv.SetOAuthRefresh(func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error) {
 			t, e := xai.Refresh(ctx, grokHTTP, refreshToken, time.Now)
@@ -283,7 +283,7 @@ func main() {
 			logger.Fatal("ollama credentials", zap.Error(err))
 		}
 		// ollama/vLLM serve an OpenAI-compatible API: reuse the OpenAI provider.
-		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}))
+		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}, openai.WithQueueMetrics(srv.Metrics())))
 		srv.RegisterProviderStore("ollama", ostore)
 		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
 			zap.Int("credentials", ostore.Len()))

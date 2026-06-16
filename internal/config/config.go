@@ -224,9 +224,9 @@ const (
 	// defaultArliAIConcurrency matches the entry ArliAI plan: one concurrent
 	// stream. Raise via providers.arliai.concurrency when more are purchased.
 	defaultArliAIConcurrency = 1
-	defaultOllamaBase      = "http://localhost:11434"
-	defaultOllamaProbeNS   = 30 * time.Second
-	defaultProviderWaitNS  = 120 * time.Second
+	defaultOllamaBase        = "http://localhost:11434"
+	defaultOllamaProbeNS     = 30 * time.Second
+	defaultProviderWaitNS    = 120 * time.Second
 )
 
 // DefaultAnthropic returns an Anthropic provider config with defaults applied and

@@ -50,12 +50,26 @@ type Provider struct {
 	// closed, so queued requests wait until a connection frees.
 	sem chan struct{}
 
+	// qm observes concurrency-gate behaviour (in-flight count, queue depth and
+	// wait). nil = no observation.
+	qm QueueMetrics
+
 	// Optional OAuth refresh (e.g. xAI/Grok subscription tokens). nil = api-key
 	// only. refreshSkew refreshes this long before expiry.
 	refresh     func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error)
 	persist     func(name string, tok credential.OAuthTokens)
 	refreshSkew time.Duration
 	now         func() time.Time
+}
+
+// QueueMetrics observes a provider's concurrency-gate behaviour. All methods
+// must be safe for concurrent use; *metrics.Metrics satisfies it.
+type QueueMetrics interface {
+	QueueDepthInc(provider string)
+	QueueDepthDec(provider string)
+	QueueWait(provider string, seconds float64)
+	InflightInc(provider string)
+	InflightDec(provider string)
 }
 
 // Option configures a Provider at construction.
@@ -71,6 +85,12 @@ func WithConcurrency(n int) Option {
 			p.sem = make(chan struct{}, n)
 		}
 	}
+}
+
+// WithQueueMetrics attaches a QueueMetrics observer so the provider reports its
+// in-flight count, queue depth, and queue-wait time (labelled by provider name).
+func WithQueueMetrics(qm QueueMetrics) Option {
+	return func(p *Provider) { p.qm = qm }
 }
 
 // New builds a Provider with the given name (e.g. "openai", "grok") and base URL
@@ -112,34 +132,62 @@ func (p *Provider) release() {
 	<-p.sem
 }
 
-// gateBody wraps rc so closing it releases the concurrency slot exactly once.
-// When concurrency is unlimited it returns rc unchanged.
-func (p *Provider) gateBody(rc io.ReadCloser) io.ReadCloser {
-	if p.sem == nil {
-		return rc
+// clock returns the provider's clock (time.Now unless injected for tests).
+func (p *Provider) clock() time.Time {
+	if p.now != nil {
+		return p.now()
 	}
-	return &gatedBody{ReadCloser: rc, release: p.release}
+	return time.Now()
 }
 
-// gatedRotate acquires a concurrency slot, rotates across credentials, and (on
-// success) returns a Response whose Body releases the slot when closed. On
-// failure the slot is released immediately. Callers MUST close the returned
-// Body — every server handler does (defer resp.Body.Close()).
+// gatedRotate acquires a concurrency slot (recording queue depth/wait and
+// in-flight count), rotates across credentials, and (on success) returns a
+// Response whose Body releases the slot when closed. On failure the slot is
+// released immediately. Callers MUST close the returned Body — every server
+// handler does (defer resp.Body.Close()).
 func (p *Provider) gatedRotate(ctx context.Context, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*provider.Response, error) {
-	if err := p.acquire(ctx); err != nil {
+	if p.qm != nil {
+		p.qm.QueueDepthInc(p.name)
+	}
+	start := p.clock()
+	err := p.acquire(ctx)
+	if p.qm != nil {
+		p.qm.QueueDepthDec(p.name)
+	}
+	if err != nil {
 		return nil, err
+	}
+	if p.qm != nil {
+		p.qm.QueueWait(p.name, p.clock().Sub(start).Seconds())
+		p.qm.InflightInc(p.name)
+	}
+	// release frees the slot and decrements in-flight, exactly once.
+	release := func() {
+		p.release()
+		if p.qm != nil {
+			p.qm.InflightDec(p.name)
+		}
 	}
 	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, send)
 	if err != nil {
-		p.release()
+		release()
 		return nil, err
 	}
 	return &provider.Response{
 		Status:     resp.StatusCode,
 		Header:     resp.Header,
-		Body:       p.gateBody(resp.Body),
+		Body:       p.gateBody(resp.Body, release),
 		Credential: credName,
 	}, nil
+}
+
+// gateBody wraps rc so closing it runs release exactly once. When neither a
+// concurrency cap nor a metrics observer is set, it returns rc unchanged.
+func (p *Provider) gateBody(rc io.ReadCloser, release func()) io.ReadCloser {
+	if p.sem == nil && p.qm == nil {
+		return rc
+	}
+	return &gatedBody{ReadCloser: rc, release: release}
 }
 
 // gatedBody releases a concurrency slot when the underlying body is closed.

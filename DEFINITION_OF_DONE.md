@@ -141,10 +141,13 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **Verified:** `internal/usage` (100%) + `internal/server` stats tests + live (`input 9/output 6` after one real call) — 2026-06-07.
 
 ## Prometheus metrics
-**What:** usage exposed in Prometheus format for scraping.
+**What:** usage AND live operational signals exposed in Prometheus format for scraping.
 **DoD:**
-- `GET /metrics` (unauthenticated; counts + credential/model names only, no secrets) emits `cerber_requests_total`, `cerber_errors_total`, `cerber_input_tokens_total`, `cerber_output_tokens_total` (by credential), `cerber_requests_by_model_total` and `cerber_cost_usd_total` (by model, from configured pricing).
-**Verified:** `internal/metrics` (100%) + live `/metrics` scrape — 2026-06-13.
+- `GET /metrics` (unauthenticated; counts + credential/model names only, no secrets) is served from one private registry merging two sources (no global state).
+- Usage (snapshot of `usage.Tracker`): `cerber_requests_total`, `cerber_errors_total`, `cerber_input_tokens_total`, `cerber_output_tokens_total` (by credential); `cerber_requests_by_model_total`, `cerber_input_tokens_by_model_total`, `cerber_output_tokens_by_model_total` and `cerber_cost_usd_total` (by model, cost only when pricing configured); `cerber_build_info{version}` = 1.
+- Live HTTP: `cerber_http_request_duration_seconds` (histogram) and `cerber_http_requests_total` (counter), labelled `path`, `provider` (the resolved upstream, "none" if unrouted), `status` (HTTP code) — so latency percentiles and 429/5xx rates are visible per provider. Recorded in the request middleware; handlers tag the resolved provider via request context.
+- Live concurrency (per provider, for OpenAI-compatible providers): `cerber_provider_inflight_requests` (gauge, held until the response body is closed), `cerber_provider_queue_depth` (gauge, requests waiting for a slot), `cerber_provider_queue_wait_seconds` (histogram). A nil metrics observer no-ops.
+**Verified:** `internal/metrics` (collector+live, nil-safe, gauge up/down) + `internal/provider/openai` queue-metrics lifecycle tests (`-race`) + live `/metrics` scrape — 2026-06-16.
 
 ## Web dashboard
 **What:** a self-contained usage dashboard (no external/CDN assets).
