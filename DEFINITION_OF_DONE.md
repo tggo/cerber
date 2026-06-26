@@ -249,8 +249,9 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **What:** route selected models to a local ollama/vLLM server (e.g. on a GPU box) over the same OpenAI-compatible passthrough as Grok.
 **DoD:**
 - `providers.ollama` (base_url, optional credentials; default `http://localhost:11434`) registers an OpenAI-compatible chatter named `ollama`; credentials are optional (keyless local server → a dummy key is injected so rotation works).
-- `providers.routing` prefixes select it (local model names are arbitrary); `ollama` is a valid routing provider.
-**Verified:** `internal/config` (defaults/no-creds/bad-url) + `internal/server` route tests; live against gpu0 ollama — 2026-06-08.
+- `providers.routing` prefixes select it (local model names are arbitrary); `ollama` is a valid routing provider. Embedding models are routed by explicit prefix (`bge-m3`, `nomic-embed-text`) because discovery sees the tagged name (`bge-m3:latest`) while clients send the bare name; ollama resolves the implicit `:latest`. `POST /v1/embeddings` for those returns 1024-/768-dim vectors via the Forward passthrough.
+- `providers.ollama.fallback_base_urls` (optional, each http(s)) gives **host-level failover**: on a transport error or 5xx from `base_url`, the same request (Chat/Forward/Images) is retried against each fallback host in order (body rebuilt per attempt). A 4xx is returned as-is (client error, identical on every host) and not retried; with no fallback a 5xx is still relayed unchanged. Same models must be pulled on each host. On firebat: gpu0 primary, xeon (CPU) backup.
+**Verified:** `internal/config` (defaults/no-creds/bad-url/fallback-url) + `internal/provider/openai` failover tests (transport→2nd host, 5xx→2nd host, 4xx-not-retried, all-down→error, single-host-5xx-relayed) + `internal/server` route tests; live against gpu0 ollama (embeddings 1024-dim) + live failover drill (dead primary → gpu0 fallback → 1024-dim in 0.29s) — 2026-06-26.
 
 ## Per-credential health probe + model discovery (all providers)
 **What:** cerber periodically validates every credential of every provider and collects the models each provider serves, then uses that for key-health reporting and discovery routing.
