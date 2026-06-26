@@ -504,3 +504,87 @@ func TestQueueMetrics_RotateError(t *testing.T) {
 		t.Errorf("inflight inc/dec = %d/%d, want 1/1", qm.inflInc, qm.inflDec)
 	}
 }
+
+// TestFailover_TransportErrorThenSecondHost verifies a transport error on the
+// primary host transparently retries on the fallback host.
+func TestFailover_TransportErrorThenSecondHost(t *testing.T) {
+	var hosts []string
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		hosts = append(hosts, r.URL.Host)
+		if r.URL.Host == "gpu0:11434" {
+			return nil, errors.New("connection refused")
+		}
+		return resp(200, `{"data":[{"embedding":[0.1]}]}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer, WithFallbackBaseURLs([]string{"http://xeon:11434/"}))
+	out, err := p.Forward(context.Background(), "/v1/embeddings", []byte(`{"model":"bge-m3"}`), false, nil)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	out.Body.Close()
+	if len(hosts) != 2 || hosts[0] != "gpu0:11434" || hosts[1] != "xeon:11434" {
+		t.Errorf("host order = %v, want [gpu0 xeon]", hosts)
+	}
+}
+
+// TestFailover_5xxThenSecondHost verifies a 5xx on the primary fails over.
+func TestFailover_5xxThenSecondHost(t *testing.T) {
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "gpu0:11434" {
+			return resp(503, `{"error":"loading"}`), nil
+		}
+		return resp(200, `{"ok":1}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer, WithFallbackBaseURLs([]string{"http://xeon:11434"}))
+	out, err := p.Chat(context.Background(), []byte(`{}`), false, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	defer out.Body.Close()
+	if out.Status != 200 {
+		t.Errorf("status = %d, want 200 (failed over)", out.Status)
+	}
+}
+
+// TestFailover_4xxNotRetried verifies a client 4xx is returned as-is (same on
+// every host) and does NOT hit the fallback.
+func TestFailover_4xxNotRetried(t *testing.T) {
+	var calls int
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return resp(400, `{"error":"bad model"}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer, WithFallbackBaseURLs([]string{"http://xeon:11434"}))
+	out, err := p.Forward(context.Background(), "/v1/embeddings", []byte(`{}`), false, nil)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	out.Body.Close()
+	if out.Status != 400 || calls != 1 {
+		t.Errorf("status=%d calls=%d, want 400 with 1 call (no failover on 4xx)", out.Status, calls)
+	}
+}
+
+// TestFailover_AllHostsDown returns an error when every host fails.
+func TestFailover_AllHostsDown(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("down") })
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer, WithFallbackBaseURLs([]string{"http://xeon:11434"}))
+	if _, err := p.Chat(context.Background(), []byte(`{}`), false, nil); err == nil {
+		t.Fatal("expected error when all hosts down")
+	}
+}
+
+// TestFailover_SingleHost5xxRelayed confirms back-compat: with no fallback, a
+// 5xx is relayed to the caller (not turned into an error).
+func TestFailover_SingleHost5xxRelayed(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(502, `{"error":"x"}`), nil })
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer)
+	out, err := p.Chat(context.Background(), []byte(`{}`), false, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	defer out.Body.Close()
+	if out.Status != 502 {
+		t.Errorf("status = %d, want 502 relayed", out.Status)
+	}
+}

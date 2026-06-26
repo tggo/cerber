@@ -283,10 +283,13 @@ func main() {
 			logger.Fatal("ollama credentials", zap.Error(err))
 		}
 		// ollama/vLLM serve an OpenAI-compatible API: reuse the OpenAI provider.
-		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}, openai.WithQueueMetrics(srv.Metrics())))
+		// fallback_base_urls give host-level failover (e.g. a CPU box backing up
+		// the GPU one for embeddings) when the primary is unreachable/5xx.
+		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()},
+			openai.WithQueueMetrics(srv.Metrics()), openai.WithFallbackBaseURLs(o.FallbackBaseURLs)))
 		srv.RegisterProviderStore("ollama", ostore)
 		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
-			zap.Int("credentials", ostore.Len()))
+			zap.Strings("fallback_base_urls", o.FallbackBaseURLs), zap.Int("credentials", ostore.Len()))
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {

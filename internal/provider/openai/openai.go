@@ -43,6 +43,11 @@ type Provider struct {
 	http     provider.HTTPDoer
 	cooldown time.Duration
 
+	// fallbackURLs are additional upstream hosts (e.g. a second ollama box) tried
+	// in order when the primary baseURL is unreachable (transport error) or 5xx —
+	// host-level failover, transparent to the model name. Empty = primary only.
+	fallbackURLs []string
+
 	// sem serialises in-flight chat/forward/image requests to respect an
 	// upstream concurrency cap (e.g. ArliAI plans allow N concurrent streams).
 	// nil = unlimited. A slot is held for the whole request — including the time
@@ -93,6 +98,19 @@ func WithQueueMetrics(qm QueueMetrics) Option {
 	return func(p *Provider) { p.qm = qm }
 }
 
+// WithFallbackBaseURLs sets additional upstream hosts tried (in order) when the
+// primary base URL is unreachable or 5xx — e.g. a CPU ollama box that backs up
+// the GPU one for embeddings. Each is trimmed of a trailing slash; empties drop.
+func WithFallbackBaseURLs(urls []string) Option {
+	return func(p *Provider) {
+		for _, u := range urls {
+			if u = strings.TrimRight(u, "/"); u != "" {
+				p.fallbackURLs = append(p.fallbackURLs, u)
+			}
+		}
+	}
+}
+
 // New builds a Provider with the given name (e.g. "openai", "grok") and base URL
 // (e.g. https://api.openai.com, https://api.x.ai).
 func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer, opts ...Option) *Provider {
@@ -138,6 +156,35 @@ func (p *Provider) clock() time.Time {
 		return p.now()
 	}
 	return time.Now()
+}
+
+// sendHosts tries the request against the primary host then each fallback host
+// (in order), advancing on a transport error or a 5xx status — host-level
+// failover for when the primary box is down. build is called fresh per host (so
+// the request body is re-created each attempt). A non-5xx response is returned
+// as-is (incl. 4xx, which is a client error identical on every host). If all
+// hosts fail it returns the last error.
+func (p *Provider) sendHosts(build func(base string) (*http.Request, error)) (*http.Response, error) {
+	hosts := append([]string{p.baseURL}, p.fallbackURLs...)
+	var lastErr error
+	for _, base := range hosts {
+		req, err := build(base)
+		if err != nil {
+			return nil, err // build error is request-shaped, not host-related — don't failover
+		}
+		resp, err := p.http.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode >= 500 && len(hosts) > 1 {
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("openai: host %s returned %d", base, resp.StatusCode)
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
 }
 
 // gatedRotate acquires a concurrency slot (recording queue depth/wait and
@@ -251,14 +298,16 @@ func (p *Provider) BaseURL() string { return p.baseURL }
 func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ImagesPath, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("openai: build image request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
-		return p.http.Do(req)
+		return p.sendHosts(func(base string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+ImagesPath, bytes.NewReader(body))
+			if err != nil {
+				return nil, fmt.Errorf("openai: build image request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
+			return req, nil
+		})
 	})
 }
 
@@ -269,18 +318,20 @@ func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.He
 func (p *Provider) Forward(ctx context.Context, subpath string, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+subpath, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("openai: build forward request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
-		if stream {
-			req.Header.Set("Accept", "text/event-stream")
-		} else {
-			req.Header.Set("Accept", "application/json")
-		}
-		return p.http.Do(req)
+		return p.sendHosts(func(base string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+subpath, bytes.NewReader(body))
+			if err != nil {
+				return nil, fmt.Errorf("openai: build forward request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
+			if stream {
+				req.Header.Set("Accept", "text/event-stream")
+			} else {
+				req.Header.Set("Accept", "application/json")
+			}
+			return req, nil
+		})
 	})
 }
 
@@ -332,17 +383,19 @@ func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential
 func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+ChatPath, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("openai: build request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
-		if stream {
-			req.Header.Set("Accept", "text/event-stream")
-		} else {
-			req.Header.Set("Accept", "application/json")
-		}
-		return p.http.Do(req)
+		return p.sendHosts(func(base string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+ChatPath, bytes.NewReader(body))
+			if err != nil {
+				return nil, fmt.Errorf("openai: build request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
+			if stream {
+				req.Header.Set("Accept", "text/event-stream")
+			} else {
+				req.Header.Set("Accept", "application/json")
+			}
+			return req, nil
+		})
 	})
 }

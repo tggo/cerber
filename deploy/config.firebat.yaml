@@ -78,6 +78,11 @@ providers:
 
   ollama:                                   # local models on gpu0 (HomeOffice, via WG)
     base_url: "http://192.168.89.233:11434"
+    # Host-level failover: if gpu0 is unreachable/5xx, retry on xeon's ollama
+    # (CPU box, slower — availability over speed). Same models pulled on both
+    # (bge-m3, nomic-embed-text). Used for embeddings + chat alike.
+    fallback_base_urls:
+      - "http://192.168.89.61:11434"
   routing:
     - { prefix: "llama",   provider: ollama }
     - { prefix: "qwen",    provider: ollama }

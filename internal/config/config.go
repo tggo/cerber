@@ -183,6 +183,10 @@ type Ollama struct {
 	Timeout       Duration     `yaml:"timeout"`
 	ProbeInterval Duration     `yaml:"probe_interval"` // liveness + model-discovery poll (0 = default)
 	Credentials   []Credential `yaml:"credentials"`
+	// FallbackBaseURLs are extra ollama hosts tried (in order) when base_url is
+	// unreachable or 5xx — host-level failover, e.g. a CPU box backing up the GPU
+	// one for embeddings. Same model names must be pulled on each host.
+	FallbackBaseURLs []string `yaml:"fallback_base_urls"`
 }
 
 // CredentialType enumerates the supported Anthropic auth mechanisms.
@@ -415,6 +419,11 @@ func (c *Config) Validate() error {
 		// Local ollama/vLLM needs no key: credentials are optional.
 		if err := validateCreds("ollama", p.Ollama.BaseURL, p.Ollama.Credentials, false); err != nil {
 			return err
+		}
+		for i, u := range p.Ollama.FallbackBaseURLs {
+			if parsed, err := url.Parse(u); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				return fmt.Errorf("config: providers.ollama.fallback_base_urls[%d] must be an http(s) URL, got %q", i, u)
+			}
 		}
 	}
 	switch p.Strategy {

@@ -259,6 +259,22 @@ func TestParse_OllamaDefaultsNoCreds(t *testing.T) {
 	}
 }
 
+func TestParse_OllamaFallbackBaseURLs(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {ollama: {base_url: \"http://gpu0:11434\", fallback_base_urls: [\"http://xeon:11434\"]}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := c.Providers.Ollama.FallbackBaseURLs; len(got) != 1 || got[0] != "http://xeon:11434" {
+		t.Errorf("fallback_base_urls = %v", got)
+	}
+
+	bad := "access: {keys: [k]}\nproviders: {ollama: {base_url: \"http://gpu0:11434\", fallback_base_urls: [\"ftp://x\"]}}"
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error for non-http fallback_base_urls")
+	}
+}
+
 func TestParse_OllamaRouting(t *testing.T) {
 	y := "access: {keys: [k]}\nproviders: {ollama: {base_url: \"http://gpu0:11434\"}, routing: [{prefix: llama, provider: ollama}]}"
 	c, err := Parse([]byte(y))
