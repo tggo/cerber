@@ -84,3 +84,8 @@ providers:
     - { prefix: "gemma",   provider: ollama }
     - { prefix: "mistral", provider: ollama }
     - { prefix: "deepseek", provider: ollama }
+    # Embeddings on /v1/embeddings → gpu0 ollama. Discovery sees "bge-m3:latest";
+    # clients send "bge-m3" (no tag) so an explicit prefix is needed (ollama
+    # resolves the implicit :latest). bge-m3=1024d (Gandalf primary), nomic=768d.
+    - { prefix: "bge-m3", provider: ollama }
+    - { prefix: "nomic-embed-text", provider: ollama }
