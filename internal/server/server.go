@@ -287,6 +287,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/accounts/{name}/enable", s.handleSetAccount(true))
 	mux.HandleFunc("POST /admin/accounts/{name}/disable", s.handleSetAccount(false))
 	mux.HandleFunc("GET /admin/keys", s.handleKeysList)
+	mux.HandleFunc("GET /admin/keys/{name}/usage", s.handleKeyUsage)
 	mux.HandleFunc("POST /admin/keys", s.handleKeyCreate)
 	mux.HandleFunc("POST /admin/keys/{name}/enable", s.handleSetKey(true))
 	mux.HandleFunc("POST /admin/keys/{name}/disable", s.handleSetKey(false))
@@ -1008,6 +1009,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 		{"GET", "/admin/providers", "", "Provider health + discovered models."},
 		{"POST", "/admin/accounts/{name}/enable|disable", "", "Toggle a credential at runtime."},
 		{"GET", "/admin/keys", "", "List managed client keys (redacted, with limits + window usage)."},
+		{"GET", "/admin/keys/{name}/usage", "", "Per-key cumulative usage: totals + cost + per-model breakdown (which models, tokens, money)."},
 		{"POST", "/admin/keys", "", "Mint a key; the secret is shown once."},
 		{"POST", "/admin/keys/{name}/enable|disable", "", "Toggle a client key."},
 		{"DELETE", "/admin/keys/{name}", "", "Delete a client key."},
@@ -1091,6 +1093,24 @@ func (s *Server) handleKeysList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"keys": s.keys.List()})
+}
+
+// handleKeyUsage returns the cumulative usage of one client key: its per-model
+// breakdown (requests, tokens) with cost, plus totals. Answers "which models did
+// this key use, for how many tokens and how much money". A key with no recorded
+// usage yet returns a zero-valued report (200, not 404) so the UI can render it.
+func (s *Server) handleKeyUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.adminAuthorized(w, r) {
+		return
+	}
+	name := r.PathValue("name")
+	rep, ok := s.usage.ClientUsage(name)
+	if !ok {
+		rep = usage.ClientReport{Name: name, ByModel: []usage.Entry{}}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(rep)
 }
 
 // handleKeyCreate mints a new client key. The full secret is returned exactly
@@ -1976,12 +1996,13 @@ func clientIP(r *http.Request) string {
 // recent-request log (with client IP/UA/identity from the request context). It
 // is the single point through which all handlers record usage.
 func (s *Server) record(ctx context.Context, e usage.Event) {
+	m := reqMetaFrom(ctx)
+	e.Client = m.client // attribute cumulative usage to the caller (key name / config / localhost)
 	s.usage.Record(e)
 	cost := s.usage.Cost(e.Model, e.InputTokens, e.OutputTokens)
 	if name, ok := clientKeyFrom(ctx); ok {
 		s.keys.Charge(name, cost, e.InputTokens+e.OutputTokens)
 	}
-	m := reqMetaFrom(ctx)
 	s.usage.RecordRequest(usage.RequestEvent{
 		Time: s.now(), IP: m.ip, UserAgent: m.ua, Client: m.client, Endpoint: m.endpoint,
 		Provider: s.route(e.Model), Model: e.Model, Credential: e.Credential,

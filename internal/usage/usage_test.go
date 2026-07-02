@@ -190,3 +190,71 @@ func TestSeriesBuckets(t *testing.T) {
 		t.Error("bucket key should be hour start")
 	}
 }
+
+func TestByClient_BreakdownAndCost(t *testing.T) {
+	tr := fixedTracker()
+	tr.SetPricing(map[string]Price{"claude": {Input: 3, Output: 15}})
+	// gandalf uses two models; laptop uses one; an empty client is not attributed.
+	tr.Record(Event{Client: "gandalf", Model: "claude", InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	tr.Record(Event{Client: "gandalf", Model: "gpt", InputTokens: 500_000})
+	tr.Record(Event{Client: "laptop", Model: "claude", InputTokens: 2_000_000})
+	tr.Record(Event{Model: "claude", InputTokens: 9}) // no client -> not in byClient
+
+	r := tr.Snapshot()
+	if len(r.ByClient) != 2 {
+		t.Fatalf("by_client = %+v", r.ByClient)
+	}
+	// sorted by requests desc: gandalf(2) before laptop(1)
+	g := r.ByClient[0]
+	if g.Name != "gandalf" || g.Requests != 2 {
+		t.Fatalf("by_client[0] = %+v", g)
+	}
+	// cost: claude 1M in*3 + 1M out*15 = 18; gpt unpriced = 0 -> total 18
+	if g.Cost != 18 {
+		t.Errorf("gandalf cost = %v, want 18", g.Cost)
+	}
+	if g.InputTokens != 1_500_000 || g.OutputTokens != 1_000_000 {
+		t.Errorf("gandalf tokens = %+v", g.Stat)
+	}
+	// per-model breakdown present, claude carries cost, gpt is 0
+	if len(g.ByModel) != 2 {
+		t.Fatalf("gandalf by_model = %+v", g.ByModel)
+	}
+	byName := map[string]Entry{}
+	for _, m := range g.ByModel {
+		byName[m.Name] = m
+	}
+	if byName["claude"].Cost != 18 || byName["gpt"].Cost != 0 {
+		t.Errorf("per-model cost = %+v", g.ByModel)
+	}
+}
+
+func TestClientUsage_LookupAndMiss(t *testing.T) {
+	tr := fixedTracker()
+	tr.Record(Event{Client: "gandalf", Model: "m", InputTokens: 7})
+	if _, ok := tr.ClientUsage("ghost"); ok {
+		t.Error("unknown client should return ok=false")
+	}
+	rep, ok := tr.ClientUsage("gandalf")
+	if !ok || rep.Name != "gandalf" || rep.InputTokens != 7 || len(rep.ByModel) != 1 {
+		t.Errorf("ClientUsage = %+v ok=%v", rep, ok)
+	}
+}
+
+func TestByClient_PersistRoundTrip(t *testing.T) {
+	now := time.Unix(1000, 0)
+	tr := New(WithClock(func() time.Time { return now }))
+	tr.Record(Event{Client: "gandalf", Model: "claude", InputTokens: 4, OutputTokens: 2})
+	path := filepath.Join(t.TempDir(), "usage.json")
+	if err := tr.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, ok := loaded.ClientUsage("gandalf")
+	if !ok || rep.InputTokens != 4 || rep.OutputTokens != 2 {
+		t.Errorf("after load, ClientUsage = %+v ok=%v", rep, ok)
+	}
+}

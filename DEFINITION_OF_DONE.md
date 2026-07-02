@@ -271,6 +271,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Mutations persist atomically; last-used is stamped on auth and flushed by the periodic saver. The embedded dashboard has a client-keys section (create + reveal-once, enable/disable, delete).
 **Verified:** `internal/access` store tests + `internal/server` CRUD/not-configured tests — 2026-06-08.
 
+## Client-key usage & spend (per-key breakdown)
+**What:** operators can see, per client key, which models it used, how many tokens, and how much money — cumulatively and persisted.
+**DoD:**
+- The usage tracker keeps a `byClient` dimension (client key → model → stat), attributed in the single `record()` path from the caller identity (managed key name, or `config`/`localhost` for the operator's own callers). Cumulative (not a rolling window — that is what governance counters are for), persisted with the rest of the aggregates, and survives restart.
+- `GET /admin/keys/{name}/usage` (admin-authed) returns the key's `ClientReport`: totals (requests, errors, input/output tokens) + `cost` + a per-model `by_model` breakdown with per-model cost. An unrecognised/unused name returns a **200** zero-valued report (name set, empty `by_model`) so the UI can render a key with no traffic yet — not a 404.
+- `/admin/stats` gains `by_client` (same shape, all keys, sorted by requests desc). Cost is computed from `usage.pricing` (unpriced models cost 0), consistent with `by_model`.
+- The embedded dashboard's client-keys table shows per-key requests/tokens/spend columns; a key with traffic is expandable to its per-model breakdown (fed from `by_client`, no extra fetch).
+**Verified:** `internal/usage` (byClient breakdown/cost, ClientUsage lookup+miss, persist round-trip) + `internal/server` (`TestKeyUsage_PerKeyBreakdown`: auth, totals+cost, unknown-key 200) — 2026-07-02.
+
 ## Client-key governance — per-key budgets & rate limits
 **What:** each managed (dashboard) client key may carry a rolling cost budget plus rolling request/token rate limits, enforced per request. Static config keys and loopback callers are the operator's own and bypass governance (unlimited).
 **DoD:**

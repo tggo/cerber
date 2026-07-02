@@ -40,15 +40,27 @@ type Bucket struct {
 	Stat
 }
 
+// ClientReport is the cumulative usage of one client key (managed key name, or
+// "config"/"localhost" for the operator's own callers): its totals plus a
+// per-model breakdown with cost. It answers "which models did this key use, for
+// how many tokens and how much money".
+type ClientReport struct {
+	Name string  `json:"name"`
+	Cost float64 `json:"cost"` // sum of per-model cost (0 for unpriced models)
+	Stat
+	ByModel []Entry `json:"by_model"` // this key's usage split per model, with cost
+}
+
 // Report is a point-in-time snapshot.
 type Report struct {
-	Totals        Stat     `json:"totals"`
-	TotalCost     float64  `json:"total_cost"`
-	ByCredential  []Entry  `json:"by_credential"`
-	ByModel       []Entry  `json:"by_model"`
-	Series        []Bucket `json:"series"` // hourly, chronological
-	SinceUnix     int64    `json:"since_unix"`
-	GeneratedUnix int64    `json:"generated_unix"`
+	Totals        Stat           `json:"totals"`
+	TotalCost     float64        `json:"total_cost"`
+	ByCredential  []Entry        `json:"by_credential"`
+	ByModel       []Entry        `json:"by_model"`
+	ByClient      []ClientReport `json:"by_client"` // per client key, with per-model breakdown + cost
+	Series        []Bucket       `json:"series"`    // hourly, chronological
+	SinceUnix     int64          `json:"since_unix"`
+	GeneratedUnix int64          `json:"generated_unix"`
 }
 
 // retentionHours bounds how much hourly history is kept (~30 days).
@@ -63,6 +75,7 @@ type Price struct {
 // Event is one recorded request outcome.
 type Event struct {
 	Credential   string
+	Client       string // managed key name / "config" / "localhost"; "" = not attributed
 	Model        string
 	IsError      bool
 	InputTokens  int64
@@ -74,7 +87,8 @@ type Tracker struct {
 	mu           sync.Mutex
 	byCredential map[string]*Stat
 	byModel      map[string]*Stat
-	buckets      map[int64]*Stat // hour-start unix -> stat
+	byClient     map[string]map[string]*Stat // client key -> model -> stat
+	buckets      map[int64]*Stat             // hour-start unix -> stat
 	totals       Stat
 	since        time.Time
 	now          func() time.Time
@@ -106,6 +120,7 @@ func New(opts ...Option) *Tracker {
 	t := &Tracker{
 		byCredential: map[string]*Stat{},
 		byModel:      map[string]*Stat{},
+		byClient:     map[string]map[string]*Stat{},
 		buckets:      map[int64]*Stat{},
 		pricing:      map[string]Price{},
 		now:          time.Now,
@@ -183,6 +198,14 @@ func (t *Tracker) Record(e Event) {
 	apply(&t.totals, e, now)
 	apply(get(t.byCredential, cred), e, now)
 	apply(get(t.byModel, model), e, now)
+	if e.Client != "" {
+		cm := t.byClient[e.Client]
+		if cm == nil {
+			cm = map[string]*Stat{}
+			t.byClient[e.Client] = cm
+		}
+		apply(get(cm, model), e, now)
+	}
 
 	b, ok := t.buckets[hour]
 	if !ok {
@@ -239,24 +262,69 @@ func (t *Tracker) Snapshot() Report {
 	}
 	sort.Slice(series, func(i, j int) bool { return series[i].Unix < series[j].Unix })
 
+	byClient := make([]ClientReport, 0, len(t.byClient))
+	for name := range t.byClient {
+		byClient = append(byClient, t.clientReportLocked(name))
+	}
+	sort.Slice(byClient, func(i, j int) bool {
+		if byClient[i].Requests != byClient[j].Requests {
+			return byClient[i].Requests > byClient[j].Requests
+		}
+		return byClient[i].Name < byClient[j].Name
+	})
+
 	return Report{
 		Totals:        t.totals,
 		TotalCost:     total,
 		ByCredential:  entries(t.byCredential),
 		ByModel:       byModel,
+		ByClient:      byClient,
 		Series:        series,
 		SinceUnix:     t.since.Unix(),
 		GeneratedUnix: t.now().Unix(),
 	}
 }
 
+// ClientUsage returns the cumulative usage of one client key (per-model
+// breakdown, tokens, and cost). The bool is false when the key has no recorded
+// usage yet.
+func (t *Tracker) ClientUsage(name string) (ClientReport, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.byClient[name]; !ok {
+		return ClientReport{}, false
+	}
+	return t.clientReportLocked(name), true
+}
+
+// clientReportLocked builds the report for one client key. The caller holds mu.
+func (t *Tracker) clientReportLocked(name string) ClientReport {
+	byModel := entries(t.byClient[name])
+	var cr ClientReport
+	cr.Name = name
+	for i := range byModel {
+		byModel[i].Cost = t.modelCost(byModel[i].Name, byModel[i].Stat)
+		cr.Cost += byModel[i].Cost
+		cr.Requests += byModel[i].Requests
+		cr.Errors += byModel[i].Errors
+		cr.InputTokens += byModel[i].InputTokens
+		cr.OutputTokens += byModel[i].OutputTokens
+		if byModel[i].LastUsed.After(cr.LastUsed) {
+			cr.LastUsed = byModel[i].LastUsed
+		}
+	}
+	cr.ByModel = byModel
+	return cr
+}
+
 // persisted is the on-disk shape of a tracker's aggregates.
 type persisted struct {
-	Totals       Stat             `json:"totals"`
-	ByCredential map[string]*Stat `json:"by_credential"`
-	ByModel      map[string]*Stat `json:"by_model"`
-	Buckets      map[int64]*Stat  `json:"buckets"`
-	SinceUnix    int64            `json:"since_unix"`
+	Totals       Stat                        `json:"totals"`
+	ByCredential map[string]*Stat            `json:"by_credential"`
+	ByModel      map[string]*Stat            `json:"by_model"`
+	ByClient     map[string]map[string]*Stat `json:"by_client"`
+	Buckets      map[int64]*Stat             `json:"buckets"`
+	SinceUnix    int64                       `json:"since_unix"`
 }
 
 // Save writes the aggregates to path (atomic via temp+rename) so usage survives
@@ -265,7 +333,7 @@ func (t *Tracker) Save(path string) error {
 	t.mu.Lock()
 	data, err := json.Marshal(persisted{
 		Totals: t.totals, ByCredential: t.byCredential, ByModel: t.byModel,
-		Buckets: t.buckets, SinceUnix: t.since.Unix(),
+		ByClient: t.byClient, Buckets: t.buckets, SinceUnix: t.since.Unix(),
 	})
 	t.mu.Unlock()
 	if err != nil {
@@ -302,6 +370,9 @@ func Load(path string, opts ...Option) (*Tracker, error) {
 	}
 	if p.ByModel != nil {
 		t.byModel = p.ByModel
+	}
+	if p.ByClient != nil {
+		t.byClient = p.ByClient
 	}
 	if p.Buckets != nil {
 		t.buckets = p.Buckets

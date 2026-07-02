@@ -55,6 +55,9 @@
   td .row-actions { display:flex; gap:6px; justify-content:flex-end; }
   td a { color:var(--accent); text-decoration:none; }
   td a:hover { text-decoration:underline; }
+  tr.detail > td { padding:0 14px 10px; border-bottom:1px solid var(--line); }
+  table.sub { width:100%; border:1px solid var(--line); border-radius:8px; }
+  table.sub th, table.sub td { padding:5px 10px; font-size:12px; }
 </style>
 </head>
 <body>
@@ -107,6 +110,7 @@
   const fmt = (n) => (n ?? 0).toLocaleString();
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const usd = (c) => c ? "$" + (c >= 1 ? c.toFixed(2) : c.toFixed(4)) : "—";
+  const cssId = (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
   const ago = (unix) => {
     if (!unix) return "—";
     const s = Math.max(0, Math.floor(Date.now()/1000 - unix));
@@ -129,6 +133,10 @@
     tbl.innerHTML = h + (body || `<tr><td colspan="${head.length}" class="muted">no data</td></tr>`);
   }
 
+  // Per-key cumulative usage (name -> {cost, requests, by_model:[…]}), filled from
+  // /admin/stats.by_client and rendered as an expandable row under each key.
+  let byClientMap = {};
+
   async function load() {
     // Try anyway with no key: on the LAN, nginx injects the key for us (keyless).
     // Only prompt for a key if the server actually rejects us (401).
@@ -147,6 +155,7 @@
       ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
       rows($("byCred"), d.by_credential || [], ["name","requests","errors","input","output","last"]);
       rows($("byModel"), d.by_model || [], ["name","requests","errors","input","output","cost","last"], true);
+      byClientMap = Object.fromEntries((d.by_client || []).map(c => [c.name, c]));
       setOpts($("fModel"), (d.by_model || []).map(m => m.name));
       renderChart(d.series || []);
       loadProviders();
@@ -314,7 +323,7 @@
       const r = await fetch("/admin/keys", { headers: authHeaders() });
       if (!r.ok) { $("keys").innerHTML = `<tr><td class="muted">keys: HTTP ${r.status}</td></tr>`; return; }
       const d = await r.json();
-      const head = "<tr><th>name</th><th>key</th><th>state</th><th>created</th><th>last used</th><th></th></tr>";
+      const head = "<tr><th>name</th><th>key</th><th>state</th><th>requests</th><th>tokens</th><th>spend</th><th>created</th><th>last used</th><th></th></tr>";
       const body = (d.keys || []).map(k => {
         const state = k.enabled ? `<span style="color:var(--ok)">on</span>` : `<span class="muted">off</span>`;
         const toggle = k.enabled
@@ -323,11 +332,26 @@
         const del = `<button class="danger" data-n="${k.name}" data-act="delete">delete</button>`;
         const created = k.created_at ? new Date(k.created_at).toLocaleDateString() : "—";
         const used = k.last_used_at && Date.parse(k.last_used_at) > 0 ? ago(Date.parse(k.last_used_at)/1000) : "—";
-        return `<tr><td>${k.name}</td><td class="muted">…${k.last4}</td><td>${state}</td>
+        const u = byClientMap[k.name];
+        const tok = u ? fmt((u.input_tokens||0)+(u.output_tokens||0)) : "—";
+        const spend = u ? usd(u.cost) : "—";
+        const nm = (u && u.by_model && u.by_model.length)
+          ? `<a href="#" class="expand" data-n="${k.name}">${k.name}</a>` : k.name;
+        const detail = `<tr class="detail" id="kd-${cssId(k.name)}" hidden><td></td>
+          <td colspan="8"><table class="sub"><tr><th>model</th><th>requests</th><th>input</th><th>output</th><th>cost</th></tr>${
+            u && u.by_model ? u.by_model.map(m => `<tr><td>${esc(m.name)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td><td class="muted">${usd(m.cost)}</td></tr>`).join("") : ""
+          }</table></td></tr>`;
+        return `<tr><td>${nm}</td><td class="muted">…${k.last4}</td><td>${state}</td>
+          <td>${u?fmt(u.requests):"—"}</td><td>${tok}</td><td class="muted">${spend}</td>
           <td class="muted">${created}</td><td class="muted">${used}</td>
-          <td><div class="row-actions">${toggle}${del}</div></td></tr>`;
+          <td><div class="row-actions">${toggle}${del}</div></td></tr>${detail}`;
       }).join("");
-      $("keys").innerHTML = head + (body || `<tr><td colspan="6" class="muted">no keys yet</td></tr>`);
+      $("keys").innerHTML = head + (body || `<tr><td colspan="9" class="muted">no keys yet</td></tr>`);
+      $("keys").querySelectorAll("a.expand").forEach(a => a.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        const row = document.getElementById("kd-" + cssId(a.dataset.n));
+        if (row) row.hidden = !row.hidden;
+      }));
       $("keys").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
         const n = b.dataset.n, act = b.dataset.act;
         if (act === "delete") {

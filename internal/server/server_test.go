@@ -1354,3 +1354,49 @@ func TestDispatch_OAuth401_ForceRefreshAndRetry(t *testing.T) {
 		t.Errorf("upstream called %d times, want 2 (401 then retry)", n)
 	}
 }
+
+func TestKeyUsage_PerKeyBreakdown(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	ks, err := access.LoadStore(filepath.Join(t.TempDir(), "keys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetClientKeyStore(ks)
+	s.Usage().SetPricing(map[string]usage.Price{"claude": {Input: 3, Output: 15}})
+	// attribute cumulative usage to a client key across two models
+	s.Usage().Record(usage.Event{Client: "gandalf", Model: "claude", InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	s.Usage().Record(usage.Event{Client: "gandalf", Model: "gpt", InputTokens: 500_000})
+	h := s.Handler()
+
+	// unauthorized without a key
+	if rec := do(t, h, "GET", "/admin/keys/gandalf/usage", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no key = %d, want 401", rec.Code)
+	}
+
+	rec := do(t, h, "GET", "/admin/keys/gandalf/usage", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("usage = %d %s", rec.Code, rec.Body.String())
+	}
+	var rep usage.ClientReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Name != "gandalf" || rep.Requests != 2 || rep.Cost != 18 {
+		t.Errorf("report totals = %+v", rep)
+	}
+	if len(rep.ByModel) != 2 {
+		t.Errorf("expected 2 models, got %+v", rep.ByModel)
+	}
+
+	// unknown key -> 200 zero-valued report (so the UI can still render it)
+	rec = do(t, h, "GET", "/admin/keys/ghost/usage", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("ghost = %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Name != "ghost" || rep.Requests != 0 || len(rep.ByModel) != 0 {
+		t.Errorf("ghost report = %+v", rep)
+	}
+}
