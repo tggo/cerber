@@ -23,6 +23,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Multimodal (images) | 🟡 | text+image in translators; image GEN via /v1/images/generations (grok); no video |
 | Model aliases (alias→canonical) | ✅ | `providers.model_aliases`; resolved pre-routing + pre-upstream |
 | Cross-provider/model fallback chains | ✅ | OpenAI endpoint; `providers.fallbacks` + `X-Cerber-Fallback`; retryable-only (5xx/no-cred), pre-commit |
+| Auto prompt-cache breakpoint injection | ✅ | native `/v1/messages`; opt-in `providers.anthropic.cache`; system+tools+message breakpoints; skips client-set cache_control (autocache parity) |
 
 ## Providers
 

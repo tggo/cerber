@@ -162,6 +162,15 @@ func main() {
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetModelAliases(cfg.Providers.ModelAliases)
 	srv.SetFallbacks(cfg.Providers.Fallbacks)
+	if ch := a.Cache; ch != nil && ch.AutoInject {
+		srv.SetCacheConfig(anthropic.CacheOptions{
+			Enabled:   true,
+			Strategy:  anthropic.CacheStrategy(ch.Strategy),
+			MinTokens: ch.MinTokens,
+		})
+		logger.Info("anthropic prompt-cache injection enabled",
+			zap.String("strategy", ch.Strategy), zap.Int("min_tokens", ch.MinTokens))
+	}
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 	srv.SetManagementKey(cfg.Access.ManagementKey)
 

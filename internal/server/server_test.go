@@ -17,6 +17,7 @@ import (
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/provider"
+	anthropicpkg "github.com/tggo/cerber/internal/provider/anthropic"
 	providermocks "github.com/tggo/cerber/internal/provider/mocks"
 	"github.com/tggo/cerber/internal/server/mocks"
 	"github.com/tggo/cerber/internal/usage"
@@ -146,6 +147,126 @@ func TestNative_Passthrough(t *testing.T) {
 	}
 	if rec.Header().Get("Content-Type") != "application/json" {
 		t.Errorf("ct %q", rec.Header().Get("Content-Type"))
+	}
+}
+
+// loggedClientFor returns the recorded Client attribution of the most recent
+// /v1/messages entry in the recent-requests log (read with an authorized key).
+func loggedClientFor(t *testing.T, h http.Handler, adminKey string) string {
+	t.Helper()
+	body := do(t, h, "GET", "/admin/requests", "", adminKey).Body.String()
+	var out struct {
+		Requests []struct {
+			Client   string `json:"client"`
+			Endpoint string `json:"endpoint"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode /admin/requests: %v\n%s", err, body)
+	}
+	for _, e := range out.Requests {
+		if e.Endpoint == "/v1/messages" {
+			return e.Client
+		}
+	}
+	t.Fatalf("no /v1/messages entry in log: %s", body)
+	return ""
+}
+
+// postLoopback issues a POST from a loopback RemoteAddr with an optional bearer
+// key, mimicking a call arriving through a TLS-terminating reverse proxy.
+func postLoopback(t *testing.T, h http.Handler, path, body, key string) int {
+	t.Helper()
+	r := httptest.NewRequest("POST", path, strings.NewReader(body))
+	r.RemoteAddr = "127.0.0.1:5555"
+	if key != "" {
+		r.Header.Set("Authorization", "Bearer "+key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec.Code
+}
+
+// TestAllowLocalhost_KeyFirstAttribution proves per-program spend attribution
+// survives the localhost bypass: a managed key presented from loopback (as
+// happens behind Caddy) is attributed to that key, while no-key / unknown-key
+// loopback calls still land in the shared "localhost" bucket with a 200.
+func TestAllowLocalhost_KeyFirstAttribution(t *testing.T) {
+	s, up, key := managedKeyServer(t, access.Limits{})
+	s.SetAllowLocalhost(true) // reverse-proxy style: every call arrives from loopback
+	up.EXPECT().Send(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"ok"}`), nil)
+	h := s.Handler()
+
+	// loopback + valid managed key -> attributed to the key, NOT "localhost".
+	if code := postLoopback(t, h, "/v1/messages", `{"model":"claude"}`, key); code != 200 {
+		t.Fatalf("loopback+key = %d, want 200", code)
+	}
+	if got := loggedClientFor(t, h, key); got != "mk" {
+		t.Errorf("loopback+managed-key attributed to %q, want \"mk\"", got)
+	}
+
+	// loopback + no key -> allowed, attributed to "localhost".
+	if code := postLoopback(t, h, "/v1/messages", `{"model":"claude"}`, ""); code != 200 {
+		t.Fatalf("loopback+no-key = %d, want 200", code)
+	}
+	if got := loggedClientFor(t, h, key); got != "localhost" {
+		t.Errorf("loopback+no-key attributed to %q, want \"localhost\"", got)
+	}
+
+	// loopback + unknown key -> still allowed (don't 401 local callers), "localhost".
+	if code := postLoopback(t, h, "/v1/messages", `{"model":"claude"}`, "cer_unknown_bogus"); code != 200 {
+		t.Fatalf("loopback+unknown-key = %d, want 200", code)
+	}
+	if got := loggedClientFor(t, h, key); got != "localhost" {
+		t.Errorf("loopback+unknown-key attributed to %q, want \"localhost\"", got)
+	}
+}
+
+// TestAllowLocalhost_KeyGovernanceEnforcedFromLoopback proves a managed key's
+// budget/rate limits are enforced even when the call arrives from loopback —
+// the localhost bypass must not become a governance escape hatch.
+func TestAllowLocalhost_KeyGovernanceEnforcedFromLoopback(t *testing.T) {
+	s, _, key := managedKeyServer(t, access.Limits{MaxCostUSD: 1.0, BudgetPeriod: "hour"})
+	s.SetAllowLocalhost(true)
+	s.keys.Charge("mk", 2.0, 0) // over budget
+	if code := postLoopback(t, s.Handler(), "/v1/messages", `{"model":"claude"}`, key); code != http.StatusPaymentRequired {
+		t.Fatalf("over-budget managed key from loopback = %d, want 402", code)
+	}
+}
+
+func TestNative_CacheInjection_ReachesUpstream(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	s.SetCacheConfig(anthropicpkg.CacheOptions{Enabled: true, Strategy: anthropicpkg.CacheModerate, MinTokens: 1024})
+	var sent []byte
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, body []byte, _ bool, _ *credential.Credential, _ http.Header) (*http.Response, error) {
+			sent = append([]byte(nil), body...)
+			return resp(200, "application/json", `{"id":"x"}`), nil
+		})
+	bigSys := strings.Repeat("stable system context ", 400) // > 4KB -> above MinTokens
+	body := `{"model":"claude","system":"` + bigSys + `","messages":[{"role":"user","content":"hi"}]}`
+	if rec := do(t, s.Handler(), "POST", "/v1/messages", body, clientKey); rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if !strings.Contains(string(sent), `"cache_control"`) {
+		t.Errorf("cache_control not injected into upstream body: %s", sent)
+	}
+}
+
+func TestNative_CacheInjection_DisabledByDefault(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1)) // no SetCacheConfig
+	var sent []byte
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, body []byte, _ bool, _ *credential.Credential, _ http.Header) (*http.Response, error) {
+			sent = append([]byte(nil), body...)
+			return resp(200, "application/json", `{"id":"x"}`), nil
+		})
+	bigSys := strings.Repeat("stable system context ", 400)
+	body := `{"model":"claude","system":"` + bigSys + `","messages":[{"role":"user","content":"hi"}]}`
+	do(t, s.Handler(), "POST", "/v1/messages", body, clientKey)
+	if strings.Contains(string(sent), `"cache_control"`) {
+		t.Error("cache_control must NOT be injected when caching is disabled (default passthrough)")
 	}
 }
 

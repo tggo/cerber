@@ -114,3 +114,12 @@ providers:
       #   name: claude-code-account
       #   access_token: "..."
       #   refresh_token: "..."
+    # Automatic Anthropic prompt-cache breakpoint injection (opt-in). When on,
+    # cerber inserts cache_control markers into native /v1/messages requests so
+    # clients that don't set their own still get prompt caching (big system
+    # prompts + tools cached, not re-billed every call). Requests that already
+    # carry cache_control are left untouched. Off by default (pure passthrough).
+    # cache:
+    #   auto_inject: true
+    #   strategy: moderate    # conservative | moderate | aggressive
+    #   min_tokens: 1024      # est-token floor before a prefix earns a breakpoint

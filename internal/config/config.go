@@ -135,10 +135,21 @@ type Fallback struct {
 
 // Anthropic configures the Anthropic upstream.
 type Anthropic struct {
-	BaseURL     string       `yaml:"base_url"`
-	Version     string       `yaml:"version"`
-	Timeout     Duration     `yaml:"timeout"`
-	Credentials []Credential `yaml:"credentials"`
+	BaseURL     string          `yaml:"base_url"`
+	Version     string          `yaml:"version"`
+	Timeout     Duration        `yaml:"timeout"`
+	Credentials []Credential    `yaml:"credentials"`
+	Cache       *AnthropicCache `yaml:"cache"` // automatic prompt-cache breakpoint injection (opt-in)
+}
+
+// AnthropicCache configures automatic Anthropic prompt-cache breakpoint
+// (`cache_control`) injection on the native /v1/messages path. It is a pure
+// passthrough unless auto_inject is true. cerber never fetches or executes
+// anything for this — it only rewrites the outbound request body.
+type AnthropicCache struct {
+	AutoInject bool   `yaml:"auto_inject"`
+	Strategy   string `yaml:"strategy"`   // conservative|moderate|aggressive (default moderate)
+	MinTokens  int    `yaml:"min_tokens"` // est-token floor a prefix must reach (default 1024)
 }
 
 // OpenAI configures the OpenAI (OpenAI-compatible) upstream.
@@ -231,6 +242,9 @@ const (
 	defaultOllamaBase        = "http://localhost:11434"
 	defaultOllamaProbeNS     = 30 * time.Second
 	defaultProviderWaitNS    = 120 * time.Second
+	// Prompt-cache injection defaults (providers.anthropic.cache).
+	defaultCacheStrategy  = "moderate"
+	defaultCacheMinTokens = 1024
 )
 
 // DefaultAnthropic returns an Anthropic provider config with defaults applied and
@@ -318,6 +332,14 @@ func (c *Config) applyDefaults() {
 		if a.Timeout == 0 {
 			a.Timeout = Duration(defaultAnthropicWaitNS)
 		}
+		if a.Cache != nil && a.Cache.AutoInject {
+			if a.Cache.Strategy == "" {
+				a.Cache.Strategy = defaultCacheStrategy
+			}
+			if a.Cache.MinTokens == 0 {
+				a.Cache.MinTokens = defaultCacheMinTokens
+			}
+		}
 	}
 	if o := c.Providers.OpenAI; o != nil {
 		if o.BaseURL == "" {
@@ -390,6 +412,16 @@ func (c *Config) Validate() error {
 		// non-empty merged set.
 		if err := validateCreds("anthropic", p.Anthropic.BaseURL, p.Anthropic.Credentials, false); err != nil {
 			return err
+		}
+		if ch := p.Anthropic.Cache; ch != nil {
+			switch ch.Strategy {
+			case "", "conservative", "moderate", "aggressive":
+			default:
+				return fmt.Errorf("config: providers.anthropic.cache.strategy %q is not conservative|moderate|aggressive", ch.Strategy)
+			}
+			if ch.MinTokens < 0 {
+				return fmt.Errorf("config: providers.anthropic.cache.min_tokens must be >= 0, got %d", ch.MinTokens)
+			}
 		}
 	}
 	if p.OpenAI != nil {

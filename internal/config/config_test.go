@@ -42,6 +42,98 @@ func TestParse_ValidWithDefaults(t *testing.T) {
 	}
 }
 
+func TestParse_CacheDefaults(t *testing.T) {
+	y := `
+access: {keys: ["k"]}
+providers:
+  anthropic:
+    credentials:
+      - {type: api_key, key: "k"}
+    cache:
+      auto_inject: true
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ch := c.Providers.Anthropic.Cache
+	if ch == nil || !ch.AutoInject {
+		t.Fatal("cache block not parsed")
+	}
+	if ch.Strategy != defaultCacheStrategy {
+		t.Errorf("strategy = %q, want default %q", ch.Strategy, defaultCacheStrategy)
+	}
+	if ch.MinTokens != defaultCacheMinTokens {
+		t.Errorf("min_tokens = %d, want default %d", ch.MinTokens, defaultCacheMinTokens)
+	}
+}
+
+func TestParse_CacheExplicit(t *testing.T) {
+	y := `
+access: {keys: ["k"]}
+providers:
+  anthropic:
+    credentials:
+      - {type: api_key, key: "k"}
+    cache:
+      auto_inject: true
+      strategy: aggressive
+      min_tokens: 2048
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ch := c.Providers.Anthropic.Cache
+	if ch.Strategy != "aggressive" || ch.MinTokens != 2048 {
+		t.Errorf("explicit cache not preserved: %+v", ch)
+	}
+}
+
+func TestParse_CacheDisabled_NoDefaults(t *testing.T) {
+	// auto_inject false: leave the block untouched (no strategy/min_tokens filled).
+	y := `
+access: {keys: ["k"]}
+providers:
+  anthropic:
+    credentials:
+      - {type: api_key, key: "k"}
+    cache:
+      auto_inject: false
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if ch := c.Providers.Anthropic.Cache; ch.Strategy != "" || ch.MinTokens != 0 {
+		t.Errorf("defaults must not apply when auto_inject is false: %+v", ch)
+	}
+}
+
+func TestParse_CacheErrors(t *testing.T) {
+	cases := map[string]string{
+		"bad strategy": `
+access: {keys: ["k"]}
+providers:
+  anthropic:
+    credentials: [{type: api_key, key: "k"}]
+    cache: {auto_inject: true, strategy: wild}
+`,
+		"negative min_tokens": `
+access: {keys: ["k"]}
+providers:
+  anthropic:
+    credentials: [{type: api_key, key: "k"}]
+    cache: {auto_inject: true, min_tokens: -5}
+`,
+	}
+	for name, y := range cases {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("%s: want validation error", name)
+		}
+	}
+}
+
 func TestParse_DefaultAddr(t *testing.T) {
 	y := `
 access: {keys: ["k"]}

@@ -85,3 +85,43 @@ For both modes, on an upstream `401`/`403`/`429` or a network error cerber puts
 that credential in a short cooldown and tries the next one. If every credential is
 unavailable it returns `503`; other upstream errors are surfaced as `502` (or
 relayed as-is for the OpenAI endpoint).
+
+## Automatic prompt-cache injection (opt-in)
+
+Anthropic [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)
+lets you mark a stable request prefix (system prompt, tool definitions, long
+context) with `cache_control` so it's cached upstream and re-read cheaply
+instead of re-billed on every call. Many clients (n8n, Flowise, Make.com, most
+SDK integrations, plain `curl`) never set it and pay full price each time.
+
+cerber can inject the markers for you on the native `/v1/messages` path:
+
+```yaml
+providers:
+  anthropic:
+    cache:
+      auto_inject: true
+      strategy: moderate    # conservative | moderate | aggressive
+      min_tokens: 1024      # est-token floor before a prefix earns a breakpoint
+```
+
+- **Off by default** — without this block the native path is a pure byte
+  passthrough.
+- **Strategy** sets the breakpoint budget and placement (Anthropic caches in the
+  order tools → system → messages, max 4 markers per request):
+  - `conservative` — tools + system prefix only (≤2 markers)
+  - `moderate` (default) — the above + one message-history breakpoint (≤3)
+  - `aggressive` — a second message-history breakpoint (≤4)
+- **Non-destructive.** If your request already carries any `cache_control`,
+  cerber leaves it completely untouched — you keep control of your own
+  breakpoints. String `system` is converted to a single cached text block;
+  message breakpoints are only added to content already in block form (string
+  content is never reshaped). If a body can't be parsed it's forwarded as-is —
+  injection never fails a request.
+- Only prefixes whose estimated size reaches `min_tokens` are marked (a marker
+  below Anthropic's minimum cacheable length is ignored upstream and would just
+  waste one of the four slots). Note Anthropic's real minimum is 1024 tokens for
+  most models, 2048 for Haiku.
+
+Cache hits show up in the response `usage` as `cache_read_input_tokens`; the
+first (writing) call reports `cache_creation_input_tokens`.

@@ -128,9 +128,10 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 ## Live integration testing
 **What:** end-to-end tests against the real Anthropic API through a full cerber server.
 **DoD:**
-- `make integration` (build tag `integration`) runs native, OpenAI-compat, and streaming calls against real Anthropic using `PLAYGROUND_API_KEY`; skips (not fails) if the key is unset; excluded from the unit coverage gate.
+- `make integration` (build tag `integration`) runs native, OpenAI-compat, streaming, per-provider route (OpenAI/Gemini/Grok), and prompt-cache injection calls against the real APIs using `PLAYGROUND_API_KEY` (+ optional `OPENAI_KEY`/`GEMINI_KEY`/`GROK_API_KEY`); each skips (not fails) if its key is unset; excluded from the unit coverage gate.
+- Cache-injection live tests prove the feature end-to-end: two identical big-system calls → `cache_creation_input_tokens > 0` on the first, `cache_read_input_tokens > 0` on the second; a client-supplied `cache_control` request is forwarded untouched and still 200s.
 - `scripts/verify-claude.sh` verifies the real `claude -p` CLI through cerber.
-**Verified:** `make integration` → 3/3 PASS; verify-claude.sh → PASS — 2026-06-07.
+**Verified:** `make integration` → cache + Gemini + Grok + native + OpenAI-compat + streaming PASS (OpenAI route skips/needs a valid `OPENAI_KEY`); verify-claude.sh → PASS — 2026-07-03.
 
 ## Usage & stats
 **What:** cerber tracks request/error/token counts per credential and per model, exposed as JSON.
@@ -209,7 +210,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **DoD:**
 - `access.allow_localhost: true` → requests from `127.0.0.1`/`::1` are accepted with any or no key; non-loopback clients still require a configured key.
 - Config validation allows empty `access.keys` when `allow_localhost` is true.
-**Verified:** `internal/server` allow-localhost + isLoopback tests + live (no-key/any-key localhost → 200) — 2026-06-07.
+- **Attribution is key-first (not RemoteAddr-first).** `authorized()` evaluates a presented key BEFORE the localhost bypass: a static config key → `config`; a managed key → identified, governed (budget/rate enforced even from loopback), and attributed to its name. Only when NO recognised key is presented does a loopback call fall back to the shared `localhost` bucket (an unknown key from loopback lands there too — local scripts are never 401'd for a stale key). This is required so per-program spend still splits by key behind a TLS-terminating reverse proxy (e.g. Caddy), where every request arrives from loopback and RemoteAddr can't distinguish callers — identity comes from the key.
+**Verified:** `internal/server` allow-localhost + isLoopback tests + `TestAllowLocalhost_KeyFirstAttribution` (loopback+managed key → attributed to key; loopback no-key/unknown-key → `localhost` + 200) + `TestAllowLocalhost_KeyGovernanceEnforcedFromLoopback` (over-budget key from loopback → 402); live (no-key/any-key localhost → 200) — 2026-07-07.
 
 ## TLS impersonation (Docker only)
 **What:** in a container, cerber impersonates `api.anthropic.com` so Claude Code treats it as first-party and enables 1M context + tool-search.
@@ -363,6 +365,15 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - The dashboard links into it: each provider → `/chat?provider=<p>`, each account → `/chat?provider=<p>&cred=<name>` (so you can chat on a specific subscription/key).
 - The OpenAI-compatible providers (openai/grok/ollama) honour `X-Cerber-Cred` to pin a credential (`provider.RotateFiltered` + `credential.MatchHeader`, shared with the server), so "chat with this subscription" actually uses it.
 **Verified:** `internal/server` TestChatPage + `internal/provider/openai` TestChat_PinsCredentialByHeader; live — 2026-06-09.
+
+## Anthropic prompt-cache breakpoint injection (opt-in)
+**What:** cerber can automatically inject `cache_control: {"type":"ephemeral"}` breakpoints into native `/v1/messages` requests so clients that don't set their own (n8n, Flowise, SDKs, plain curl) still benefit from Anthropic prompt caching — big system prompts + tools are cached and re-read instead of re-billed on every call.
+**DoD:**
+- Off by default: the native path stays a pure byte passthrough unless `providers.anthropic.cache.auto_inject: true`. Config: `strategy` (conservative|moderate|aggressive, default moderate) + `min_tokens` (default 1024); invalid strategy / negative min_tokens fail validation.
+- Injection follows Anthropic's prefix-cache order (tools → system → messages), spending a per-strategy breakpoint budget (conservative 2, moderate 3, aggressive 4, hard cap 4): the highest-value marker is the `system` block (caches the tools+system prefix), then a tools-only marker, then message-history markers.
+- Non-destructive and safe: if the client already set ANY `cache_control`, cerber does not touch the request (client owns its own breakpoints + the 4-marker budget). A prefix earns a marker only when its estimated size (bytes/4) reaches `min_tokens`. Message breakpoints are placed only on content already in block form — string content is never reshaped. String `system` is converted to a single cached text block (same shape spoof.go already produces). On any parse error the ORIGINAL body is forwarded (injection never fails a request).
+- Injection happens in `handleNative` after model canonicalization and before dispatch; OAuth's Claude Code system prefix (prepended later in `Send`) is unaffected. Scope is the native Anthropic path only (not the OpenAI→Anthropic translator).
+**Verified:** `internal/provider/anthropic` cache_test.go (table-driven: strategy budgets, string/array system, client-cache_control skip, cumulative gate, malformed-body passthrough) + `internal/server` TestNative_CacheInjection_{ReachesUpstream,DisabledByDefault}; live: `make integration` two identical big-system calls → cache_creation=4802 on write, cache_read=4802 on read; client-supplied cache_control forwarded untouched (200) — 2026-07-03.
 
 ## Trust: no phone-home
 **What:** cerber's only outbound network destinations are provider APIs being routed to (or hosts explicitly in config).

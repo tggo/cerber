@@ -33,6 +33,7 @@ import (
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/metrics"
 	"github.com/tggo/cerber/internal/provider"
+	"github.com/tggo/cerber/internal/provider/anthropic"
 	"github.com/tggo/cerber/internal/quota"
 	"github.com/tggo/cerber/internal/translator"
 	"github.com/tggo/cerber/internal/usage"
@@ -89,6 +90,7 @@ type Server struct {
 	cooldown       time.Duration
 	refreshSkew    time.Duration
 	now            func() time.Time
+	cacheOpts      anthropic.CacheOptions // automatic prompt-cache breakpoint injection (native path); disabled by default
 }
 
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
@@ -160,6 +162,11 @@ func (s *Server) SetModelAliases(aliases map[string]string) {
 // SetFallbacks installs cross-provider/model fallback chains for the
 // OpenAI-compatible endpoint. Call before Handler().
 func (s *Server) SetFallbacks(fb []config.Fallback) { s.fallbacks = fb }
+
+// SetCacheConfig enables automatic Anthropic prompt-cache breakpoint injection
+// on the native /v1/messages path. The zero value (default) leaves the path a
+// pure passthrough.
+func (s *Server) SetCacheConfig(opt anthropic.CacheOptions) { s.cacheOpts = opt }
 
 // SetTokenPersister installs a callback invoked with refreshed OAuth tokens so
 // they can be persisted to disk (keyed by credential name).
@@ -1247,6 +1254,15 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, model := s.canonicalModel(body)
+	if s.cacheOpts.Enabled {
+		if injected, changed, err := anthropic.InjectCacheBreakpoints(body, s.cacheOpts); err != nil {
+			// Never fail a request over cache injection: forward the original body.
+			s.log.Warn("cache breakpoint injection failed; forwarding unmodified", zap.Error(err))
+		} else if changed {
+			body = injected
+			s.log.Debug("cache breakpoints injected", zap.String("strategy", string(s.cacheOpts.Strategy)))
+		}
+	}
 	stream := wantsStream(body)
 	s.log.Debug("native request", append(debugRequestFields(body, stream),
 		zap.String("anthropic_beta", r.Header.Get("anthropic-beta")))...)
@@ -1897,12 +1913,14 @@ func isCredFailure(status int) bool {
 
 func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	meta := reqMeta{ip: clientIP(r), ua: r.UserAgent(), endpoint: r.URL.Path}
-	if s.allowLocalhost && isLoopback(r.RemoteAddr) {
-		meta.client = "localhost"
-		*r = *r.WithContext(withReqMeta(r.Context(), meta))
-		return true
-	}
 	presented := access.FromRequest(r)
+	// Attribution is key-first: a recognised key wins over the localhost
+	// convenience path. Behind a TLS-terminating reverse proxy (e.g. Caddy) EVERY
+	// request reaches cerber from loopback, so keying off RemoteAddr first would
+	// lump all traffic into "localhost" and never evaluate — or charge — a
+	// presented key. Identify the caller by key first (even from loopback); fall
+	// back to the shared "localhost" bucket only when no recognised key is given.
+
 	// Static config keys are the operator's own and bypass per-key governance.
 	if s.access.Allow(presented) {
 		meta.client = "config"
@@ -1910,21 +1928,32 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	// Managed (dashboard) keys carry optional budgets/rate-limits: identify the
-	// key, enforce its limits, and stash its name on the context so the response
-	// path can charge cost/tokens back to it (see record).
-	if name, ok := s.keys.Identify(presented); ok {
-		switch s.keys.Admit(name) {
-		case access.DeniedBudget:
-			s.log.Warn("client key budget exceeded", zap.String("key", name))
-			writeError(w, http.StatusPaymentRequired, "client key budget exceeded")
-			return false
-		case access.DeniedRate:
-			s.log.Warn("client key rate limit exceeded", zap.String("key", name))
-			writeError(w, http.StatusTooManyRequests, "client key rate limit exceeded")
-			return false
+	// key, enforce its limits (even from loopback), and stash its name on the
+	// context so the response path can charge cost/tokens back to it (see record).
+	if s.keys != nil {
+		if name, ok := s.keys.Identify(presented); ok {
+			switch s.keys.Admit(name) {
+			case access.DeniedBudget:
+				s.log.Warn("client key budget exceeded", zap.String("key", name))
+				writeError(w, http.StatusPaymentRequired, "client key budget exceeded")
+				return false
+			case access.DeniedRate:
+				s.log.Warn("client key rate limit exceeded", zap.String("key", name))
+				writeError(w, http.StatusTooManyRequests, "client key rate limit exceeded")
+				return false
+			}
+			meta.client = name
+			*r = *r.WithContext(withClientKey(withReqMeta(r.Context(), meta), name))
+			return true
 		}
-		meta.client = name
-		*r = *r.WithContext(withClientKey(withReqMeta(r.Context(), meta), name))
+	}
+	// Localhost convenience: no recognised key was presented, but the call is
+	// loopback and allow_localhost is on. Allow it, lumped into the shared
+	// "localhost" bucket. An unknown key from loopback lands here too — local
+	// scripts must not be 401'd for presenting a stale/wrong key.
+	if s.allowLocalhost && isLoopback(r.RemoteAddr) {
+		meta.client = "localhost"
+		*r = *r.WithContext(withReqMeta(r.Context(), meta))
 		return true
 	}
 	// Diagnostic without leaking secrets: which auth the client sent and how long
