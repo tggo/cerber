@@ -367,6 +367,63 @@ func TestParse_OllamaFallbackBaseURLs(t *testing.T) {
 	}
 }
 
+func TestParse_OllamaHostsAndConcurrency(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {ollama: {concurrency: 3, hosts: [{base_url: \"http://gpu0:11434\", concurrency: 2}, {base_url: \"http://xeon:11434\"}]}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Ollama.Concurrency != 3 || len(c.Providers.Ollama.Hosts) != 2 {
+		t.Fatalf("parsed ollama = %+v", c.Providers.Ollama)
+	}
+	for _, bad := range []string{
+		"access: {keys: [k]}\nproviders: {ollama: {concurrency: -1}}",
+		"access: {keys: [k]}\nproviders: {ollama: {hosts: [{base_url: \"ftp://x\"}]}}",
+		"access: {keys: [k]}\nproviders: {ollama: {hosts: [{base_url: \"http://gpu0:11434\", concurrency: -2}]}}",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("expected error for %q", bad)
+		}
+	}
+}
+
+func TestOllamaResolvedHosts(t *testing.T) {
+	tests := []struct {
+		name string
+		in   Ollama
+		want []OllamaHost
+	}{
+		{
+			name: "legacy base+fallback inherit provider cap",
+			in:   Ollama{BaseURL: "http://gpu0:11434", FallbackBaseURLs: []string{"http://xeon:11434"}, Concurrency: 2},
+			want: []OllamaHost{{"http://gpu0:11434", 2}, {"http://xeon:11434", 2}},
+		},
+		{
+			name: "legacy base only, no cap",
+			in:   Ollama{BaseURL: "http://gpu0:11434"},
+			want: []OllamaHost{{"http://gpu0:11434", 0}},
+		},
+		{
+			name: "explicit hosts win; per-host cap wins, else provider default",
+			in:   Ollama{BaseURL: "http://ignored:11434", Concurrency: 5, Hosts: []OllamaHost{{"http://gpu0:11434", 2}, {"http://xeon:11434", 0}}},
+			want: []OllamaHost{{"http://gpu0:11434", 2}, {"http://xeon:11434", 5}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.in.ResolvedHosts()
+			if len(got) != len(tt.want) {
+				t.Fatalf("hosts = %+v, want %+v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("host[%d] = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestParse_OllamaRouting(t *testing.T) {
 	y := "access: {keys: [k]}\nproviders: {ollama: {base_url: \"http://gpu0:11434\"}, routing: [{prefix: llama, provider: ollama}]}"
 	c, err := Parse([]byte(y))

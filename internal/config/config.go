@@ -198,6 +198,50 @@ type Ollama struct {
 	// unreachable or 5xx — host-level failover, e.g. a CPU box backing up the GPU
 	// one for embeddings. Same model names must be pulled on each host.
 	FallbackBaseURLs []string `yaml:"fallback_base_urls"`
+	// Concurrency is the default per-host in-flight cap applied to base_url and
+	// each fallback host (0 = unlimited). A single local box (esp. one GPU) can
+	// only serve a few embedding/chat requests at once; capping here makes a burst
+	// queue instead of overloading the box into 5xx/timeout. Overridden per host
+	// by Hosts[].Concurrency.
+	Concurrency int `yaml:"concurrency"`
+	// Hosts lists ollama upstreams explicitly, each with its own concurrency cap —
+	// for boxes of differing capacity (a GPU box cap 2, a CPU box cap 1). When set
+	// it takes precedence over base_url + fallback_base_urls: the first entry is
+	// primary, the rest are ordered failover targets.
+	Hosts []OllamaHost `yaml:"hosts"`
+}
+
+// OllamaHost is one ollama/vLLM upstream with an optional per-host concurrency
+// cap. Capacity is per box, so the cap is per host, not per provider.
+type OllamaHost struct {
+	BaseURL     string `yaml:"base_url"`
+	Concurrency int    `yaml:"concurrency"` // max in-flight to THIS host; 0 = provider default (Ollama.Concurrency)
+}
+
+// ResolvedHosts returns the ordered upstreams (primary first) with per-host
+// concurrency caps, unifying the explicit Hosts form with the legacy
+// base_url + fallback_base_urls form. A host's own Concurrency wins; when 0 it
+// inherits the provider-level Ollama.Concurrency (which may itself be 0 =
+// unlimited). Always returns at least one host.
+func (o *Ollama) ResolvedHosts() []OllamaHost {
+	capOr := func(hostCap int) int {
+		if hostCap > 0 {
+			return hostCap
+		}
+		return o.Concurrency
+	}
+	if len(o.Hosts) > 0 {
+		out := make([]OllamaHost, 0, len(o.Hosts))
+		for _, h := range o.Hosts {
+			out = append(out, OllamaHost{BaseURL: h.BaseURL, Concurrency: capOr(h.Concurrency)})
+		}
+		return out
+	}
+	out := []OllamaHost{{BaseURL: o.BaseURL, Concurrency: o.Concurrency}}
+	for _, u := range o.FallbackBaseURLs {
+		out = append(out, OllamaHost{BaseURL: u, Concurrency: o.Concurrency})
+	}
+	return out
 }
 
 // CredentialType enumerates the supported Anthropic auth mechanisms.
@@ -455,6 +499,17 @@ func (c *Config) Validate() error {
 		for i, u := range p.Ollama.FallbackBaseURLs {
 			if parsed, err := url.Parse(u); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 				return fmt.Errorf("config: providers.ollama.fallback_base_urls[%d] must be an http(s) URL, got %q", i, u)
+			}
+		}
+		if p.Ollama.Concurrency < 0 {
+			return fmt.Errorf("config: providers.ollama.concurrency must be >= 0 (0 = unlimited), got %d", p.Ollama.Concurrency)
+		}
+		for i, h := range p.Ollama.Hosts {
+			if parsed, err := url.Parse(h.BaseURL); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return fmt.Errorf("config: providers.ollama.hosts[%d].base_url must be an http(s) URL, got %q", i, h.BaseURL)
+			}
+			if h.Concurrency < 0 {
+				return fmt.Errorf("config: providers.ollama.hosts[%d].concurrency must be >= 0 (0 = provider default), got %d", i, h.Concurrency)
 			}
 		}
 	}

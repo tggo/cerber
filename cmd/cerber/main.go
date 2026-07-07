@@ -292,13 +292,23 @@ func main() {
 			logger.Fatal("ollama credentials", zap.Error(err))
 		}
 		// ollama/vLLM serve an OpenAI-compatible API: reuse the OpenAI provider.
-		// fallback_base_urls give host-level failover (e.g. a CPU box backing up
-		// the GPU one for embeddings) when the primary is unreachable/5xx.
+		// ResolvedHosts unifies base_url + fallback_base_urls and the explicit
+		// hosts form into an ordered list with per-host concurrency caps (host-level
+		// failover: primary first, then backups on unreachable/5xx). Each host's cap
+		// makes a burst queue instead of overloading a single local box. Transport
+		// penalty is disabled: a keyless local box being overloaded/down is a
+		// capacity signal, not a bad credential, so it must not sideline the only
+		// (dummy) credential and 503 the whole provider until the backoff expires.
+		rh := o.ResolvedHosts()
+		hosts := make([]openai.HostConfig, 0, len(rh))
+		for _, h := range rh {
+			hosts = append(hosts, openai.HostConfig{URL: h.BaseURL, Concurrency: h.Concurrency})
+		}
 		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()},
-			openai.WithQueueMetrics(srv.Metrics()), openai.WithFallbackBaseURLs(o.FallbackBaseURLs)))
+			openai.WithQueueMetrics(srv.Metrics()), openai.WithHosts(hosts), openai.WithTransportPenaltyDisabled()))
 		srv.RegisterProviderStore("ollama", ostore)
 		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
-			zap.Strings("fallback_base_urls", o.FallbackBaseURLs), zap.Int("credentials", ostore.Len()))
+			zap.Any("hosts", rh), zap.Int("credentials", ostore.Len()))
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {

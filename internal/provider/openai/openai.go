@@ -33,27 +33,42 @@ const ImagesPath = "/v1/images/generations"
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
 const defaultCooldown = 60 * time.Second
 
+// hostGate is one upstream host plus its own concurrency semaphore. Different
+// boxes have different capacity (a GPU box may serve 2 concurrent requests, a
+// CPU box 1), so the cap is per host, not per provider. sem == nil = unlimited.
+type hostGate struct {
+	url string
+	sem chan struct{}
+}
+
 // Provider routes OpenAI-format requests to an OpenAI-compatible upstream. The
 // same implementation serves OpenAI and any OpenAI-compatible API (e.g. xAI/Grok)
 // — only the name and base URL differ.
 type Provider struct {
 	name     string
-	baseURL  string
+	baseURL  string // primary host, for ProbeCredential + BaseURL() display
 	store    *credential.Store
 	http     provider.HTTPDoer
 	cooldown time.Duration
 
-	// fallbackURLs are additional upstream hosts (e.g. a second ollama box) tried
-	// in order when the primary baseURL is unreachable (transport error) or 5xx —
-	// host-level failover, transparent to the model name. Empty = primary only.
-	fallbackURLs []string
+	// hosts is the ordered upstream list: primary first, then failover targets
+	// (e.g. a second ollama box). On a transport error or 5xx from one host the
+	// same request is retried against the next — host-level failover, transparent
+	// to the model name. Each host carries its own in-flight semaphore: a slot is
+	// held for the whole request (including while the client streams the response
+	// body) and released when the body is closed, so requests beyond a host's cap
+	// queue until a connection frees. Always has at least one entry.
+	hosts []hostGate
 
-	// sem serialises in-flight chat/forward/image requests to respect an
-	// upstream concurrency cap (e.g. ArliAI plans allow N concurrent streams).
-	// nil = unlimited. A slot is held for the whole request — including the time
-	// the client streams the response body — and released when the body is
-	// closed, so queued requests wait until a connection frees.
-	sem chan struct{}
+	// penalizeTransport, when false, keeps a transport error / exhausted-host 5xx
+	// from sidelining the credential (see provider.RotateOpts) — for keyless local
+	// providers where that failure is a capacity signal, not a bad credential.
+	penalizeTransport bool
+
+	// Pending option state, resolved into hosts by normalize() after options run.
+	primaryCap   int          // WithConcurrency: cap for base_url (+ legacy fallbacks)
+	fallbackURLs []string     // WithFallbackBaseURLs: legacy extra hosts
+	hostConfigs  []HostConfig // WithHosts: explicit per-host list (takes precedence)
 
 	// qm observes concurrency-gate behaviour (in-flight count, queue depth and
 	// wait). nil = no observation.
@@ -80,16 +95,19 @@ type QueueMetrics interface {
 // Option configures a Provider at construction.
 type Option func(*Provider)
 
-// WithConcurrency caps the number of in-flight requests this provider sends
-// upstream at once (e.g. an ArliAI plan that allows n concurrent streams).
-// n <= 0 leaves it unlimited. Requests beyond the cap queue and wait for an
-// in-flight one to finish (its response body to be closed).
+// HostConfig is one upstream host with its own concurrency cap, for WithHosts.
+type HostConfig struct {
+	URL         string
+	Concurrency int // max in-flight to THIS host; <= 0 = unlimited
+}
+
+// WithConcurrency caps the number of in-flight requests this provider sends to
+// the primary host at once (e.g. an ArliAI plan that allows n concurrent
+// streams). n <= 0 leaves it unlimited. Requests beyond the cap queue and wait
+// for an in-flight one to finish (its response body to be closed). Ignored when
+// WithHosts is used (per-host caps are given there instead).
 func WithConcurrency(n int) Option {
-	return func(p *Provider) {
-		if n > 0 {
-			p.sem = make(chan struct{}, n)
-		}
-	}
+	return func(p *Provider) { p.primaryCap = n }
 }
 
 // WithQueueMetrics attaches a QueueMetrics observer so the provider reports its
@@ -101,6 +119,8 @@ func WithQueueMetrics(qm QueueMetrics) Option {
 // WithFallbackBaseURLs sets additional upstream hosts tried (in order) when the
 // primary base URL is unreachable or 5xx — e.g. a CPU ollama box that backs up
 // the GPU one for embeddings. Each is trimmed of a trailing slash; empties drop.
+// The primary's WithConcurrency cap (if any) applies to each fallback too; for
+// distinct per-host caps use WithHosts. Ignored when WithHosts is used.
 func WithFallbackBaseURLs(urls []string) Option {
 	return func(p *Provider) {
 		for _, u := range urls {
@@ -111,43 +131,107 @@ func WithFallbackBaseURLs(urls []string) Option {
 	}
 }
 
+// WithHosts sets the full ordered upstream list, each host with its own
+// concurrency cap — for a provider spread across boxes of differing capacity
+// (e.g. ollama on a GPU box cap 2 + a CPU box cap 1). The first host is primary,
+// the rest are failover targets. Takes precedence over the base URL passed to
+// New and over WithConcurrency/WithFallbackBaseURLs. Empty URLs are dropped.
+func WithHosts(hosts []HostConfig) Option {
+	return func(p *Provider) {
+		for _, h := range hosts {
+			if u := strings.TrimRight(h.URL, "/"); u != "" {
+				p.hostConfigs = append(p.hostConfigs, HostConfig{URL: u, Concurrency: h.Concurrency})
+			}
+		}
+	}
+}
+
+// WithTransportPenaltyDisabled keeps a transport error / exhausted-host 5xx from
+// sidelining the credential — for a keyless local provider (ollama/vLLM) where
+// such a failure is a capacity/host signal, not a bad credential. Without it, an
+// overload of the single dummy credential would 503 the whole provider until the
+// exponential backoff expires. See provider.RotateOpts.PenalizeTransport.
+func WithTransportPenaltyDisabled() Option {
+	return func(p *Provider) { p.penalizeTransport = false }
+}
+
 // New builds a Provider with the given name (e.g. "openai", "grok") and base URL
 // (e.g. https://api.openai.com, https://api.x.ai).
 func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer, opts ...Option) *Provider {
 	p := &Provider{
-		name:     name,
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		store:    store,
-		http:     doer,
-		cooldown: defaultCooldown,
+		name:              name,
+		baseURL:           strings.TrimRight(baseURL, "/"),
+		store:             store,
+		http:              doer,
+		cooldown:          defaultCooldown,
+		penalizeTransport: true,
 	}
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.normalize()
 	return p
 }
 
-// acquire takes a concurrency slot, blocking (respecting ctx cancellation) until
-// one is free. A no-op when concurrency is unlimited. On success the caller must
-// eventually call release exactly once.
-func (p *Provider) acquire(ctx context.Context) error {
-	if p.sem == nil {
+// normalize resolves the pending option state (base URL, WithConcurrency,
+// WithFallbackBaseURLs, WithHosts) into the ordered hosts list with per-host
+// semaphores. Always leaves at least one host; sets baseURL to the primary.
+func (p *Provider) normalize() {
+	newSem := func(n int) chan struct{} {
+		if n > 0 {
+			return make(chan struct{}, n)
+		}
 		return nil
 	}
-	select {
-	case p.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	if len(p.hostConfigs) > 0 {
+		for _, h := range p.hostConfigs {
+			p.hosts = append(p.hosts, hostGate{url: h.URL, sem: newSem(h.Concurrency)})
+		}
+		p.baseURL = p.hosts[0].url
+		return
+	}
+	p.hosts = []hostGate{{url: p.baseURL, sem: newSem(p.primaryCap)}}
+	for _, u := range p.fallbackURLs {
+		p.hosts = append(p.hosts, hostGate{url: u, sem: newSem(p.primaryCap)})
 	}
 }
 
-// release frees a concurrency slot taken by acquire.
-func (p *Provider) release() {
-	if p.sem == nil {
-		return
+// acquire takes host h's concurrency slot (recording queue depth/wait and
+// in-flight count), blocking — respecting ctx cancellation — until one is free.
+// It returns a release closure the caller must run exactly once (on failure
+// immediately; on success when the response body is closed), or nil when there
+// is nothing to gate (unlimited host and no metrics observer).
+func (p *Provider) acquire(ctx context.Context, sem chan struct{}) (func(), error) {
+	if sem == nil && p.qm == nil {
+		return nil, nil
 	}
-	<-p.sem
+	if p.qm != nil {
+		p.qm.QueueDepthInc(p.name)
+	}
+	start := p.clock()
+	if sem != nil {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			if p.qm != nil {
+				p.qm.QueueDepthDec(p.name)
+			}
+			return nil, ctx.Err()
+		}
+	}
+	if p.qm != nil {
+		p.qm.QueueDepthDec(p.name)
+		p.qm.QueueWait(p.name, p.clock().Sub(start).Seconds())
+		p.qm.InflightInc(p.name)
+	}
+	return func() {
+		if sem != nil {
+			<-sem
+		}
+		if p.qm != nil {
+			p.qm.InflightDec(p.name)
+		}
+	}, nil
 }
 
 // clock returns the provider's clock (time.Now unless injected for tests).
@@ -158,83 +242,70 @@ func (p *Provider) clock() time.Time {
 	return time.Now()
 }
 
-// sendHosts tries the request against the primary host then each fallback host
-// (in order), advancing on a transport error or a 5xx status — host-level
-// failover for when the primary box is down. build is called fresh per host (so
-// the request body is re-created each attempt). A non-5xx response is returned
-// as-is (incl. 4xx, which is a client error identical on every host). If all
-// hosts fail it returns the last error.
-func (p *Provider) sendHosts(build func(base string) (*http.Request, error)) (*http.Response, error) {
-	hosts := append([]string{p.baseURL}, p.fallbackURLs...)
+// sendHosts tries the request against each host in order (primary then failover
+// targets), advancing on a transport error or a 5xx status — host-level failover
+// for when a box is down. Each attempt first takes that host's concurrency slot
+// (queuing if the host is at capacity): on a failed attempt the slot is released
+// before trying the next host; on the returned (successful or single-host 5xx)
+// response the slot is held until the caller closes the body. build is called
+// fresh per host (so the request body is re-created each attempt). A non-5xx
+// response is returned as-is (incl. 4xx, a client error identical on every host).
+// If all hosts fail it returns the last error.
+func (p *Provider) sendHosts(ctx context.Context, build func(base string) (*http.Request, error)) (*http.Response, error) {
+	multi := len(p.hosts) > 1
 	var lastErr error
-	for _, base := range hosts {
-		req, err := build(base)
+	for _, h := range p.hosts {
+		req, err := build(h.url)
 		if err != nil {
 			return nil, err // build error is request-shaped, not host-related — don't failover
 		}
+		release, err := p.acquire(ctx, h.sem)
+		if err != nil {
+			return nil, err // ctx canceled while queued for a slot
+		}
 		resp, err := p.http.Do(req)
 		if err != nil {
+			if release != nil {
+				release()
+			}
+			if ctx.Err() != nil { // client canceled — don't thrash the remaining hosts
+				return nil, ctx.Err()
+			}
 			lastErr = err
 			continue
 		}
-		if resp.StatusCode >= 500 && len(hosts) > 1 {
+		if resp.StatusCode >= 500 && multi {
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("openai: host %s returned %d", base, resp.StatusCode)
+			if release != nil {
+				release()
+			}
+			lastErr = fmt.Errorf("openai: host %s returned %d", h.url, resp.StatusCode)
 			continue
+		}
+		if release != nil {
+			resp.Body = &gatedBody{ReadCloser: resp.Body, release: release}
 		}
 		return resp, nil
 	}
 	return nil, lastErr
 }
 
-// gatedRotate acquires a concurrency slot (recording queue depth/wait and
-// in-flight count), rotates across credentials, and (on success) returns a
-// Response whose Body releases the slot when closed. On failure the slot is
-// released immediately. Callers MUST close the returned Body — every server
-// handler does (defer resp.Body.Close()).
+// gatedRotate rotates across credentials (per-host concurrency gating happens
+// inside the send callback via sendHosts) and returns the OpenAI-format response
+// unchanged. Callers MUST close the returned Body — every server handler does
+// (defer resp.Body.Close()) — which is also what releases the held host slot.
 func (p *Provider) gatedRotate(ctx context.Context, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*provider.Response, error) {
-	if p.qm != nil {
-		p.qm.QueueDepthInc(p.name)
-	}
-	start := p.clock()
-	err := p.acquire(ctx)
-	if p.qm != nil {
-		p.qm.QueueDepthDec(p.name)
-	}
+	resp, credName, err := provider.RotateFilteredOpts(ctx, p.store, p.cooldown, match, send,
+		provider.RotateOpts{PenalizeTransport: p.penalizeTransport})
 	if err != nil {
-		return nil, err
-	}
-	if p.qm != nil {
-		p.qm.QueueWait(p.name, p.clock().Sub(start).Seconds())
-		p.qm.InflightInc(p.name)
-	}
-	// release frees the slot and decrements in-flight, exactly once.
-	release := func() {
-		p.release()
-		if p.qm != nil {
-			p.qm.InflightDec(p.name)
-		}
-	}
-	resp, credName, err := provider.RotateFiltered(ctx, p.store, p.cooldown, match, send)
-	if err != nil {
-		release()
 		return nil, err
 	}
 	return &provider.Response{
 		Status:     resp.StatusCode,
 		Header:     resp.Header,
-		Body:       p.gateBody(resp.Body, release),
+		Body:       resp.Body,
 		Credential: credName,
 	}, nil
-}
-
-// gateBody wraps rc so closing it runs release exactly once. When neither a
-// concurrency cap nor a metrics observer is set, it returns rc unchanged.
-func (p *Provider) gateBody(rc io.ReadCloser, release func()) io.ReadCloser {
-	if p.sem == nil && p.qm == nil {
-		return rc
-	}
-	return &gatedBody{ReadCloser: rc, release: release}
 }
 
 // gatedBody releases a concurrency slot when the underlying body is closed.
@@ -298,7 +369,7 @@ func (p *Provider) BaseURL() string { return p.baseURL }
 func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
-		return p.sendHosts(func(base string) (*http.Request, error) {
+		return p.sendHosts(ctx, func(base string) (*http.Request, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+ImagesPath, bytes.NewReader(body))
 			if err != nil {
 				return nil, fmt.Errorf("openai: build image request: %w", err)
@@ -318,7 +389,7 @@ func (p *Provider) Images(ctx context.Context, body []byte, clientHeader http.He
 func (p *Provider) Forward(ctx context.Context, subpath string, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
-		return p.sendHosts(func(base string) (*http.Request, error) {
+		return p.sendHosts(ctx, func(base string) (*http.Request, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+subpath, bytes.NewReader(body))
 			if err != nil {
 				return nil, fmt.Errorf("openai: build forward request: %w", err)
@@ -383,7 +454,7 @@ func (p *Provider) ProbeCredential(ctx context.Context, c *credential.Credential
 func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHeader http.Header) (*provider.Response, error) {
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
-		return p.sendHosts(func(base string) (*http.Request, error) {
+		return p.sendHosts(ctx, func(base string) (*http.Request, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+ChatPath, bytes.NewReader(body))
 			if err != nil {
 				return nil, fmt.Errorf("openai: build request: %w", err)

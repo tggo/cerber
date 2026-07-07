@@ -78,11 +78,15 @@ providers:
 
   ollama:                                   # local models on gpu0 (HomeOffice, via WG)
     base_url: "http://192.168.89.233:11434"
-    # Host-level failover: if gpu0 is unreachable/5xx, retry on xeon's ollama
-    # (CPU box, slower — availability over speed). Same models pulled on both
-    # (bge-m3, nomic-embed-text). Used for embeddings + chat alike.
-    fallback_base_urls:
-      - "http://192.168.89.61:11434"
+    # Per-host concurrency caps + host-level failover. gpu0 is a single GPU: a
+    # burst of parallel embedding workflows overloads it into 5xx/timeout, so cap
+    # its in-flight at 2 (extra requests queue). xeon is a CPU box (availability
+    # over speed) — cap 1. First host is primary; the rest are failover targets
+    # tried in order on unreachable/5xx. Same models pulled on both (bge-m3,
+    # nomic-embed-text). Used for embeddings + chat alike.
+    hosts:
+      - { base_url: "http://192.168.89.233:11434", concurrency: 2 }   # gpu0 (GPU)
+      - { base_url: "http://192.168.89.61:11434",  concurrency: 1 }   # xeon (CPU backup)
   routing:
     - { prefix: "llama",   provider: ollama }
     - { prefix: "qwen",    provider: ollama }

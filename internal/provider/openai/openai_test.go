@@ -588,3 +588,125 @@ func TestFailover_SingleHost5xxRelayed(t *testing.T) {
 		t.Errorf("status = %d, want 502 relayed", out.Status)
 	}
 }
+
+// TestWithHosts_PerHostCapQueues verifies WithHosts wires a per-host semaphore:
+// with the primary capped at 1, a second request to it queues (its upstream Do
+// never runs) until the first frees the slot by closing the response body.
+func TestWithHosts_PerHostCapQueues(t *testing.T) {
+	var calls int32
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return resp(200, `{"ok":1}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer,
+		WithHosts([]HostConfig{{URL: "http://gpu0:11434", Concurrency: 1}, {URL: "http://xeon:11434", Concurrency: 1}}))
+	body := []byte(`{"model":"bge-m3"}`)
+
+	a, err := p.Forward(context.Background(), "/v1/embeddings", body, false, nil)
+	if err != nil {
+		t.Fatalf("A: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("after A: Do calls = %d, want 1", got)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		b, err := p.Forward(context.Background(), "/v1/embeddings", body, false, nil)
+		if err == nil {
+			b.Body.Close()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("B proceeded while A held the primary's only slot")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("B's Do ran while queued: calls = %d", got)
+	}
+
+	a.Body.Close() // free the slot
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("B did not proceed after the slot freed")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("final Do calls = %d, want 2", got)
+	}
+}
+
+// TestWithHosts_FailoverReleasesPrimarySlot verifies a failed primary attempt
+// releases the primary's slot before failing over: with the primary always 5xx
+// and capped at 1, back-to-back requests still fail over to the healthy second
+// host (they don't deadlock waiting on the primary's slot).
+func TestWithHosts_FailoverReleasesPrimarySlot(t *testing.T) {
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "gpu0:11434" {
+			return resp(503, `{"error":"overloaded"}`), nil
+		}
+		return resp(200, `{"ok":1}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer,
+		WithHosts([]HostConfig{{URL: "http://gpu0:11434", Concurrency: 1}, {URL: "http://xeon:11434", Concurrency: 1}}))
+
+	for i := 0; i < 3; i++ {
+		out, err := p.Forward(context.Background(), "/v1/embeddings", []byte(`{}`), false, nil)
+		if err != nil {
+			t.Fatalf("request %d failed over incorrectly: %v", i, err)
+		}
+		if out.Status != 200 {
+			t.Errorf("request %d status = %d, want 200 (failed over to xeon)", i, out.Status)
+		}
+		out.Body.Close()
+	}
+}
+
+// TestTransportPenaltyDisabled_KeepsCredentialUsable verifies that with
+// WithTransportPenaltyDisabled, an all-hosts-down failure does NOT sideline the
+// (only, keyless) credential: the very next request — once the box recovers —
+// succeeds immediately, and the failure surfaces the transport error, never
+// credential.ErrNoneAvailable. This is the fix for the burst→30-min-outage bug.
+func TestTransportPenaltyDisabled_KeepsCredentialUsable(t *testing.T) {
+	var n int32
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&n, 1) == 1 {
+			return nil, errors.New("connection refused") // box overloaded/down
+		}
+		return resp(200, `{"data":[{"embedding":[0.1]}]}`), nil
+	})
+	p := New("ollama", "http://gpu0:11434", store(t, "k"), doer, WithTransportPenaltyDisabled())
+
+	_, err := p.Forward(context.Background(), "/v1/embeddings", []byte(`{}`), false, nil)
+	if err == nil {
+		t.Fatal("first request: expected transport error")
+	}
+	if errors.Is(err, credential.ErrNoneAvailable) {
+		t.Fatalf("credential was sidelined on a capacity failure: %v", err)
+	}
+
+	out, err := p.Forward(context.Background(), "/v1/embeddings", []byte(`{}`), false, nil)
+	if err != nil {
+		t.Fatalf("second request should succeed (credential not in cooldown): %v", err)
+	}
+	out.Body.Close()
+}
+
+// TestTransportPenalty_DefaultSidelines is the contrast: with the default
+// (penalty enabled) a single-credential provider goes ErrNoneAvailable after one
+// transport failure — the behaviour keyless ollama must NOT have.
+func TestTransportPenalty_DefaultSidelines(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("down") })
+	p := New("arliai", "https://api.arliai.com", store(t, "k"), doer)
+
+	if _, err := p.Chat(context.Background(), []byte(`{}`), false, nil); err == nil {
+		t.Fatal("first request: expected error")
+	}
+	// Cred is now in cooldown; the next request finds none available.
+	_, err := p.Chat(context.Background(), []byte(`{}`), false, nil)
+	if !errors.Is(err, credential.ErrNoneAvailable) {
+		t.Fatalf("err = %v, want ErrNoneAvailable (cred sidelined)", err)
+	}
+}

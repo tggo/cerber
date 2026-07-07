@@ -78,17 +78,38 @@ type BadRequestError struct{ Err error }
 func (e *BadRequestError) Error() string { return e.Err.Error() }
 func (e *BadRequestError) Unwrap() error { return e.Err }
 
+// RotateOpts tunes credential rotation behaviour.
+type RotateOpts struct {
+	// PenalizeTransport controls whether a transport error (send returned err,
+	// e.g. the host is unreachable or every failover host 5xx'd) sidelines the
+	// credential with a cooldown. Auth/rate-limit statuses (401/403/429) always
+	// sideline regardless — those reflect on the credential itself.
+	//
+	// Set false for a keyless local provider (ollama/vLLM) where a transport or
+	// exhausted-host 5xx is a capacity/host signal, not a bad credential:
+	// sidelining the only (dummy) credential would then 503 the whole provider
+	// until the exponential backoff expires (up to 30 min), even after the box
+	// recovers — turning a transient overload into a long outage.
+	PenalizeTransport bool
+}
+
 // Rotate sends through each credential in turn, sidelining (cooldown) any that
 // fail with a transport error or an auth/rate-limit status, until one succeeds.
 // It returns the successful response, the credential name used, and an error.
 // The returned response's Body must be closed by the caller.
 func Rotate(ctx context.Context, store *credential.Store, cooldown time.Duration, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
-	return RotateFiltered(ctx, store, cooldown, nil, send)
+	return RotateFilteredOpts(ctx, store, cooldown, nil, send, RotateOpts{PenalizeTransport: true})
 }
 
 // RotateFiltered is Rotate restricted to credentials matching match (nil = any),
 // so a client can pin a specific account/subscription (see credential.MatchHeader).
 func RotateFiltered(ctx context.Context, store *credential.Store, cooldown time.Duration, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error)) (*http.Response, string, error) {
+	return RotateFilteredOpts(ctx, store, cooldown, match, send, RotateOpts{PenalizeTransport: true})
+}
+
+// RotateFilteredOpts is RotateFiltered with explicit RotateOpts (see the
+// PenalizeTransport note).
+func RotateFilteredOpts(ctx context.Context, store *credential.Store, cooldown time.Duration, match func(*credential.Credential) bool, send func(*credential.Credential) (*http.Response, error), opts RotateOpts) (*http.Response, string, error) {
 	var lastErr error
 	var lastCred string
 	for i, n := 0, store.Len(); i < n; i++ {
@@ -103,7 +124,9 @@ func RotateFiltered(ctx context.Context, store *credential.Store, cooldown time.
 				return nil, lastCred, ctx.Err()
 			}
 			lastErr = err
-			store.Penalize(cred, cooldown) // exponential backoff on repeated failures
+			if opts.PenalizeTransport {
+				store.Penalize(cred, cooldown) // exponential backoff on repeated failures
+			}
 			continue
 		}
 		if isCredFailure(resp.StatusCode) {
