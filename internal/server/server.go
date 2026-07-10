@@ -739,7 +739,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama), not Anthropic; an unsupported model → 400/501.\n\n")
 
 	fmt.Fprintf(&b, "## Recommended models\n\n")
-	fmt.Fprintf(&b, "- Default: `claude-sonnet-4-6` (strong; works on `/v1/chat/completions` and `/v1/messages`).\n")
+	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; works on `/v1/chat/completions` and `/v1/messages`).\n")
+	fmt.Fprintf(&b, "- Most capable: `claude-opus-4-8`.\n")
 	fmt.Fprintf(&b, "- Cheap/fast: `claude-haiku-4-5-20251001`.\n")
 	fmt.Fprintf(&b, "- Local/free: an ollama model from the list below.\n")
 	fmt.Fprintf(&b, "Always set `model` to an exact id (see `GET /v1/models` or the list below). Streaming: add `\"stream\": true`.\n\n")
@@ -814,11 +815,11 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(&b, "## Examples\n\n")
 	fmt.Fprintf(&b, "OpenAI dialect (curl):\n\n")
-	fmt.Fprintf(&b, "```sh\ncurl %s/v1/chat/completions \\\n  -H 'Authorization: Bearer $KEY' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
+	fmt.Fprintf(&b, "```sh\ncurl %s/v1/chat/completions \\\n  -H 'Authorization: Bearer $KEY' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
 	fmt.Fprintf(&b, "Anthropic dialect (curl):\n\n")
-	fmt.Fprintf(&b, "```sh\ncurl %s/v1/messages \\\n  -H 'Authorization: Bearer $KEY' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
+	fmt.Fprintf(&b, "```sh\ncurl %s/v1/messages \\\n  -H 'Authorization: Bearer $KEY' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-5\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
 	fmt.Fprintf(&b, "OpenAI Python SDK:\n\n")
-	fmt.Fprintf(&b, "```python\nfrom openai import OpenAI\nclient = OpenAI(base_url=\"%s/v1\", api_key=\"$KEY\")\nclient.chat.completions.create(model=\"claude-sonnet-4-6\", messages=[{\"role\":\"user\",\"content\":\"hi\"}])\n```\n\n", base)
+	fmt.Fprintf(&b, "```python\nfrom openai import OpenAI\nclient = OpenAI(base_url=\"%s/v1\", api_key=\"$KEY\")\nclient.chat.completions.create(model=\"claude-sonnet-5\", messages=[{\"role\":\"user\",\"content\":\"hi\"}])\n```\n\n", base)
 	fmt.Fprintf(&b, "Streaming is supported on both endpoints (`\"stream\": true`).\n")
 
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
@@ -1037,16 +1038,16 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	p(`<h2 id="examples">Examples</h2>`)
 	p(`<h3>OpenAI dialect (curl)</h3><pre><code>curl %s/v1/chat/completions \
   -H 'Authorization: Bearer $KEY' -H 'Content-Type: application/json' \
-  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
+  -d '{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
 	p(`<h3>With per-request fallback</h3><pre><code>curl %s/v1/chat/completions \
   -H 'Authorization: Bearer $KEY' -H 'X-Cerber-Fallback: gpt-4o,gemini-2.0-flash' \
-  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
+  -d '{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
 	p(`<h3>Anthropic dialect (curl)</h3><pre><code>curl %s/v1/messages \
   -H 'Authorization: Bearer $KEY' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
-  -d '{"model":"claude-sonnet-4-6","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
+  -d '{"model":"claude-sonnet-5","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'</code></pre>`, esc(base))
 	p(`<h3>OpenAI Python SDK</h3><pre><code>from openai import OpenAI
 client = OpenAI(base_url="%s/v1", api_key="$KEY")
-client.chat.completions.create(model="claude-sonnet-4-6",
+client.chat.completions.create(model="claude-sonnet-5",
     messages=[{"role":"user","content":"hi"}])</code></pre>`, esc(base))
 
 	// Trust

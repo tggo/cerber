@@ -53,14 +53,26 @@ func New(baseURL, version string, doer provider.HTTPDoer) *Client {
 // tokens are inference-scoped and get 401 here).
 const ModelsPath = "/v1/models"
 
+// SubscriptionModels are the Claude models cerber advertises for the OAuth
+// (Claude Code subscription) path. OAuth tokens cannot list models via
+// GET /v1/models, so the probe returns this curated set instead — it is what
+// surfaces in GET /v1/models and the /llm.md agent guide for the Anthropic
+// provider. Keep in sync with the cloak gate (fullCloakModelMarkers) and
+// Anthropic's current subscription lineup.
+var SubscriptionModels = []string{
+	"claude-opus-4-8",
+	"claude-sonnet-5",
+	"claude-haiku-4-5-20251001",
+}
+
 // BaseURL returns the configured upstream base URL (safe to display).
 func (c *Client) BaseURL() string { return c.baseURL }
 
 // ProbeCredential validates one Anthropic credential.
 //   - API key: GET /v1/models (x-api-key) → the model IDs it can access.
 //   - OAuth: /v1/models is not available to inference-scoped tokens, so validity
-//     is checked with a minimal POST /v1/messages — a 401 means the token is bad;
-//     any other status (e.g. 400 for the empty body) means auth passed. No models.
+//     is a zero-cost state check (present access token = working) and the curated
+//     SubscriptionModels list is returned for discovery/docs.
 //
 // A 401/403 yields provider.ErrInvalidCredential.
 func (c *Client) ProbeCredential(ctx context.Context, cred *credential.Credential) ([]string, error) {
@@ -77,7 +89,7 @@ func (c *Client) ProbeCredential(ctx context.Context, cred *credential.Credentia
 		if cred.AccessToken() == "" {
 			return nil, provider.ErrInvalidCredential
 		}
-		return nil, nil
+		return append([]string(nil), SubscriptionModels...), nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+ModelsPath, nil)

@@ -249,13 +249,18 @@ func TestProbeCredential_APIKeyInvalid(t *testing.T) {
 }
 
 func TestProbeCredential_OAuthStateCheck(t *testing.T) {
-	// OAuth is validated by state (no network call): a present token is healthy.
+	// OAuth is validated by state (no network call): a present token is healthy and
+	// returns the curated subscription model list for discovery/docs.
 	doer := mocks.NewHTTPDoer(t) // no Do() expectation — must not be called
 	c := New("https://api.anthropic.com", "2023-06-01", doer)
 	s := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "tok"})
 	cred, _ := s.Next()
-	if models, err := c.ProbeCredential(context.Background(), cred); err != nil || len(models) != 0 {
-		t.Errorf("oauth with token: models=%v err=%v (want healthy, no models)", models, err)
+	models, err := c.ProbeCredential(context.Background(), cred)
+	if err != nil {
+		t.Fatalf("oauth with token: err=%v (want healthy)", err)
+	}
+	if len(models) != len(SubscriptionModels) || models[0] != SubscriptionModels[0] {
+		t.Errorf("oauth models = %v, want %v", models, SubscriptionModels)
 	}
 }
 
