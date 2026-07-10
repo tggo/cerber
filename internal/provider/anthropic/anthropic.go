@@ -26,6 +26,27 @@ const CountTokensPath = "/v1/messages/count_tokens"
 // authorized for. Sent only with OAuth credentials.
 const oauthBetas = "oauth-2025-04-20"
 
+// context1MBeta is the anthropic-beta that unlocks the 1M-token context window.
+// Claude Code sends it itself; cerber injects it for OAuth requests on
+// 1M-capable models so non-Claude-Code clients (e.g. pi) also get 1M instead of
+// the default 200k. See supports1M.
+const context1MBeta = "context-1m-2025-08-07"
+
+// oneMModelMarkers are model-id substrings whose Claude models serve a 1M context
+// window (gated by context1MBeta). haiku-4-5 is 200k and is deliberately absent.
+// Keep in sync with the subscription lineup (SubscriptionModels).
+var oneMModelMarkers = []string{"claude-sonnet-5", "claude-opus-4-8"}
+
+// supports1M reports whether model serves a 1M context window (see oneMModelMarkers).
+func supports1M(model string) bool {
+	for _, m := range oneMModelMarkers {
+		if strings.Contains(model, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // oauthUserAgent is sent on OAuth requests whose client isn't already Claude
 // Code: Anthropic ties OAuth (Claude Code) tokens to the Claude Code client and
 // rejects other User-Agents (browser, SDK, curl…) with 401/403. This mirrors the
@@ -202,6 +223,15 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 		}
 	}
 	applyAuth(req, cred)
+
+	// OAuth (Claude Code subscription) is entitled to the 1M context window on
+	// 1M-capable models, but only when the request carries the context-1m beta.
+	// Claude Code sends it itself; inject it for other clients (e.g. pi) so they
+	// get 1M too instead of the default 200k. Scoped to 1M models — haiku-4-5 is
+	// 200k. mergeBetas dedups if the client already sent it.
+	if cred.Kind() == credential.KindOAuth && supports1M(requestModel(body)) {
+		req.Header.Set("anthropic-beta", mergeBetas(req.Header.Get("anthropic-beta"), context1MBeta))
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

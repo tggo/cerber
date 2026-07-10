@@ -185,6 +185,78 @@ func TestSend_MergesClientBeta_OAuth(t *testing.T) {
 	}
 }
 
+func TestSend_Injects1MBeta_OAuth1MModel(t *testing.T) {
+	for _, model := range []string{"claude-sonnet-5", "claude-opus-4-8"} {
+		t.Run(model, func(t *testing.T) {
+			doer := mocks.NewHTTPDoer(t)
+			var captured *http.Request
+			doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+				captured = r
+				return okResp(), nil
+			})
+			store := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+			cred, _ := store.Next()
+			c := New("https://api.anthropic.com", "v", doer)
+
+			resp, err := c.Send(context.Background(), []byte(`{"model":"`+model+`"}`), false, cred, http.Header{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			got := captured.Header.Get("anthropic-beta")
+			if !strings.Contains(got, context1MBeta) {
+				t.Errorf("anthropic-beta = %q, want it to contain %q", got, context1MBeta)
+			}
+			if !strings.Contains(got, "oauth-2025-04-20") {
+				t.Errorf("anthropic-beta = %q, want it to also carry the oauth beta", got)
+			}
+		})
+	}
+}
+
+func TestSend_No1MBeta_OAuth200kModel(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return okResp(), nil
+	})
+	store := mustStore(t, config.Credential{Type: config.CredentialOAuth, AccessToken: "t"})
+	cred, _ := store.Next()
+	c := New("https://api.anthropic.com", "v", doer)
+
+	resp, err := c.Send(context.Background(), []byte(`{"model":"claude-haiku-4-5-20251001"}`), false, cred, http.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := captured.Header.Get("anthropic-beta"); strings.Contains(got, context1MBeta) {
+		t.Errorf("haiku (200k) must not get the 1M beta: %q", got)
+	}
+}
+
+func TestSend_No1MBeta_APIKey1MModel(t *testing.T) {
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return okResp(), nil
+	})
+	store := mustStore(t, config.Credential{Type: config.CredentialAPIKey, Key: "k"})
+	cred, _ := store.Next()
+	c := New("https://api.anthropic.com", "v", doer)
+
+	resp, err := c.Send(context.Background(), []byte(`{"model":"claude-sonnet-5"}`), false, cred, http.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	// API-key clients control their own betas; cerber injects nothing.
+	if got := captured.Header.Get("anthropic-beta"); got != "" {
+		t.Errorf("api_key must not get injected 1M beta: %q", got)
+	}
+}
+
 func TestSend_NilCredential(t *testing.T) {
 	c := New("https://api.anthropic.com", "v", mocks.NewHTTPDoer(t))
 	if _, err := c.Send(context.Background(), []byte(`{}`), false, nil, nil); err == nil {
