@@ -10,21 +10,29 @@ import (
 // block, OAuth requests are rejected.
 const claudeCodeAgentPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
 
-// fullCloakModelMarker gates the aggressive Claude Code cloak (see cloakClaudeCode)
-// to requests whose model id contains this substring. Anthropic fingerprints the
-// system[] content of OAuth traffic: a third-party agent's system prompt (tool
-// guidelines, custom identity) is billed to metered "extra usage" instead of the
-// subscription plan. The cloak moves that content out of system[] so the request
-// classifies as genuine Claude Code and rides the plan. Scoped to one model on
-// purpose — it is a targeted spoof, not a blanket rewrite of every request.
-const fullCloakModelMarker = "claude-sonnet-5"
+// fullCloakModelMarkers gate the aggressive Claude Code cloak (see cloakClaudeCode)
+// to requests whose model id contains one of these substrings. Anthropic
+// fingerprints the system[] content of OAuth traffic: a third-party agent's
+// system prompt (tool guidelines, custom identity) is billed to metered "extra
+// usage" instead of the subscription plan. The cloak moves that content out of
+// system[] so the request classifies as genuine Claude Code and rides the plan.
+// Scoped to the model families we actually route through the subscription — it is
+// a targeted spoof, not a blanket rewrite of every request.
+var fullCloakModelMarkers = []string{
+	"claude-sonnet-5",
+	"claude-opus-4-8",
+	"claude-haiku-4-5",
+}
 
 // oauthSystemForModel returns the OAuth system-prompt transform to apply for the
-// given request body's model. Requests matching fullCloakModelMarker get the full
-// cloak; all others get the minimal one-line prefix (injectClaudeCodeSystem).
+// given request body's model. Requests matching a fullCloakModelMarker get the
+// full cloak; all others get the minimal one-line prefix (injectClaudeCodeSystem).
 func oauthSystemForModel(body []byte) func([]byte) ([]byte, error) {
-	if strings.Contains(requestModel(body), fullCloakModelMarker) {
-		return cloakClaudeCode
+	model := requestModel(body)
+	for _, marker := range fullCloakModelMarkers {
+		if strings.Contains(model, marker) {
+			return cloakClaudeCode
+		}
 	}
 	return injectClaudeCodeSystem
 }

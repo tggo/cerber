@@ -143,22 +143,28 @@ func TestRequestModel(t *testing.T) {
 }
 
 func TestOAuthSystemForModel(t *testing.T) {
-	// sonnet-5 (and dated variants) route to the full cloak; others to the prefix.
-	cloakBody := []byte(`{"model":"claude-sonnet-5","system":"be brief","messages":[{"role":"user","content":"hi"}]}`)
-	out, err := oauthSystemForModel(cloakBody)(cloakBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b := systemOf(t, out); len(b) != 1 || b[0].Text != claudeCodeAgentPrompt {
-		t.Errorf("cloak should leave only agent block, got %+v", b)
-	}
-	s, _ := firstUserContent(t, out)
-	if !strings.Contains(s, "be brief") || !strings.Contains(s, "system-reminder") {
-		t.Errorf("relocated system missing from user message: %q", s)
+	// Every gated family (incl. dated variants) routes to the full cloak.
+	for _, model := range []string{
+		"claude-sonnet-5",
+		"claude-sonnet-5-20250929",
+		"claude-opus-4-8",
+		"claude-haiku-4-5-20251001",
+	} {
+		body := []byte(`{"model":"` + model + `","system":"be brief","messages":[{"role":"user","content":"hi"}]}`)
+		out, err := oauthSystemForModel(body)(body)
+		if err != nil {
+			t.Fatalf("%s: %v", model, err)
+		}
+		if b := systemOf(t, out); len(b) != 1 || b[0].Text != claudeCodeAgentPrompt {
+			t.Errorf("%s: cloak should leave only agent block, got %+v", model, b)
+		}
+		if s, _ := firstUserContent(t, out); !strings.Contains(s, "be brief") || !strings.Contains(s, "system-reminder") {
+			t.Errorf("%s: relocated system missing from user message: %q", model, s)
+		}
 	}
 
-	// A non-matching model keeps the system in place (prefix behaviour).
-	prefixBody := []byte(`{"model":"claude-opus-4-8","system":"be brief","messages":[{"role":"user","content":"hi"}]}`)
+	// A non-gated model keeps the system in place (prefix behaviour).
+	prefixBody := []byte(`{"model":"claude-3-5-haiku-20241022","system":"be brief","messages":[{"role":"user","content":"hi"}]}`)
 	out2, err := oauthSystemForModel(prefixBody)(prefixBody)
 	if err != nil {
 		t.Fatal(err)
