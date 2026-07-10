@@ -148,7 +148,7 @@ func (c *Client) Send(ctx context.Context, body []byte, stream bool, cred *crede
 		return nil, fmt.Errorf("anthropic: nil credential")
 	}
 	if cred.Kind() == credential.KindOAuth {
-		injected, err := injectClaudeCodeSystem(body)
+		injected, err := oauthSystemForModel(body)(body)
 		if err != nil {
 			return nil, fmt.Errorf("anthropic: inject claude code system: %w", err)
 		}
