@@ -99,7 +99,7 @@ providers:
   anthropic:
     base_url: "https://api.anthropic.com"
     version: "2023-06-01"
-    timeout: "600s"
+    timeout: "1800s"
     # One or more upstream accounts; cerber rotates across them and sidelines
     # any that hit auth/rate-limit errors.
     credentials:

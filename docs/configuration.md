@@ -23,7 +23,7 @@ providers:
   anthropic:
     base_url: "https://api.anthropic.com"
     version: "2023-06-01"
-    timeout: "600s"
+    timeout: "1800s"
     credentials:
       - type: api_key
         name: account-a
@@ -59,7 +59,7 @@ upstream provider keys.
 |---|---|---|---|
 | `base_url` | string | `https://api.anthropic.com` | Anthropic origin. Must be an `http(s)` URL. The only host cerber will send these requests to. |
 | `version` | string | `2023-06-01` | Value of the `anthropic-version` header. |
-| `timeout` | duration | `600s` | Upstream **silence** timeout, not a whole-request cap: applied as the wait for the first response byte AND a mid-stream idle-read timeout. A live stream that keeps sending bytes runs unbounded, so long LLM responses are never cut; only a silent/dead upstream is dropped. |
+| `timeout` | duration | `1800s` | Upstream **silence** timeout, not a whole-request cap: applied as the wait for the first response byte AND a mid-stream idle-read timeout. A live stream that keeps sending bytes runs unbounded, so long LLM responses are never cut; only a silent/dead upstream is dropped. |
 | `credentials` | list | yes (≥1) | Upstream accounts; cerber rotates across them. See below. |
 
 ### `credentials[]`
