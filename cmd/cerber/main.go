@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +37,91 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// upstreamTransport builds the base HTTP transport for a streaming LLM upstream.
+// dial may be nil to use the default dialer. It sets ResponseHeaderTimeout (the
+// wait for the FIRST response byte) but NO whole-request cap.
+func upstreamTransport(ttfb time.Duration, dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dial,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: ttfb,
+	}
+}
+
+// upstreamRoundTripper builds the RoundTripper for a streaming LLM upstream. It
+// deliberately sets NO http.Client.Timeout: that is a whole-request deadline
+// that keeps running while the response body streams and would sever a long LLM
+// response (streaming SSE, or a slow non-stream generation) mid-flight — the
+// classic "upstream drops on long responses". Instead silence is bounded at two
+// points, both governed by `timeout`: ResponseHeaderTimeout caps the wait for
+// the first byte, and idleTimeoutRoundTripper caps a mid-stream stall (bytes
+// stop moving) once streaming has begun. A live stream that keeps sending data
+// may run arbitrarily long. timeout <= 0 disables both caps (rely on the client
+// cancelling the request).
+func upstreamRoundTripper(timeout time.Duration, dial func(ctx context.Context, network, addr string) (net.Conn, error)) http.RoundTripper {
+	return &idleTimeoutRoundTripper{base: upstreamTransport(timeout, dial), idle: timeout}
+}
+
+// newUpstreamClient builds an HTTP client for a streaming LLM upstream (see
+// upstreamRoundTripper for the timeout semantics).
+func newUpstreamClient(timeout time.Duration) *http.Client {
+	return &http.Client{Transport: upstreamRoundTripper(timeout, nil)}
+}
+
+// idleTimeoutRoundTripper enforces an idle-read timeout on the response body: if
+// the upstream sends no bytes for `idle`, the request context is cancelled and
+// the stream errors out. This catches a mid-stream stall (connection alive but
+// upstream gone silent) that ResponseHeaderTimeout — which only bounds the wait
+// for the first byte — cannot. idle <= 0 disables it (pass-through).
+type idleTimeoutRoundTripper struct {
+	base http.RoundTripper
+	idle time.Duration
+}
+
+func (t *idleTimeoutRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.idle <= 0 {
+		return t.base.RoundTrip(req)
+	}
+	ctx, cancel := context.WithCancel(req.Context())
+	resp, err := t.base.RoundTrip(req.WithContext(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	resp.Body = &idleReadCloser{rc: resp.Body, cancel: cancel, idle: t.idle}
+	return resp, nil
+}
+
+// idleReadCloser cancels the request if a single Read blocks longer than idle,
+// then chains Close (which releases any provider-held resources) and cancels the
+// context so it never leaks.
+type idleReadCloser struct {
+	rc     io.ReadCloser
+	cancel context.CancelFunc
+	idle   time.Duration
+}
+
+func (b *idleReadCloser) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(b.idle, b.cancel)
+	n, err := b.rc.Read(p)
+	timer.Stop()
+	return n, err
+}
+
+func (b *idleReadCloser) Close() error {
+	err := b.rc.Close()
+	b.cancel()
+	return err
+}
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config file")
@@ -120,16 +207,12 @@ func main() {
 		logger.Fatal("credentials", zap.Error(err))
 	}
 
-	httpClient := &http.Client{Timeout: a.Timeout.Std()}
+	httpClient := newUpstreamClient(a.Timeout.Std())
 	if cfg.TLS.UseDoH {
 		// Resolve the upstream via DoH so we bypass the /etc/hosts redirect that
 		// points api.anthropic.com at cerber itself (TLS impersonation).
 		res := upstreamdial.NewResolver()
-		httpClient.Transport = &http.Transport{
-			DialContext:       res.DialContext,
-			ForceAttemptHTTP2: true,
-			Proxy:             http.ProxyFromEnvironment,
-		}
+		httpClient.Transport = upstreamRoundTripper(a.Timeout.Std(), res.DialContext)
 		logger.Info("upstream DoH resolution enabled")
 	}
 	client := anthropic.New(a.BaseURL, a.Version, httpClient)
@@ -223,7 +306,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("openai credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(openai.New("openai", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()}, openai.WithQueueMetrics(srv.Metrics())))
+		srv.RegisterChatter(openai.New("openai", o.BaseURL, ostore, newUpstreamClient(o.Timeout.Std()), openai.WithQueueMetrics(srv.Metrics())))
 		srv.RegisterProviderStore("openai", ostore)
 		logger.Info("openai provider enabled", zap.Int("credentials", ostore.Len()))
 	}
@@ -236,7 +319,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("arliai credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, &http.Client{Timeout: a.Timeout.Std()}, openai.WithConcurrency(a.Concurrency), openai.WithQueueMetrics(srv.Metrics())))
+		srv.RegisterChatter(openai.New("arliai", a.BaseURL, astore, newUpstreamClient(a.Timeout.Std()), openai.WithConcurrency(a.Concurrency), openai.WithQueueMetrics(srv.Metrics())))
 		srv.RegisterProviderStore("arliai", astore)
 		logger.Info("arliai provider enabled", zap.Int("credentials", astore.Len()), zap.Int("concurrency", a.Concurrency))
 	}
@@ -259,7 +342,7 @@ func main() {
 			logger.Fatal("grok credentials", zap.Error(err))
 		}
 		// xAI/Grok is OpenAI-compatible: reuse the OpenAI provider, named "grok".
-		grokHTTP := &http.Client{Timeout: k.Timeout.Std()}
+		grokHTTP := newUpstreamClient(k.Timeout.Std())
 		grokProv := openai.New("grok", k.BaseURL, kstore, grokHTTP, openai.WithQueueMetrics(srv.Metrics()))
 		// Refresh subscription (OAuth) tokens before they expire and persist them.
 		grokProv.SetOAuthRefresh(func(ctx context.Context, refreshToken string) (credential.OAuthTokens, error) {
@@ -304,7 +387,7 @@ func main() {
 		for _, h := range rh {
 			hosts = append(hosts, openai.HostConfig{URL: h.BaseURL, Concurrency: h.Concurrency})
 		}
-		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, &http.Client{Timeout: o.Timeout.Std()},
+		srv.RegisterChatter(openai.New("ollama", o.BaseURL, ostore, newUpstreamClient(o.Timeout.Std()),
 			openai.WithQueueMetrics(srv.Metrics()), openai.WithHosts(hosts), openai.WithTransportPenaltyDisabled()))
 		srv.RegisterProviderStore("ollama", ostore)
 		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
@@ -316,7 +399,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("gemini credentials", zap.Error(err))
 		}
-		srv.RegisterChatter(gemini.New(g.BaseURL, gstore, &http.Client{Timeout: g.Timeout.Std()}))
+		srv.RegisterChatter(gemini.New(g.BaseURL, gstore, newUpstreamClient(g.Timeout.Std())))
 		srv.RegisterProviderStore("gemini", gstore)
 		logger.Info("gemini provider enabled", zap.Int("credentials", gstore.Len()))
 	}

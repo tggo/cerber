@@ -28,7 +28,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **DoD:**
 - Missing file or malformed YAML → clear error, no panic.
 - Unknown YAML fields are rejected.
-- Defaults applied: addr `:8080`, base_url `https://api.anthropic.com`, version `2023-06-01`, timeout `120s`.
+- Defaults applied: addr `:8080`, base_url `https://api.anthropic.com`, version `2023-06-01`, timeout `600s`.
+- `timeout` bounds upstream **silence**, not total request time: it is applied as the transport's `ResponseHeaderTimeout` (wait for the first response byte) AND a mid-stream idle-read timeout (bytes stopped moving). There is **no** whole-request `http.Client.Timeout`, so a live stream (or slow non-stream generation) that keeps sending data runs unbounded and is never cut mid-response — only a genuinely silent/dead upstream (no first byte, or a stall longer than `timeout`) is dropped. Default `600s` is generous so a slow non-stream generation, whose first byte only arrives once the whole answer is ready, still passes.
 - Rejects: no access keys, empty key, no providers, non-http(s) base_url, no credentials, api_key without key, oauth without access_token, unknown/missing credential type, bad duration.
 **Verified:** `internal/config` tests, 98.2% coverage — 2026-06-07.
 

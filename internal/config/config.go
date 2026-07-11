@@ -135,8 +135,13 @@ type Fallback struct {
 
 // Anthropic configures the Anthropic upstream.
 type Anthropic struct {
-	BaseURL     string          `yaml:"base_url"`
-	Version     string          `yaml:"version"`
+	BaseURL string `yaml:"base_url"`
+	Version string `yaml:"version"`
+	// Timeout bounds upstream SILENCE, not total request time: it is the wait for
+	// the first response byte (ResponseHeaderTimeout) and the mid-stream idle-read
+	// timeout. A live stream that keeps sending bytes runs unbounded, so long LLM
+	// responses are never cut. 0 → default (600s); this field carries the same
+	// meaning for every provider below.
 	Timeout     Duration        `yaml:"timeout"`
 	Credentials []Credential    `yaml:"credentials"`
 	Cache       *AnthropicCache `yaml:"cache"` // automatic prompt-cache breakpoint injection (opt-in)
@@ -267,15 +272,22 @@ type Credential struct {
 
 // Defaults applied when the file omits a value.
 const (
-	defaultAddr            = ":8080"
-	defaultLogLevel        = "info"
-	defaultLogDir          = "./logs"
-	defaultAuthDir         = "./auths"
-	defaultUsageFile       = "./data/usage.json"
-	defaultKeysFile        = "./data/keys.json"
-	defaultAnthropicBase   = "https://api.anthropic.com"
-	defaultAnthropicVer    = "2023-06-01"
-	defaultAnthropicWaitNS = 120 * time.Second
+	defaultAddr          = ":8080"
+	defaultLogLevel      = "info"
+	defaultLogDir        = "./logs"
+	defaultAuthDir       = "./auths"
+	defaultUsageFile     = "./data/usage.json"
+	defaultKeysFile      = "./data/keys.json"
+	defaultAnthropicBase = "https://api.anthropic.com"
+	defaultAnthropicVer  = "2023-06-01"
+	// defaultAnthropicWaitNS / defaultProviderWaitNS bound upstream SILENCE, not
+	// total request time: they set the transport's ResponseHeaderTimeout (wait for
+	// the first response byte) and the mid-stream idle-read timeout. A live stream
+	// that keeps sending bytes runs unbounded, so long LLM responses are never cut.
+	// Generous (10m) so even a slow non-stream generation, whose first byte only
+	// arrives once the whole answer is ready, still passes; a truly dead upstream
+	// is still dropped.
+	defaultAnthropicWaitNS = 600 * time.Second
 	defaultOpenAIBase      = "https://api.openai.com"
 	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
 	defaultGrokBase        = "https://api.x.ai"
@@ -285,7 +297,7 @@ const (
 	defaultArliAIConcurrency = 1
 	defaultOllamaBase        = "http://localhost:11434"
 	defaultOllamaProbeNS     = 30 * time.Second
-	defaultProviderWaitNS    = 120 * time.Second
+	defaultProviderWaitNS    = 600 * time.Second
 	// Prompt-cache injection defaults (providers.anthropic.cache).
 	defaultCacheStrategy  = "moderate"
 	defaultCacheMinTokens = 1024
