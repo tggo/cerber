@@ -589,7 +589,7 @@ func runClaudeLogin(authDir string, port int, noBrowser bool) {
 		authDir = "./auths"
 	}
 	tok, err := login.Claude(context.Background(), login.Options{
-		Port: port, NoBrowser: noBrowser, Out: os.Stdout,
+		Port: port, NoBrowser: noBrowser, Out: os.Stdout, In: os.Stdin,
 	})
 	if err != nil {
 		fatal("claude login: %v", err)

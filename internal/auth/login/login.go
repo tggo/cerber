@@ -4,14 +4,17 @@
 package login
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/tggo/cerber/internal/auth/claude"
@@ -26,6 +29,7 @@ type Options struct {
 	HTTP      provider.HTTPDoer  // token-exchange client (default http.DefaultClient)
 	OpenURL   func(string) error // browser opener (default OS opener); injectable for tests
 	Out       io.Writer          // user-facing messages
+	In        io.Reader          // pasted callback URL / code (nil = paste disabled)
 	Now       func() time.Time   // clock (for token expiry)
 	Timeout   time.Duration      // how long to wait for the callback (default 5m)
 	// PollInterval overrides the device-flow poll interval (Grok only). 0 = use
@@ -66,12 +70,19 @@ func Claude(ctx context.Context, opt Options) (claude.Tokens, error) {
 		return claude.Tokens{}, err
 	}
 
+	results := make(chan callback, 1)
+
+	// The local callback server is a convenience, not a requirement: when the
+	// port is taken (or we run headless) the user can still paste the redirect
+	// URL, so a bind failure is only fatal if there is no stdin to paste into.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", opt.Port))
 	if err != nil {
-		return claude.Tokens{}, fmt.Errorf("login: callback port %d unavailable: %w", opt.Port, err)
+		if opt.In == nil {
+			return claude.Tokens{}, fmt.Errorf("login: callback port %d unavailable: %w", opt.Port, err)
+		}
+		fmt.Fprintf(opt.Out, "(callback port %d unavailable: %v — paste the redirect URL instead)\n", opt.Port, err)
 	}
 
-	results := make(chan callback, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -89,12 +100,17 @@ func Claude(ctx context.Context, opt Options) (claude.Tokens, error) {
 		}
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutCtx)
-	}()
+	if ln != nil {
+		go func() { _ = srv.Serve(ln) }()
+		defer func() {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(shutCtx)
+		}()
+	}
+	if opt.In != nil {
+		go readPastedCallback(opt.In, opt.Out, results)
+	}
 
 	authURL := claude.BuildAuthURL(state, pkce, opt.Port)
 	if opt.NoBrowser {
@@ -104,6 +120,10 @@ func Claude(ctx context.Context, opt Options) (claude.Tokens, error) {
 		if err := opt.OpenURL(authURL); err != nil {
 			fmt.Fprintf(opt.Out, "(could not open browser automatically: %v)\n", err)
 		}
+	}
+
+	if opt.In != nil {
+		fmt.Fprintf(opt.Out, "After authorizing, the browser is redirected to localhost. If that redirect\ndoes not reach cerber, paste the URL from the address bar here and press Enter:\n\n> ")
 	}
 
 	select {
@@ -123,6 +143,64 @@ func Claude(ctx context.Context, opt Options) (claude.Tokens, error) {
 		}
 		return claude.Exchange(ctx, opt.HTTP, cb.code, state, pkce.Verifier, opt.Port, opt.Now)
 	}
+}
+
+// readPastedCallback reads lines until one parses as an authorization result and
+// hands it to results. Garbage lines are reported and skipped so a mistyped
+// paste does not abort a login that is still waiting.
+func readPastedCallback(in io.Reader, out io.Writer, results chan<- callback) {
+	sc := bufio.NewScanner(in)
+	// Redirect URLs carry long codes; the 64KiB default is plenty but the
+	// 4KiB starting buffer would grow needlessly per line.
+	sc.Buffer(make([]byte, 0, 8192), 64*1024)
+	for sc.Scan() {
+		cb, ok := parseCallbackInput(sc.Text())
+		if !ok {
+			fmt.Fprintf(out, "(not a callback URL or code — paste the whole localhost URL)\n> ")
+			continue
+		}
+		select {
+		case results <- cb:
+		default:
+		}
+		return
+	}
+}
+
+// parseCallbackInput accepts what the user can realistically paste: the full
+// localhost redirect URL, a bare "?code=...&state=..." query, the "code#state"
+// pair Anthropic shows when the redirect is blocked, or a lone code.
+func parseCallbackInput(line string) (callback, bool) {
+	s := strings.TrimSpace(line)
+	if s == "" {
+		return callback{}, false
+	}
+	if i := strings.Index(s, "?"); i >= 0 && (strings.Contains(s, "://") || strings.HasPrefix(s, "?")) {
+		u, err := url.Parse(s)
+		if err != nil {
+			return callback{}, false
+		}
+		q := u.Query()
+		cb := callback{code: q.Get("code"), state: q.Get("state"), err: q.Get("error")}
+		if cb.code == "" && cb.err == "" {
+			return callback{}, false
+		}
+		return cb, true
+	}
+	if strings.Contains(s, "://") {
+		// A URL that carries no query at all cannot describe a result.
+		return callback{}, false
+	}
+	if code, state, found := strings.Cut(s, "#"); found {
+		if code == "" {
+			return callback{}, false
+		}
+		return callback{code: code, state: state}, true
+	}
+	if strings.ContainsAny(s, " \t") {
+		return callback{}, false
+	}
+	return callback{code: s}, true
 }
 
 // Grok runs the xAI / Grok Build OAuth device flow: it shows the user a

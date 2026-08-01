@@ -181,3 +181,133 @@ func TestGrok_DeviceFlow(t *testing.T) {
 		t.Errorf("user code not shown: %s", out.String())
 	}
 }
+
+func TestParseCallbackInput(t *testing.T) {
+	tests := []struct {
+		name               string
+		in                 string
+		wantOK             bool
+		code, state, cbErr string
+	}{
+		{name: "full url", in: "http://localhost:54545/callback?code=abc&state=xyz", wantOK: true, code: "abc", state: "xyz"},
+		{name: "url with surrounding space", in: "  http://127.0.0.1:54545/callback?code=abc&state=xyz \n", wantOK: true, code: "abc", state: "xyz"},
+		{name: "bare query", in: "?code=abc&state=xyz", wantOK: true, code: "abc", state: "xyz"},
+		{name: "url carrying error", in: "http://localhost:54545/callback?error=access_denied", wantOK: true, cbErr: "access_denied"},
+		{name: "url without code or error", in: "http://localhost:54545/callback?foo=bar", wantOK: false},
+		{name: "url without query", in: "http://localhost:54545/callback", wantOK: false},
+		{name: "code#state pair", in: "abc#xyz", wantOK: true, code: "abc", state: "xyz"},
+		{name: "empty code in pair", in: "#xyz", wantOK: false},
+		{name: "bare code", in: "abc", wantOK: true, code: "abc"},
+		{name: "empty", in: "   ", wantOK: false},
+		{name: "prose is not a code", in: "paste it here", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cb, ok := parseCallbackInput(tt.in)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if cb.code != tt.code || cb.state != tt.state || cb.err != tt.cbErr {
+				t.Errorf("got %+v, want code=%q state=%q err=%q", cb, tt.code, tt.state, tt.cbErr)
+			}
+		})
+	}
+}
+
+// pasteOnOpen returns an OpenURL func that writes lines into w once the auth URL
+// is known, simulating a user pasting the redirect back into the terminal. The
+// final line carries the real state so the CSRF check passes.
+func pasteOnOpen(t *testing.T, w io.WriteCloser, port int, prefix ...string) func(string) error {
+	t.Helper()
+	return func(u string) error {
+		pu, err := url.Parse(u)
+		if err != nil {
+			return err
+		}
+		state := pu.Query().Get("state")
+		go func() {
+			defer w.Close()
+			for _, line := range prefix {
+				_, _ = io.WriteString(w, line+"\n")
+			}
+			_, _ = fmt.Fprintf(w, "http://localhost:%d/callback?code=abc&state=%s\n", port, state)
+		}()
+		return nil
+	}
+}
+
+func TestClaude_PastedURL(t *testing.T) {
+	port := freePort(t)
+	doer := mocks.NewHTTPDoer(t)
+	doer.EXPECT().Do(mock.Anything).Return(tokenResp(), nil)
+	pr, pw := io.Pipe()
+	var out strings.Builder
+
+	tok, err := Claude(context.Background(), Options{
+		Port: port, HTTP: doer, In: pr, Out: &out,
+		OpenURL: pasteOnOpen(t, pw, port), Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claude: %v", err)
+	}
+	if tok.AccessToken != "acc" {
+		t.Errorf("token = %+v", tok)
+	}
+	if !strings.Contains(out.String(), "paste the URL") {
+		t.Errorf("no paste prompt in output: %s", out.String())
+	}
+}
+
+func TestClaude_PastedURLAfterGarbage(t *testing.T) {
+	port := freePort(t)
+	doer := mocks.NewHTTPDoer(t)
+	doer.EXPECT().Do(mock.Anything).Return(tokenResp(), nil)
+	pr, pw := io.Pipe()
+	var out strings.Builder
+
+	tok, err := Claude(context.Background(), Options{
+		Port: port, HTTP: doer, In: pr, Out: &out,
+		OpenURL: pasteOnOpen(t, pw, port, "", "oops wrong thing"),
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claude: %v", err)
+	}
+	if tok.AccessToken != "acc" {
+		t.Errorf("token = %+v", tok)
+	}
+	if !strings.Contains(out.String(), "not a callback URL") {
+		t.Errorf("garbage line not reported: %s", out.String())
+	}
+}
+
+func TestClaude_PortInUseFallsBackToPaste(t *testing.T) {
+	port := freePort(t)
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	doer := mocks.NewHTTPDoer(t)
+	doer.EXPECT().Do(mock.Anything).Return(tokenResp(), nil)
+	var out strings.Builder
+
+	// A bare code (no state) is accepted: there is no redirect to compare against.
+	tok, err := Claude(context.Background(), Options{
+		Port: port, NoBrowser: true, HTTP: doer, In: strings.NewReader("abc\n"), Out: &out,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Claude: %v", err)
+	}
+	if tok.AccessToken != "acc" {
+		t.Errorf("token = %+v", tok)
+	}
+	if !strings.Contains(out.String(), "unavailable") {
+		t.Errorf("port fallback not reported: %s", out.String())
+	}
+}

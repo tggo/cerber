@@ -180,11 +180,12 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **What:** an interactive OAuth flow that logs into Claude Code and saves the tokens to disk, loaded at startup and refreshed in place.
 **DoD:**
 - `cerber --claude-login` runs the PKCE flow: starts a local callback server (default port `54545`, `--login-port` overrides), opens the browser (or prints the URL with `--no-browser`), and exchanges the code for tokens.
-- State is verified (CSRF); auth errors / timeout / port-in-use produce clear errors.
+- The redirect can also be completed by hand: the prompt accepts a pasted callback URL (or bare `?code=…` query, `code#state` pair, or lone code) on stdin, for when the browser cannot reach the local callback (remote/headless shell). Unparsable lines are reported and re-prompted rather than aborting the wait.
+- State is verified (CSRF); auth errors and timeout produce clear errors. A busy callback port is fatal only when stdin is unavailable — otherwise it degrades to paste-only with a warning.
 - Tokens are written to `<auth_dir>/<name>.json` (mode `0600`, dir `0700`; default `./auths`, gitignored).
 - On startup, tokens in `auth_dir` are loaded and merged with config Anthropic credentials; an empty merged set fails with a hint to run `--claude-login`.
 - Refreshed OAuth tokens are persisted back to `auth_dir`, so logins survive restarts.
-**Verified:** `internal/auth/claude` + `internal/auth/login` + `internal/tokenstore` tests + server persister test + live smoke (`--claude-login --no-browser` prints the real claude.ai authorize URL and serves the callback) — 2026-06-07.
+**Verified:** `internal/auth/claude` + `internal/auth/login` + `internal/tokenstore` tests + server persister test + live smoke (`--claude-login --no-browser` prints the real claude.ai authorize URL and serves the callback) — 2026-06-07. Paste path re-verified live: both Claude accounts re-authorized by handing the callback URL to the waiting listener, deployed to firebat, `/v1/messages` answered through the public vhost — 2026-08-01.
 
 ## Credential selection by header (X-Cerber-Cred)
 **What:** clients can pick which Anthropic credential type handles a request.
