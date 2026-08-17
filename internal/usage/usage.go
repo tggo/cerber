@@ -84,19 +84,20 @@ type Event struct {
 
 // Tracker accumulates usage. The zero value is not usable; call New.
 type Tracker struct {
-	mu           sync.Mutex
-	byCredential map[string]*Stat
-	byModel      map[string]*Stat
-	byClient     map[string]map[string]*Stat // client key -> model -> stat
-	buckets      map[int64]*Stat             // hour-start unix -> stat
-	credBuckets  map[int64]map[string]*Stat  // hour-start unix -> credential -> stat
-	modelBuckets map[int64]map[string]*Stat  // hour-start unix -> model -> stat
-	totals       Stat
-	since        time.Time
-	now          func() time.Time
-	pricing      map[string]Price
-	recent       []RequestEvent // bounded ring of per-request events (in-memory only)
-	recentCap    int
+	mu            sync.Mutex
+	byCredential  map[string]*Stat
+	byModel       map[string]*Stat
+	byClient      map[string]map[string]*Stat           // client key -> model -> stat
+	buckets       map[int64]*Stat                       // hour-start unix -> stat
+	credBuckets   map[int64]map[string]*Stat            // hour-start unix -> credential -> stat
+	modelBuckets  map[int64]map[string]*Stat            // hour-start unix -> model -> stat
+	clientBuckets map[int64]map[string]map[string]*Stat // hour-start unix -> client -> model -> stat
+	totals        Stat
+	since         time.Time
+	now           func() time.Time
+	pricing       map[string]Price
+	recent        []RequestEvent // bounded ring of per-request events (in-memory only)
+	recentCap     int
 }
 
 // Option customizes a Tracker.
@@ -120,15 +121,16 @@ func WithRecentCap(n int) Option {
 // New builds an empty Tracker.
 func New(opts ...Option) *Tracker {
 	t := &Tracker{
-		byCredential: map[string]*Stat{},
-		byModel:      map[string]*Stat{},
-		byClient:     map[string]map[string]*Stat{},
-		buckets:      map[int64]*Stat{},
-		credBuckets:  map[int64]map[string]*Stat{},
-		modelBuckets: map[int64]map[string]*Stat{},
-		pricing:      map[string]Price{},
-		now:          time.Now,
-		recentCap:    defaultRecentCap,
+		byCredential:  map[string]*Stat{},
+		byModel:       map[string]*Stat{},
+		byClient:      map[string]map[string]*Stat{},
+		buckets:       map[int64]*Stat{},
+		credBuckets:   map[int64]map[string]*Stat{},
+		modelBuckets:  map[int64]map[string]*Stat{},
+		clientBuckets: map[int64]map[string]map[string]*Stat{},
+		pricing:       map[string]Price{},
+		now:           time.Now,
+		recentCap:     defaultRecentCap,
 	}
 	for _, o := range opts {
 		o(t)
@@ -232,10 +234,24 @@ func (t *Tracker) Record(e Event) {
 		t.modelBuckets[hour] = mb
 	}
 	apply(get(mb, model), e, now)
+
+	if e.Client != "" {
+		clb := t.clientBuckets[hour]
+		if clb == nil {
+			clb = map[string]map[string]*Stat{}
+			t.clientBuckets[hour] = clb
+		}
+		cm := clb[e.Client]
+		if cm == nil {
+			cm = map[string]*Stat{}
+			clb[e.Client] = cm
+		}
+		apply(get(cm, model), e, now)
+	}
 }
 
-// pruneBuckets drops hourly buckets (overall, per-credential, per-model) older
-// than the retention window.
+// pruneBuckets drops hourly buckets (overall, per-credential, per-model,
+// per-client) older than the retention window.
 func (t *Tracker) pruneBuckets(now time.Time) {
 	cutoff := now.Add(-retentionHours * time.Hour).Unix()
 	for k := range t.buckets {
@@ -251,6 +267,11 @@ func (t *Tracker) pruneBuckets(now time.Time) {
 	for k := range t.modelBuckets {
 		if k < cutoff {
 			delete(t.modelBuckets, k)
+		}
+	}
+	for k := range t.clientBuckets {
+		if k < cutoff {
+			delete(t.clientBuckets, k)
 		}
 	}
 }
@@ -315,12 +336,9 @@ func (t *Tracker) Snapshot() Report {
 }
 
 // SnapshotWindow returns a Report scoped to the last `window` of time, ending
-// now: Totals, ByCredential, ByModel and Series are computed by summing only
-// the hourly buckets that fall in the window. window<=0 (or >= the full
-// retention window) is equivalent to Snapshot (all-time).
-//
-// ByClient is not windowed — per-client usage is tracked cumulatively only,
-// not per hour — so it always reflects all-time totals, same as Snapshot.
+// now: Totals, ByCredential, ByModel, ByClient and Series are computed by
+// summing only the hourly buckets that fall in the window. window<=0 (or >=
+// the full retention window) is equivalent to Snapshot (all-time).
 func (t *Tracker) SnapshotWindow(window time.Duration) Report {
 	if window <= 0 || window >= retentionHours*time.Hour {
 		return t.Snapshot()
@@ -357,9 +375,25 @@ func (t *Tracker) SnapshotWindow(window time.Duration) Report {
 		totalCost += byModel[i].Cost
 	}
 
-	byClient := make([]ClientReport, 0, len(t.byClient))
-	for name := range t.byClient {
-		byClient = append(byClient, t.clientReportLocked(name))
+	byClientModel := map[string]map[string]*Stat{} // client -> model -> stat
+	for hour, clients := range t.clientBuckets {
+		if hour < cutoff {
+			continue
+		}
+		for client, byModelStat := range clients {
+			cm := byClientModel[client]
+			if cm == nil {
+				cm = map[string]*Stat{}
+				byClientModel[client] = cm
+			}
+			for model, st := range byModelStat {
+				apply2(get(cm, model), *st)
+			}
+		}
+	}
+	byClient := make([]ClientReport, 0, len(byClientModel))
+	for name, byModelStat := range byClientModel {
+		byClient = append(byClient, t.clientReportFromModels(name, byModelStat))
 	}
 	sort.Slice(byClient, func(i, j int) bool {
 		if byClient[i].Requests != byClient[j].Requests {
@@ -419,9 +453,17 @@ func (t *Tracker) ClientUsage(name string) (ClientReport, bool) {
 	return t.clientReportLocked(name), true
 }
 
-// clientReportLocked builds the report for one client key. The caller holds mu.
+// clientReportLocked builds the all-time report for one client key. The
+// caller holds mu.
 func (t *Tracker) clientReportLocked(name string) ClientReport {
-	byModel := entries(t.byClient[name])
+	return t.clientReportFromModels(name, t.byClient[name])
+}
+
+// clientReportFromModels builds a ClientReport for one client key from a
+// model->Stat breakdown (either the all-time map or a windowed sum). The
+// caller holds mu (modelCost reads pricing).
+func (t *Tracker) clientReportFromModels(name string, byModelStat map[string]*Stat) ClientReport {
+	byModel := entries(byModelStat)
 	var cr ClientReport
 	cr.Name = name
 	for i := range byModel {
@@ -441,14 +483,15 @@ func (t *Tracker) clientReportLocked(name string) ClientReport {
 
 // persisted is the on-disk shape of a tracker's aggregates.
 type persisted struct {
-	Totals       Stat                        `json:"totals"`
-	ByCredential map[string]*Stat            `json:"by_credential"`
-	ByModel      map[string]*Stat            `json:"by_model"`
-	ByClient     map[string]map[string]*Stat `json:"by_client"`
-	Buckets      map[int64]*Stat             `json:"buckets"`
-	CredBuckets  map[int64]map[string]*Stat  `json:"cred_buckets"`
-	ModelBuckets map[int64]map[string]*Stat  `json:"model_buckets"`
-	SinceUnix    int64                       `json:"since_unix"`
+	Totals        Stat                                  `json:"totals"`
+	ByCredential  map[string]*Stat                      `json:"by_credential"`
+	ByModel       map[string]*Stat                      `json:"by_model"`
+	ByClient      map[string]map[string]*Stat           `json:"by_client"`
+	Buckets       map[int64]*Stat                       `json:"buckets"`
+	CredBuckets   map[int64]map[string]*Stat            `json:"cred_buckets"`
+	ModelBuckets  map[int64]map[string]*Stat            `json:"model_buckets"`
+	ClientBuckets map[int64]map[string]map[string]*Stat `json:"client_buckets"`
+	SinceUnix     int64                                 `json:"since_unix"`
 }
 
 // Save writes the aggregates to path (atomic via temp+rename) so usage survives
@@ -458,7 +501,8 @@ func (t *Tracker) Save(path string) error {
 	data, err := json.Marshal(persisted{
 		Totals: t.totals, ByCredential: t.byCredential, ByModel: t.byModel,
 		ByClient: t.byClient, Buckets: t.buckets,
-		CredBuckets: t.credBuckets, ModelBuckets: t.modelBuckets, SinceUnix: t.since.Unix(),
+		CredBuckets: t.credBuckets, ModelBuckets: t.modelBuckets,
+		ClientBuckets: t.clientBuckets, SinceUnix: t.since.Unix(),
 	})
 	t.mu.Unlock()
 	if err != nil {
@@ -507,6 +551,9 @@ func Load(path string, opts ...Option) (*Tracker, error) {
 	}
 	if p.ModelBuckets != nil {
 		t.modelBuckets = p.ModelBuckets
+	}
+	if p.ClientBuckets != nil {
+		t.clientBuckets = p.ClientBuckets
 	}
 	t.totals = p.Totals
 	if p.SinceUnix > 0 {

@@ -391,10 +391,9 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStats returns the usage snapshot as JSON (requires a client key).
-// Optional ?days=N scopes totals/by_credential/by_model/series to the last N
-// days (N ∈ {1,2,3,7,30}, or any positive value); omitted or invalid falls
-// back to the all-time snapshot. by_client is always all-time (see
-// usage.Tracker.SnapshotWindow).
+// Optional ?days=N scopes totals/by_credential/by_model/by_client/series to
+// the last N days (N ∈ {1,2,3,7,30}, or any positive value); omitted or
+// invalid falls back to the all-time snapshot (see usage.Tracker.SnapshotWindow).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !s.adminAuthorized(w, r) {
 		return

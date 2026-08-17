@@ -307,14 +307,51 @@ func TestSnapshotWindow_NonPositiveIsAllTime(t *testing.T) {
 	}
 }
 
-func TestSnapshotWindow_ByClientAlwaysAllTime(t *testing.T) {
+func TestSnapshotWindow_ByClientScopedToWindow(t *testing.T) {
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	now := base
 	tr := New(WithClock(func() time.Time { return now }))
+	tr.SetPricing(map[string]Price{"m": {Input: 2, Output: 4}})
+
+	// Old event, outside the 24h window once we advance the clock.
 	tr.Record(Event{Client: "gandalf", Model: "m", InputTokens: 1})
+
 	now = base.Add(48 * time.Hour)
+	// In-window: gandalf uses two models; laptop uses one.
+	tr.Record(Event{Client: "gandalf", Model: "m", InputTokens: 1_000_000, OutputTokens: 500_000})
+	tr.Record(Event{Client: "gandalf", Model: "other"})
+	tr.Record(Event{Client: "laptop", Model: "m", IsError: true})
+
 	r := tr.SnapshotWindow(24 * time.Hour)
-	if len(r.ByClient) != 1 || r.ByClient[0].Name != "gandalf" {
-		t.Errorf("windowed by_client = %+v, want all-time gandalf entry", r.ByClient)
+	if len(r.ByClient) != 2 {
+		t.Fatalf("windowed by_client = %+v", r.ByClient)
+	}
+	byName := map[string]ClientReport{}
+	for _, c := range r.ByClient {
+		byName[c.Name] = c
+	}
+	g := byName["gandalf"]
+	if g.Requests != 2 || len(g.ByModel) != 2 {
+		t.Fatalf("windowed gandalf = %+v", g)
+	}
+	// m: 1M in*2 + 0.5M out*4 = 4
+	if g.Cost != 4 {
+		t.Errorf("windowed gandalf cost = %v, want 4", g.Cost)
+	}
+	l := byName["laptop"]
+	if l.Requests != 1 || l.Errors != 1 {
+		t.Fatalf("windowed laptop = %+v", l)
+	}
+
+	// All-time snapshot still includes the old (out-of-window) gandalf event.
+	full := tr.Snapshot()
+	var fg ClientReport
+	for _, c := range full.ByClient {
+		if c.Name == "gandalf" {
+			fg = c
+		}
+	}
+	if fg.Requests != 3 {
+		t.Fatalf("all-time gandalf = %+v, want 3 requests", fg)
 	}
 }
