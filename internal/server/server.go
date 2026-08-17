@@ -391,13 +391,21 @@ func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStats returns the usage snapshot as JSON (requires a client key).
+// Optional ?days=N scopes totals/by_credential/by_model/series to the last N
+// days (N ∈ {1,2,3,7,30}, or any positive value); omitted or invalid falls
+// back to the all-time snapshot. by_client is always all-time (see
+// usage.Tracker.SnapshotWindow).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !s.adminAuthorized(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(s.usage.Snapshot())
+	report := s.usage.Snapshot()
+	if days, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && days > 0 {
+		report = s.usage.SnapshotWindow(time.Duration(days) * 24 * time.Hour)
+	}
+	_ = json.NewEncoder(w).Encode(report)
 }
 
 // handleRequestsLog returns the recent per-request log (newest first) — who
@@ -1010,7 +1018,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	p(`<table><tr><th>Method &amp; path</th><th>What it does</th></tr>`)
 	for _, e := range []ep{
-		{"GET", "/admin/stats", "", "Usage snapshot (JSON): totals, per-credential, per-model, hourly series, total cost."},
+		{"GET", "/admin/stats", "", "Usage snapshot (JSON): totals, per-credential, per-model, hourly series, total cost. ?days=1|2|3|7|30 windows it; omit for all-time."},
 		{"GET", "/admin/requests", "", "Recent per-request log (newest first): time, client, IP, User-Agent, provider, model, account, tokens, cost. Filters: ?model= ?provider= ?credential= ?client=; paginate with ?limit= &amp; ?offset= (returns total)."},
 		{"GET", "/admin/usage.csv", "", "Usage export (CSV)."},
 		{"GET", "/admin/accounts", "", "Pooled credentials: state, health, usage."},

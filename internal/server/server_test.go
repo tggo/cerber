@@ -583,6 +583,36 @@ func TestStats_RecordsAndServes(t *testing.T) {
 	}
 }
 
+func TestStats_DaysWindow(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"m","usage":{"input_tokens":7,"output_tokens":11}}`), nil)
+	h := s.Handler()
+	if rec := do(t, h, "POST", "/v1/messages", `{"model":"claude-x"}`, clientKey); rec.Code != 200 {
+		t.Fatalf("native code %d", rec.Code)
+	}
+	rec := do(t, h, "GET", "/admin/stats?days=7", "", clientKey)
+	if rec.Code != 200 {
+		t.Fatalf("stats?days=7 code %d", rec.Code)
+	}
+	var rep struct {
+		Totals struct {
+			Requests int64 `json:"requests"`
+		} `json:"totals"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Totals.Requests != 1 {
+		t.Errorf("windowed totals = %+v, want 1 request", rep.Totals)
+	}
+
+	// A garbage days value falls back to the all-time snapshot rather than erroring.
+	if rec := do(t, h, "GET", "/admin/stats?days=bogus", "", clientKey); rec.Code != 200 {
+		t.Errorf("stats?days=bogus code %d, want 200", rec.Code)
+	}
+}
+
 func TestCatchAll(t *testing.T) {
 	s, _ := newServer(t, newStore(t, 1))
 	// no upstream proxy -> unknown path 404

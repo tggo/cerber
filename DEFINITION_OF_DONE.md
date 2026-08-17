@@ -137,12 +137,14 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **Verified:** `make integration` → cache + Gemini + Grok + native + OpenAI-compat + streaming PASS (OpenAI route skips/needs a valid `OPENAI_KEY`); verify-claude.sh → PASS — 2026-07-03.
 
 ## Usage & stats
-**What:** cerber tracks request/error/token counts per credential and per model, exposed as JSON.
+**What:** cerber tracks request/error/token counts per credential and per model, exposed as JSON, with an optional recent-time window.
 **DoD:**
 - `GET /admin/stats` (requires a client key) returns totals + by_credential + by_model (requests, errors, input/output tokens, last_used), sorted by requests.
+- `?days=N` (any positive integer; the dashboard offers 1/2/3/7/30) scopes totals/by_credential/by_model/series to the last N days, computed from hourly per-credential and per-model buckets (`usage.Tracker.SnapshotWindow`); omitted, zero, non-positive, or unparseable `days` falls back to the all-time snapshot. `by_client` is always all-time — per-client usage is not tracked hourly.
 - Tokens are recorded for non-streaming responses (parsed from Anthropic usage) AND for native streaming responses (parsed from `message_start`/`message_delta` SSE events as they pass through). OpenAI-compat streaming still records request counts only.
 - Errors (4xx/5xx, transport, refresh, none-available) increment the error count.
-**Verified:** `internal/usage` (100%) + `internal/server` stats tests + live (`input 9/output 6` after one real call) — 2026-06-07.
+- Hourly buckets (overall, per-credential, per-model) are retained ~30 days and persisted across restarts alongside the cumulative totals.
+**Verified:** `internal/usage` (incl. `TestSnapshotWindow_*`) + `internal/server` stats tests (incl. `TestStats_DaysWindow`) + live (`input 9/output 6` after one real call) — 2026-06-07, windowing added 2026-08-17.
 
 ## Prometheus metrics
 **What:** usage AND live operational signals exposed in Prometheus format for scraping.
@@ -157,7 +159,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 **What:** a self-contained usage dashboard (no external/CDN assets).
 **DoD:**
 - `GET /dashboard` serves an HTML page that, given a client key, polls `/admin/stats` and renders totals + per-credential/per-model tables with auto-refresh.
-**Verified:** served 200 text/html; live stats render — 2026-06-07.
+- A period selector (1/2/3/7/30 days, or all-time — default) drives the `?days=` query param on every stats fetch; the choice persists in `localStorage` across reloads.
+**Verified:** served 200 text/html; live stats render — 2026-06-07, period selector added 2026-08-17.
 
 ## Multi-provider routing + OpenAI provider
 **What:** the OpenAI-compatible endpoint routes by model name to a provider; OpenAI is supported as a real upstream (passthrough).

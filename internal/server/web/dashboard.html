@@ -19,7 +19,7 @@
   header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
   header h1 span { color:var(--accent); }
   .grow { flex:1; }
-  input, button { font:inherit; color:var(--fg); background:var(--panel);
+  input, button, select { font:inherit; color:var(--fg); background:var(--panel);
     border:1px solid var(--line); border-radius:8px; padding:7px 11px; }
   input { width:300px; }
   button { cursor:pointer; }
@@ -65,6 +65,14 @@
   <h1>cerber<span>·</span>usage</h1>
   <span id="status" class="muted">enter client key →</span>
   <span class="grow"></span>
+  <select id="period">
+    <option value="1">last 1 day</option>
+    <option value="2">last 2 days</option>
+    <option value="3">last 3 days</option>
+    <option value="7">last 7 days</option>
+    <option value="30">last 30 days</option>
+    <option value="0" selected>all time</option>
+  </select>
   <input id="key" type="password" placeholder="client API key" autocomplete="off">
   <label class="muted"><input id="auto" type="checkbox" style="width:auto" checked> auto</label>
   <button id="refresh">refresh</button>
@@ -107,6 +115,10 @@
   key.value = localStorage.getItem("cerber_key") || "";
   key.addEventListener("change", () => localStorage.setItem("cerber_key", key.value));
 
+  const period = $("period");
+  period.value = localStorage.getItem("cerber_period") || "0";
+  period.addEventListener("change", () => { localStorage.setItem("cerber_period", period.value); load(); });
+
   const fmt = (n) => (n ?? 0).toLocaleString();
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const usd = (c) => c ? "$" + (c >= 1 ? c.toFixed(2) : c.toFixed(4)) : "—";
@@ -141,7 +153,8 @@
     // Try anyway with no key: on the LAN, nginx injects the key for us (keyless).
     // Only prompt for a key if the server actually rejects us (401).
     try {
-      const r = await fetch("/admin/stats", { headers: authHeaders() });
+      const days = period.value && period.value !== "0" ? "?days=" + encodeURIComponent(period.value) : "";
+      const r = await fetch("/admin/stats" + days, { headers: authHeaders() });
       if (r.status === 401) { $("status").textContent = "enter client key →"; return; }
       if (!r.ok) { $("status").innerHTML = `<span class="err">HTTP ${r.status}</span>`; return; }
       const d = await r.json();

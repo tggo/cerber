@@ -258,3 +258,63 @@ func TestByClient_PersistRoundTrip(t *testing.T) {
 		t.Errorf("after load, ClientUsage = %+v ok=%v", rep, ok)
 	}
 }
+
+func TestSnapshotWindow_ScopesToRecentHours(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	now := base
+	tr := New(WithClock(func() time.Time { return now }))
+
+	// Old event, 3 days before the window's "now".
+	tr.Record(Event{Credential: "old-cred", Model: "old-model", InputTokens: 100})
+
+	now = base.Add(3 * 24 * time.Hour)
+	tr.SetPricing(map[string]Price{"new-model": {Input: 2, Output: 4}})
+	tr.Record(Event{Credential: "new-cred", Model: "new-model", InputTokens: 1_000_000, OutputTokens: 500_000})
+	tr.Record(Event{Credential: "new-cred", Model: "new-model", IsError: true})
+
+	r := tr.SnapshotWindow(24 * time.Hour)
+	if r.Totals.Requests != 2 || r.Totals.Errors != 1 {
+		t.Fatalf("windowed totals = %+v", r.Totals)
+	}
+	if len(r.ByCredential) != 1 || r.ByCredential[0].Name != "new-cred" {
+		t.Fatalf("windowed by_credential = %+v", r.ByCredential)
+	}
+	if len(r.ByModel) != 1 || r.ByModel[0].Name != "new-model" {
+		t.Fatalf("windowed by_model = %+v", r.ByModel)
+	}
+	// new-model: 1M in*2 + 0.5M out*4 = 4
+	if r.ByModel[0].Cost != 4 || r.TotalCost != 4 {
+		t.Errorf("windowed cost = %+v total=%v", r.ByModel[0], r.TotalCost)
+	}
+	if len(r.Series) != 1 {
+		t.Fatalf("windowed series = %+v", r.Series)
+	}
+
+	// All-time snapshot still sees both events.
+	full := tr.Snapshot()
+	if full.Totals.Requests != 3 {
+		t.Fatalf("all-time totals = %+v", full.Totals)
+	}
+}
+
+func TestSnapshotWindow_NonPositiveIsAllTime(t *testing.T) {
+	tr := fixedTracker()
+	tr.Record(Event{Credential: "a", Model: "m", InputTokens: 1})
+	full := tr.Snapshot()
+	windowed := tr.SnapshotWindow(0)
+	if windowed.Totals.Requests != full.Totals.Requests {
+		t.Errorf("SnapshotWindow(0) = %+v, want all-time %+v", windowed.Totals, full.Totals)
+	}
+}
+
+func TestSnapshotWindow_ByClientAlwaysAllTime(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	now := base
+	tr := New(WithClock(func() time.Time { return now }))
+	tr.Record(Event{Client: "gandalf", Model: "m", InputTokens: 1})
+	now = base.Add(48 * time.Hour)
+	r := tr.SnapshotWindow(24 * time.Hour)
+	if len(r.ByClient) != 1 || r.ByClient[0].Name != "gandalf" {
+		t.Errorf("windowed by_client = %+v, want all-time gandalf entry", r.ByClient)
+	}
+}
