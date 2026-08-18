@@ -734,8 +734,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "  Ask the operator for a key; keys are managed in the dashboard.\n\n")
 
 	fmt.Fprintf(&b, "## Endpoints\n\n")
-	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible chat (all providers, incl. Claude). Point any OpenAI SDK at base_url `%s/v1`.\n", base)
-	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native messages. Point the Anthropic SDK at base_url `%s`.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible chat (all providers, incl. Claude). Point any OpenAI SDK at base_url `%s/v1`. **Tool/function calling for Claude models is NOT translated on this endpoint** — a `tools` array is silently dropped when the request is routed to Anthropic, so the model narrates instead of calling. If your agent needs Claude tool calls, use `/v1/messages` (native) instead, or use `/v1/chat/completions` only with an actual OpenAI/Grok/Gemini model.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native messages. Point the Anthropic SDK at base_url `%s`. This is the ONLY endpoint that supports Claude tool calling — use it whenever your agent passes `tools` and targets a `claude*` model.\n", base)
 	fmt.Fprintf(&b, "- `POST /v1/messages/count_tokens` — Anthropic token counting.\n")
 	fmt.Fprintf(&b, "- `POST /v1/images/generations` — image generation (OpenAI Images shape; e.g. `grok-imagine-image`).\n")
 	fmt.Fprintf(&b, "- `POST /v1/embeddings` — OpenAI embeddings (passthrough to the provider serving the model).\n")
@@ -746,7 +746,7 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama), not Anthropic; an unsupported model → 400/501.\n\n")
 
 	fmt.Fprintf(&b, "## Recommended models\n\n")
-	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; works on `/v1/chat/completions` and `/v1/messages`).\n")
+	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; plain chat works on both endpoints, but **tool calling only works on `/v1/messages`** — see Endpoints above).\n")
 	fmt.Fprintf(&b, "- Most capable: `claude-opus-4-8`.\n")
 	fmt.Fprintf(&b, "- Cheap/fast: `claude-haiku-4-5-20251001`.\n")
 	fmt.Fprintf(&b, "- Local/free: an ollama model from the list below.\n")
@@ -900,8 +900,8 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	p(`<h2 id="endpoints">API endpoints</h2><table><tr><th>Method &amp; path</th><th>Dialect</th><th>What it does</th></tr>`)
 	type ep struct{ m, path, dia, desc string }
 	for _, e := range []ep{
-		{"POST", "/v1/chat/completions", "OpenAI", "Chat for every provider incl. Claude. Supports streaming + fallback."},
-		{"POST", "/v1/messages", "Anthropic", "Native Anthropic Messages, transparent passthrough (streaming)."},
+		{"POST", "/v1/chat/completions", "OpenAI", "Chat for every provider incl. Claude. Supports streaming + fallback. ⚠ Claude tool/function calling is NOT translated here — tools are silently dropped when routed to Anthropic; use /v1/messages instead."},
+		{"POST", "/v1/messages", "Anthropic", "Native Anthropic Messages, transparent passthrough (streaming). The only endpoint where Claude tool calling actually works."},
 		{"POST", "/v1/messages/count_tokens", "Anthropic", "Token counting via pooled credentials."},
 		{"POST", "/v1/embeddings", "OpenAI", "Embeddings, passthrough to the provider serving the model."},
 		{"POST", "/v1/completions", "OpenAI", "Legacy text completions, passthrough."},

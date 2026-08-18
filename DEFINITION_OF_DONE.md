@@ -88,8 +88,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Request errors: bad JSON, missing model, no messages, unsupported role/part, only-system, bad stop/content → clear error.
 - Response (non-stream): Anthropic → OpenAI concatenates text blocks; maps stop_reason→finish_reason (end_turn/stop_sequence→stop, max_tokens→length, tool_use→tool_calls); maps usage; derives `chatcmpl-<id>`.
 - Streaming: Anthropic SSE → OpenAI `chat.completion.chunk` SSE — role chunk first, content deltas, final finish_reason chunk, then `data: [DONE]`; tolerates pings/non-JSON; finishes on EOF even without message_stop.
-- Known gaps (slice #1): OpenAI `tools`/function-calling not translated (use native endpoint).
-**Verified:** `internal/translator` tests, 94.8% coverage — 2026-06-07.
+- Known gaps (slice #1): OpenAI `tools`/function-calling not translated (use native endpoint). Called out explicitly in `/llm.md` and `/docs` (endpoint table + Recommended models) so an agent picks `/v1/messages` for Claude tool calling instead of silently getting narrated-but-not-called tools on `/v1/chat/completions` — an operator hit this 2026-08-18 (an assistant wrongly concluded claude-sonnet-5 "ignores tools" when it was actually on the untranslated compat endpoint).
+**Verified:** `internal/translator` tests, 94.8% coverage — 2026-06-07; `/llm.md` warning verified via `TestLLMDoc` — 2026-08-18.
 
 ## HTTP API — endpoints, auth, rotation (Anthropic slice)
 **What:** cerber serves a native Anthropic passthrough and an OpenAI-compatible endpoint, authenticating clients and rotating across upstream credentials.
