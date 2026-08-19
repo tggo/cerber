@@ -11,9 +11,30 @@ import (
 // --- Gemini request shapes ---
 
 type geminiRequest struct {
-	Contents          []geminiContent  `json:"contents"`
-	SystemInstruction *geminiContent   `json:"systemInstruction,omitempty"`
-	GenerationConfig  *geminiGenConfig `json:"generationConfig,omitempty"`
+	Contents          []geminiContent   `json:"contents"`
+	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	GenerationConfig  *geminiGenConfig  `json:"generationConfig,omitempty"`
+	Tools             []geminiTool      `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
+}
+
+type geminiTool struct {
+	FunctionDeclarations []geminiFuncDecl `json:"functionDeclarations,omitempty"`
+}
+
+type geminiFuncDecl struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type geminiToolConfig struct {
+	FunctionCallingConfig geminiFuncCallConfig `json:"functionCallingConfig"`
+}
+
+type geminiFuncCallConfig struct {
+	Mode                 string   `json:"mode"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 type geminiContent struct {
@@ -22,8 +43,20 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text       string            `json:"text,omitempty"`
-	InlineData *geminiInlineData `json:"inlineData,omitempty"`
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+type geminiFunctionCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args,omitempty"`
+}
+
+type geminiFunctionResponse struct {
+	Name     string          `json:"name"`
+	Response json.RawMessage `json:"response,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -42,8 +75,10 @@ type geminiGenConfig struct {
 // generateContent request body. It also returns the model (for the URL path) and
 // whether streaming was requested.
 //
-// Slice scope: text and base64 (data: URI) image parts are supported; http(s)
-// image URLs and tools are not (use a different provider for those).
+// Text and base64 (data: URI) image parts are supported (http(s) image URLs are
+// not — Gemini needs inline data). Function calling is translated in full:
+// `tools` become functionDeclarations, assistant `tool_calls` become
+// functionCall parts, and role=="tool" messages become functionResponse parts.
 func (t *Translator) OpenAIToGemini(body []byte) (out []byte, model string, stream bool, err error) {
 	var in openaiRequest
 	if err = json.Unmarshal(body, &in); err != nil {
@@ -57,8 +92,36 @@ func (t *Translator) OpenAIToGemini(body []byte) (out []byte, model string, stre
 	}
 
 	gr := geminiRequest{}
+	if gr.Tools, err = geminiTools(in.Tools); err != nil {
+		return nil, "", false, err
+	}
+	if gr.ToolConfig, err = geminiChoice(in.ToolChoice); err != nil {
+		return nil, "", false, err
+	}
+
 	var systemParts []string
+	// callNames remembers which function each synthetic tool_call_id refers to, so
+	// a later role=="tool" message can be labelled — Gemini keys a functionResponse
+	// by function name, while OpenAI keys it by call id.
+	callNames := map[string]string{}
+	mergingToolResults := false
 	for i, m := range in.Messages {
+		if m.Role == "tool" {
+			part, perr := geminiToolResultPart(m, callNames)
+			if perr != nil {
+				return nil, "", false, fmt.Errorf("translator: message[%d]: %w", i, perr)
+			}
+			if mergingToolResults {
+				last := &gr.Contents[len(gr.Contents)-1]
+				last.Parts = append(last.Parts, part)
+			} else {
+				gr.Contents = append(gr.Contents, geminiContent{Role: "user", Parts: []geminiPart{part}})
+				mergingToolResults = true
+			}
+			continue
+		}
+		mergingToolResults = false
+
 		parts, text, perr := contentToGeminiParts(m.Content)
 		if perr != nil {
 			return nil, "", false, fmt.Errorf("translator: message[%d]: %w", i, perr)
@@ -71,6 +134,14 @@ func (t *Translator) OpenAIToGemini(body []byte) (out []byte, model string, stre
 		case "user":
 			gr.Contents = append(gr.Contents, geminiContent{Role: "user", Parts: parts})
 		case "assistant":
+			for _, tc := range m.ToolCalls {
+				args, aerr := argumentsToObject(tc.Function.Arguments, tc.Function.Name)
+				if aerr != nil {
+					return nil, "", false, fmt.Errorf("translator: message[%d]: %w", i, aerr)
+				}
+				callNames[tc.ID] = tc.Function.Name
+				parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{Name: tc.Function.Name, Args: args}})
+			}
 			gr.Contents = append(gr.Contents, geminiContent{Role: "model", Parts: parts})
 		default:
 			return nil, "", false, fmt.Errorf("translator: message[%d]: unsupported role %q", i, m.Role)
@@ -158,12 +229,25 @@ func (t *Translator) GeminiToOpenAI(body []byte, model string) ([]byte, error) {
 		return nil, fmt.Errorf("translator: parse gemini response: %w", err)
 	}
 	var text strings.Builder
+	var calls []openaiToolCall
 	finish := ""
 	if len(in.Candidates) > 0 {
 		for _, p := range in.Candidates[0].Content.Parts {
 			text.WriteString(p.Text)
+			if p.FunctionCall != nil {
+				calls = append(calls, geminiCallToOpenAI(*p.FunctionCall, len(calls)))
+			}
 		}
 		finish = geminiFinish(in.Candidates[0].FinishReason)
+	}
+	// Gemini reports STOP even when the turn is a function call; OpenAI clients
+	// branch on finish_reason, so correct it here.
+	if len(calls) > 0 && (finish == "stop" || finish == "") {
+		finish = "tool_calls"
+	}
+	msg := openaiRespMsg{Role: "assistant", ToolCalls: calls}
+	if s := text.String(); s != "" || len(calls) == 0 {
+		msg.Content = &s
 	}
 	resp := openaiResponse{
 		ID:      geminiChatID(in.ResponseID),
@@ -172,7 +256,7 @@ func (t *Translator) GeminiToOpenAI(body []byte, model string) ([]byte, error) {
 		Model:   model,
 		Choices: []openaiChoice{{
 			Index:        0,
-			Message:      openaiRespMsg{Role: "assistant", Content: text.String()},
+			Message:      msg,
 			FinishReason: finish,
 		}},
 		Usage: openaiUsage{
@@ -220,6 +304,7 @@ func (t *Translator) StreamGeminiToOpenAI(w io.Writer, r io.Reader, model string
 	emittedRole := false
 	finalReason := ""
 	done := false
+	toolCalls := 0
 
 	emit := func(choice openaiStreamChoice) error {
 		chunk := openaiStreamChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: model, Choices: []openaiStreamChoice{choice}}
@@ -243,6 +328,9 @@ func (t *Translator) StreamGeminiToOpenAI(w io.Writer, r io.Reader, model string
 		fr := geminiFinish(finalReason)
 		if fr == "" {
 			fr = "stop"
+		}
+		if toolCalls > 0 && fr == "stop" {
+			fr = "tool_calls"
 		}
 		if err := emit(openaiStreamChoice{Index: 0, Delta: openaiDelta{}, FinishReason: &fr}); err != nil {
 			return err
@@ -282,6 +370,25 @@ func (t *Translator) StreamGeminiToOpenAI(w io.Writer, r io.Reader, model string
 						return err
 					}
 				}
+				if p.FunctionCall == nil {
+					continue
+				}
+				// Gemini streams a function call whole, so one chunk carries the
+				// complete name and arguments rather than a fragment sequence.
+				call := geminiCallToOpenAI(*p.FunctionCall, toolCalls)
+				delta := openaiDelta{ToolCalls: []openaiToolCallDelta{{
+					Index: toolCalls,
+					ID:    call.ID,
+					Type:  "function",
+					Function: openaiToolCallFuncDelta{
+						Name:      call.Function.Name,
+						Arguments: call.Function.Arguments,
+					},
+				}}}
+				toolCalls++
+				if err := emit(openaiStreamChoice{Index: 0, Delta: delta}); err != nil {
+					return err
+				}
 			}
 			if ev.Candidates[0].FinishReason != "" {
 				finalReason = ev.Candidates[0].FinishReason
@@ -292,4 +399,116 @@ func (t *Translator) StreamGeminiToOpenAI(w io.Writer, r io.Reader, model string
 		return fmt.Errorf("translator: read gemini stream: %w", err)
 	}
 	return finish()
+}
+
+// geminiTools converts OpenAI tool declarations into Gemini functionDeclarations.
+// Gemini takes a single tool entry holding all declarations.
+func geminiTools(tools []openaiTool) ([]geminiTool, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	decls := make([]geminiFuncDecl, 0, len(tools))
+	for i, t := range tools {
+		if t.Type != "" && t.Type != "function" {
+			return nil, fmt.Errorf("translator: tools[%d]: unsupported tool type %q", i, t.Type)
+		}
+		if t.Function.Name == "" {
+			return nil, fmt.Errorf("translator: tools[%d]: missing function name", i)
+		}
+		decls = append(decls, geminiFuncDecl{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  toolSchemaOrEmpty(t.Function.Parameters),
+		})
+	}
+	return []geminiTool{{FunctionDeclarations: decls}}, nil
+}
+
+// geminiChoice maps OpenAI tool_choice onto Gemini's functionCallingConfig.
+func geminiChoice(raw json.RawMessage) (*geminiToolConfig, error) {
+	kind, name, err := toolChoiceKind(raw)
+	if err != nil {
+		return nil, fmt.Errorf("translator: %w", err)
+	}
+	cfg := geminiFuncCallConfig{}
+	switch kind {
+	case "":
+		return nil, nil
+	case "auto":
+		cfg.Mode = "AUTO"
+	case "none":
+		cfg.Mode = "NONE"
+	case "required":
+		cfg.Mode = "ANY"
+	case "tool":
+		cfg.Mode = "ANY"
+		cfg.AllowedFunctionNames = []string{name}
+	}
+	return &geminiToolConfig{FunctionCallingConfig: cfg}, nil
+}
+
+// geminiCallID synthesizes the call id OpenAI requires and Gemini does not
+// provide. The function name is embedded so the id survives a round trip: when
+// the client replays the matching role=="tool" message, geminiToolResultPart can
+// recover the name Gemini needs to key the functionResponse.
+func geminiCallID(index int, name string) string {
+	return fmt.Sprintf("call_%d_%s", index, name)
+}
+
+// geminiCallName recovers the function name from an id made by geminiCallID.
+// Returns "" for an id in any other shape.
+func geminiCallName(id string) string {
+	rest, ok := strings.CutPrefix(id, "call_")
+	if !ok {
+		return ""
+	}
+	_, name, ok := strings.Cut(rest, "_")
+	if !ok {
+		return ""
+	}
+	return name
+}
+
+// geminiCallToOpenAI converts one Gemini functionCall into an OpenAI tool call at
+// the given tool-call index.
+func geminiCallToOpenAI(fc geminiFunctionCall, index int) openaiToolCall {
+	return openaiToolCall{
+		ID:   geminiCallID(index, fc.Name),
+		Type: "function",
+		Function: openaiToolCallFunc{
+			Name:      fc.Name,
+			Arguments: toolArguments(fc.Args),
+		},
+	}
+}
+
+// geminiToolResultPart converts an OpenAI role=="tool" message into a Gemini
+// functionResponse part. The function name comes from the request's own history
+// when available, then from the id's embedded name, then from the message's
+// `name` field — one of the three is always present for a well-formed client.
+func geminiToolResultPart(m openaiMessage, callNames map[string]string) (geminiPart, error) {
+	if m.ToolCallID == "" && m.Name == "" {
+		return geminiPart{}, fmt.Errorf("tool message missing tool_call_id")
+	}
+	name := callNames[m.ToolCallID]
+	if name == "" {
+		name = geminiCallName(m.ToolCallID)
+	}
+	if name == "" {
+		name = m.Name
+	}
+	if name == "" {
+		return geminiPart{}, fmt.Errorf("tool message %q: cannot determine which function it answers", m.ToolCallID)
+	}
+	_, text, err := contentToGeminiParts(m.Content)
+	if err != nil {
+		return geminiPart{}, err
+	}
+	// Gemini requires an object; a raw tool output string is wrapped so arbitrary
+	// text survives without the client having to pre-encode it.
+	resp, err := json.Marshal(map[string]string{"result": text})
+	if err != nil {
+		return geminiPart{}, err
+	}
+	return geminiPart{FunctionResponse: &geminiFunctionResponse{Name: name, Response: resp}}, nil
 }

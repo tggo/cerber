@@ -25,8 +25,9 @@ type openaiStreamChoice struct {
 }
 
 type openaiDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string                `json:"role,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	ToolCalls []openaiToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 // --- Anthropic streaming event (loose; only fields we read) ---
@@ -50,10 +51,19 @@ type anthropicStreamEvent struct {
 		Usage anthropicStreamUsage `json:"usage"`
 	} `json:"message"`
 	Delta *struct {
-		Type       string `json:"type"`
-		Text       string `json:"text"`
-		StopReason string `json:"stop_reason"`
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		StopReason  string `json:"stop_reason"`
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
+	// Index addresses the content block a start/delta event belongs to; a
+	// tool_use block's fragments are keyed by it.
+	Index        *int `json:"index"`
+	ContentBlock *struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"content_block"`
 	Usage *anthropicStreamUsage `json:"usage"` // message_delta carries usage at top level
 }
 
@@ -68,6 +78,11 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 	var id, model, finalReason string
 	emittedRole := false
 	done := false
+	// toolIndex maps an Anthropic content-block index to the tool_calls[] index
+	// the client accumulates against. OpenAI numbers tool calls consecutively
+	// among themselves, while Anthropic numbers every block including text.
+	toolIndex := map[int]int{}
+	nextToolIndex := 0
 
 	emit := func(choice openaiStreamChoice) error {
 		chunk := openaiStreamChunk{
@@ -142,9 +157,41 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 					return in, out, err
 				}
 			}
+		case "content_block_start":
+			if ev.ContentBlock == nil || ev.ContentBlock.Type != "tool_use" || ev.Index == nil {
+				continue
+			}
+			ti := nextToolIndex
+			nextToolIndex++
+			toolIndex[*ev.Index] = ti
+			delta := openaiDelta{ToolCalls: []openaiToolCallDelta{{
+				Index:    ti,
+				ID:       ev.ContentBlock.ID,
+				Type:     "function",
+				Function: openaiToolCallFuncDelta{Name: ev.ContentBlock.Name},
+			}}}
+			if err := emit(openaiStreamChoice{Index: 0, Delta: delta}); err != nil {
+				return in, out, err
+			}
 		case "content_block_delta":
-			if ev.Delta != nil && ev.Delta.Type == "text_delta" && ev.Delta.Text != "" {
+			if ev.Delta == nil {
+				continue
+			}
+			switch {
+			case ev.Delta.Type == "text_delta" && ev.Delta.Text != "":
 				if err := emit(openaiStreamChoice{Index: 0, Delta: openaiDelta{Content: ev.Delta.Text}}); err != nil {
+					return in, out, err
+				}
+			case ev.Delta.Type == "input_json_delta" && ev.Index != nil:
+				ti, ok := toolIndex[*ev.Index]
+				if !ok {
+					continue // fragment for a block we never saw start
+				}
+				delta := openaiDelta{ToolCalls: []openaiToolCallDelta{{
+					Index:    ti,
+					Function: openaiToolCallFuncDelta{Arguments: ev.Delta.PartialJSON},
+				}}}
+				if err := emit(openaiStreamChoice{Index: 0, Delta: delta}); err != nil {
 					return in, out, err
 				}
 			}

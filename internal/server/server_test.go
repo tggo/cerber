@@ -1241,7 +1241,8 @@ func TestLLMDoc(t *testing.T) {
 		"claude*", "llama3.1:8b", "supergemma4-26b:latest", // discovered models listed
 		"/v1/embeddings", "/v1/responses", // new passthrough endpoints
 		"X-Cerber-Fallback", "402", "429", "/docs", // fallback + governance + docs link
-		"Tool/function calling for Claude models is NOT translated", // known gap, see TestLLMDoc
+		"Tool/function calling is translated for every provider", // no longer a gap
+		"X-Cerber-Compat", "`raw`", "`force`", "max_completion_tokens", // compatibility mode
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("llm.md missing %q\n%s", want, body)

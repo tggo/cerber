@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/tggo/cerber/internal/compat"
 )
 
 // Config is the top-level cerber configuration.
@@ -42,6 +44,11 @@ type Price struct {
 // Server holds HTTP listener settings.
 type Server struct {
 	Addr string `yaml:"addr"`
+	// Compat is the default request-compatibility mode for /v1/chat/completions:
+	// "auto" (fix what is deterministically known wrong), "raw" (forward the body
+	// untouched) or "force" (also drop parameters the target does not accept).
+	// Empty means "auto". Clients override it per request with X-Cerber-Compat.
+	Compat string `yaml:"compat"`
 }
 
 // Logging configures the zap logger.
@@ -352,6 +359,9 @@ func (c *Config) applyDefaults() {
 	if c.Server.Addr == "" {
 		c.Server.Addr = defaultAddr
 	}
+	if c.Server.Compat == "" {
+		c.Server.Compat = string(compat.DefaultMode)
+	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = defaultLogLevel
 	}
@@ -447,6 +457,9 @@ func (c *Config) applyDefaults() {
 
 // Validate reports the first configuration error found.
 func (c *Config) Validate() error {
+	if _, err := compat.ParseMode(c.Server.Compat, compat.DefaultMode); err != nil {
+		return fmt.Errorf("config: server.compat: %w", err)
+	}
 	if len(c.Access.Keys) == 0 && !c.Access.AllowLocalhost {
 		return fmt.Errorf("config: access.keys must list at least one client key (or set access.allow_localhost: true)")
 	}

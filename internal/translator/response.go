@@ -17,8 +17,11 @@ type anthropicResponse struct {
 }
 
 type anthropicContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 type anthropicUsage struct {
@@ -44,8 +47,11 @@ type openaiChoice struct {
 }
 
 type openaiRespMsg struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role string `json:"role"`
+	// Content is a pointer so it can serialize as null, which is what OpenAI
+	// emits on a tool-call-only turn and what strict clients expect.
+	Content   *string          `json:"content"`
+	ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
 }
 
 type openaiUsage struct {
@@ -63,10 +69,26 @@ func (t *Translator) AnthropicToOpenAI(body []byte) ([]byte, error) {
 	}
 
 	var text strings.Builder
+	var calls []openaiToolCall
 	for _, b := range in.Content {
-		if b.Type == "text" {
+		switch b.Type {
+		case "text":
 			text.WriteString(b.Text)
+		case "tool_use":
+			calls = append(calls, openaiToolCall{
+				ID:   b.ID,
+				Type: "function",
+				Function: openaiToolCallFunc{
+					Name:      b.Name,
+					Arguments: toolArguments(b.Input),
+				},
+			})
 		}
+	}
+
+	msg := openaiRespMsg{Role: "assistant", ToolCalls: calls}
+	if s := text.String(); s != "" || len(calls) == 0 {
+		msg.Content = &s
 	}
 
 	resp := openaiResponse{
@@ -76,7 +98,7 @@ func (t *Translator) AnthropicToOpenAI(body []byte) ([]byte, error) {
 		Model:   in.Model,
 		Choices: []openaiChoice{{
 			Index:        0,
-			Message:      openaiRespMsg{Role: "assistant", Content: text.String()},
+			Message:      msg,
 			FinishReason: finishReason(in.StopReason),
 		}},
 		Usage: openaiUsage{

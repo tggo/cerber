@@ -167,8 +167,8 @@ func TestAnthropicToOpenAI_Basic(t *testing.T) {
 	if r.Created != 1700000000 {
 		t.Errorf("created %d", r.Created)
 	}
-	if r.Choices[0].Message.Content != "Hello world" {
-		t.Errorf("content %q", r.Choices[0].Message.Content)
+	if msgText(r.Choices[0].Message) != "Hello world" {
+		t.Errorf("content %+v", r.Choices[0].Message.Content)
 	}
 	if r.Choices[0].FinishReason != "stop" {
 		t.Errorf("finish %q", r.Choices[0].FinishReason)
@@ -206,4 +206,12 @@ func TestFinishReason(t *testing.T) {
 			t.Errorf("finishReason(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// msgText dereferences a response message's nullable content for assertions.
+func msgText(m openaiRespMsg) string {
+	if m.Content == nil {
+		return ""
+	}
+	return *m.Content
 }

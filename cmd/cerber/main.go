@@ -245,6 +245,7 @@ func main() {
 	srv.SetRoutes(cfg.Providers.Routing)
 	srv.SetModelAliases(cfg.Providers.ModelAliases)
 	srv.SetFallbacks(cfg.Providers.Fallbacks)
+	srv.SetCompatMode(cfg.Server.Compat)
 	if ch := a.Cache; ch != nil && ch.AutoInject {
 		srv.SetCacheConfig(anthropic.CacheOptions{
 			Enabled:   true,

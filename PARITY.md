@@ -19,7 +19,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | video gen | ❌ | |
 | Streaming SSE + flush | ✅ | |
 | Request/response header passthrough | ✅ | incl. anthropic-ratelimit-* |
-| Tools / function calling | 🟡 | native passthrough yes; OpenAI→Anthropic translate no |
+| Tools / function calling | ✅ | native passthrough; OpenAI→Anthropic and OpenAI→Gemini translated both directions incl. streaming |
 | Multimodal (images) | 🟡 | text+image in translators; image GEN via /v1/images/generations (grok); no video |
 | Model aliases (alias→canonical) | ✅ | `providers.model_aliases`; resolved pre-routing + pre-upstream |
 | Cross-provider/model fallback chains | ✅ | OpenAI endpoint; `providers.fallbacks` + `X-Cerber-Fallback`; retryable-only (5xx/no-cred), pre-commit |
@@ -121,7 +121,6 @@ Remaining, roughly by value/effort:
 1. **`cerber -healthcheck` flag** — local GET /healthz → exit 0/1, so a distroless
    docker `healthcheck` works (prereq for the Traefik zero-downtime plan).
 2. **Zero-downtime deploy** — Traefik sidecar (see `~/obsidian/notes/cerber-zero-downtime-proxy.md`); deferred.
-3. **OpenAI→Anthropic tools/function-calling translation** — finish the 🟡.
-4. **Resilience** — exponential backoff; reactive refresh on 401.
-5. **More providers** — Codex, Vertex, OpenRouter, Kimi.
-6. **Per-event usage** (SQLite) — enables filtering/per-event export & true history.
+3. **Resilience** — exponential backoff; reactive refresh on 401.
+4. **More providers** — Codex, Vertex, OpenRouter, Kimi.
+5. **Per-event usage** (SQLite) — enables filtering/per-event export & true history.

@@ -89,7 +89,7 @@ func TestGeminiToOpenAI(t *testing.T) {
 	if r.ID != "chatcmpl-abc" || r.Model != "gemini-x" {
 		t.Errorf("id/model = %q %q", r.ID, r.Model)
 	}
-	if r.Choices[0].Message.Content != "Pong!" || r.Choices[0].FinishReason != "stop" {
+	if msgText(r.Choices[0].Message) != "Pong!" || r.Choices[0].FinishReason != "stop" {
 		t.Errorf("choice = %+v", r.Choices[0])
 	}
 	if r.Usage.TotalTokens != 8 {
@@ -104,7 +104,7 @@ func TestGeminiToOpenAI_EmptyAndError(t *testing.T) {
 	}
 	var r openaiResponse
 	json.Unmarshal(out, &r)
-	if r.ID != "chatcmpl-gemini" || r.Choices[0].Message.Content != "" {
+	if r.ID != "chatcmpl-gemini" || msgText(r.Choices[0].Message) != "" {
 		t.Errorf("empty = %+v", r)
 	}
 	if _, err := fixedTr().GeminiToOpenAI([]byte(`{`), "g"); err == nil {

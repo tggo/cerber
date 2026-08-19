@@ -3,6 +3,17 @@
 
 server:
   addr: ":8080"
+  # Default request-compatibility mode for POST /v1/chat/completions. Clients
+  # override it per request with `X-Cerber-Compat: auto|raw|force`.
+  #   auto  — (default) fix only what is deterministically wrong for the resolved
+  #           target: the max_tokens / max_completion_tokens spelling, plus full
+  #           tool translation. Unknown parameters pass through untouched.
+  #   raw   — forward the body byte-for-byte; the client owns every corner case.
+  #           Only valid for OpenAI-dialect upstreams; a claude*/gemini* model
+  #           returns 400 (use /v1/messages for a raw Anthropic request).
+  #   force — auto, plus drop parameters the target does not accept — for clients
+  #           that cannot adapt their request themselves.
+  compat: "auto"
 
 # Logging: structured zap logs to <dir>/<YYYY-MM-DD>.log and stdout.
 logging:

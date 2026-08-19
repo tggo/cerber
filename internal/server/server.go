@@ -29,6 +29,7 @@ import (
 
 	"github.com/tggo/cerber/internal/access"
 	"github.com/tggo/cerber/internal/catalog"
+	"github.com/tggo/cerber/internal/compat"
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/metrics"
@@ -91,6 +92,8 @@ type Server struct {
 	refreshSkew    time.Duration
 	now            func() time.Time
 	cacheOpts      anthropic.CacheOptions // automatic prompt-cache breakpoint injection (native path); disabled by default
+	compatMode     compat.Mode            // default request-compatibility mode; per-request override via X-Cerber-Compat
+	norm           *compat.Normalizer     // learns each model's accepted output-length parameter
 }
 
 // defaultCooldown sidelines a credential after an auth/rate-limit failure.
@@ -123,6 +126,8 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 		cooldown:    defaultCooldown,
 		refreshSkew: defaultRefreshSkew,
 		now:         time.Now,
+		compatMode:  compat.DefaultMode,
+		norm:        compat.NewNormalizer(),
 	}
 }
 
@@ -171,6 +176,15 @@ func (s *Server) SetCacheConfig(opt anthropic.CacheOptions) { s.cacheOpts = opt 
 // SetTokenPersister installs a callback invoked with refreshed OAuth tokens so
 // they can be persisted to disk (keyed by credential name).
 func (s *Server) SetTokenPersister(f func(name string, tok credential.OAuthTokens)) { s.persist = f }
+
+// SetCompatMode installs the default request-compatibility mode for the
+// OpenAI-compatible endpoint. An unknown value is ignored (config.Validate has
+// already rejected it). Call before Handler().
+func (s *Server) SetCompatMode(mode string) {
+	if m, err := compat.ParseMode(mode, compat.DefaultMode); err == nil {
+		s.compatMode = m
+	}
+}
 
 // SetAllowLocalhost lets loopback clients call cerber without a valid key.
 func (s *Server) SetAllowLocalhost(v bool) { s.allowLocalhost = v }
@@ -734,8 +748,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "  Ask the operator for a key; keys are managed in the dashboard.\n\n")
 
 	fmt.Fprintf(&b, "## Endpoints\n\n")
-	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible chat (all providers, incl. Claude). Point any OpenAI SDK at base_url `%s/v1`. **Tool/function calling for Claude models is NOT translated on this endpoint** — a `tools` array is silently dropped when the request is routed to Anthropic, so the model narrates instead of calling. If your agent needs Claude tool calls, use `/v1/messages` (native) instead, or use `/v1/chat/completions` only with an actual OpenAI/Grok/Gemini model.\n", base)
-	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native messages. Point the Anthropic SDK at base_url `%s`. This is the ONLY endpoint that supports Claude tool calling — use it whenever your agent passes `tools` and targets a `claude*` model.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/chat/completions` — OpenAI-compatible chat (all providers, incl. Claude). Point any OpenAI SDK at base_url `%s/v1`. Tool/function calling is translated for every provider: `tools`, `tool_choice`, `parallel_tool_calls`, assistant `tool_calls` and `role: \"tool\"` results all survive the round trip to Anthropic and Gemini. See Compatibility mode below for the parameter corner cases.\n", base)
+	fmt.Fprintf(&b, "- `POST /v1/messages` — Anthropic-native messages. Point the Anthropic SDK at base_url `%s`. Use it when you want to send Anthropic's own dialect (system blocks, cache_control, betas) with no translation at all.\n", base)
 	fmt.Fprintf(&b, "- `POST /v1/messages/count_tokens` — Anthropic token counting.\n")
 	fmt.Fprintf(&b, "- `POST /v1/images/generations` — image generation (OpenAI Images shape; e.g. `grok-imagine-image`).\n")
 	fmt.Fprintf(&b, "- `POST /v1/embeddings` — OpenAI embeddings (passthrough to the provider serving the model).\n")
@@ -746,7 +760,7 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama), not Anthropic; an unsupported model → 400/501.\n\n")
 
 	fmt.Fprintf(&b, "## Recommended models\n\n")
-	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; plain chat works on both endpoints, but **tool calling only works on `/v1/messages`** — see Endpoints above).\n")
+	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; works on both endpoints, tool calling included).\n")
 	fmt.Fprintf(&b, "- Most capable: `claude-opus-4-8`.\n")
 	fmt.Fprintf(&b, "- Cheap/fast: `claude-haiku-4-5-20251001`.\n")
 	fmt.Fprintf(&b, "- Local/free: an ollama model from the list below.\n")
@@ -768,6 +782,13 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 		}
 		b.WriteString("\n")
 	}
+
+	fmt.Fprintf(&b, "## Compatibility mode (OpenAI endpoint)\n\n")
+	fmt.Fprintf(&b, "Upstreams disagree on parameter names even when they all claim the OpenAI dialect: `gpt-5*` rejects `max_tokens` and wants `max_completion_tokens`, xAI wants the opposite. cerber settles that for you, and header `X-Cerber-Compat` says how much it may rewrite:\n\n")
+	fmt.Fprintf(&b, "- `auto` (default on this instance: `%s`) — fixes only what is deterministically known wrong for the resolved target: the `max_tokens`/`max_completion_tokens` spelling, plus full tool translation. Unknown parameters pass through untouched.\n", s.compatMode)
+	fmt.Fprintf(&b, "- `raw` — forwards your body byte-for-byte. You own every corner case. Only valid for models that route to an OpenAI-dialect upstream (OpenAI/Grok/ollama/vLLM); a `claude*` or `gemini*` model returns 400, because that body must be translated — use `/v1/messages` for a raw Anthropic request.\n")
+	fmt.Fprintf(&b, "- `force` — `auto` plus coercion for clients that cannot adapt: parameters outside the OpenAI dialect are dropped instead of forwarded, and degenerate fields (an empty `tools` array, a `tool_choice` with no tools) are removed.\n\n")
+	fmt.Fprintf(&b, "In `auto`/`force`, if an upstream still rejects the output-length parameter, cerber retries once with the other spelling and remembers the answer for that model — so a model nobody has classified yet self-corrects after one request.\n\n")
 
 	fmt.Fprintf(&b, "## Automatic fallback (OpenAI endpoint)\n\n")
 	fmt.Fprintf(&b, "On `POST /v1/chat/completions`, if the chosen model fails with a retryable error (provider 5xx, or all accounts rate-limited/unavailable) cerber transparently retries the next model in a fallback chain before any bytes are sent. 4xx client errors are returned as-is. ")
@@ -900,8 +921,8 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	p(`<h2 id="endpoints">API endpoints</h2><table><tr><th>Method &amp; path</th><th>Dialect</th><th>What it does</th></tr>`)
 	type ep struct{ m, path, dia, desc string }
 	for _, e := range []ep{
-		{"POST", "/v1/chat/completions", "OpenAI", "Chat for every provider incl. Claude. Supports streaming + fallback. ⚠ Claude tool/function calling is NOT translated here — tools are silently dropped when routed to Anthropic; use /v1/messages instead."},
-		{"POST", "/v1/messages", "Anthropic", "Native Anthropic Messages, transparent passthrough (streaming). The only endpoint where Claude tool calling actually works."},
+		{"POST", "/v1/chat/completions", "OpenAI", "Chat for every provider incl. Claude. Streaming, fallback, and full tool/function-call translation to Anthropic and Gemini. Rewriting is governed by X-Cerber-Compat (see Compatibility mode)."},
+		{"POST", "/v1/messages", "Anthropic", "Native Anthropic Messages, transparent passthrough (streaming). Use it to send Anthropic's own dialect with no translation."},
 		{"POST", "/v1/messages/count_tokens", "Anthropic", "Token counting via pooled credentials."},
 		{"POST", "/v1/embeddings", "OpenAI", "Embeddings, passthrough to the provider serving the model."},
 		{"POST", "/v1/completions", "OpenAI", "Legacy text completions, passthrough."},
@@ -954,6 +975,16 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 		p(`<p class="mut">No server-side chains configured on this instance; use the header.</p>`)
 	}
 
+	// Compatibility mode
+	p(`<h2 id="compat">Compatibility mode</h2>`)
+	p(`<p>Upstreams that all claim the OpenAI dialect disagree on details: <code>gpt-5*</code> rejects <code>max_tokens</code> and wants <code>max_completion_tokens</code>, xAI wants the opposite, and the model name alone does not say which. Header <code>X-Cerber-Compat</code> sets how much cerber may rewrite the request; this instance defaults to <code>%s</code>.</p>`, esc(string(s.compatMode)))
+	p(`<table><tr><th>Mode</th><th>Behaviour</th></tr>`)
+	p(`<tr><td><code>auto</code></td><td>Fixes only what is deterministically known wrong for the resolved target — the output-length parameter spelling, plus full tool translation. Unknown parameters pass through, so provider-specific extensions keep working.</td></tr>`)
+	p(`<tr><td><code>raw</code></td><td>Forwards the body byte-for-byte; the client owns every corner case. Valid only for OpenAI-dialect upstreams — a model routing to Anthropic or Gemini returns <code>400</code>, because that body must be translated. Use <code>/v1/messages</code> for a raw Anthropic request.</td></tr>`)
+	p(`<tr><td><code>force</code></td><td><code>auto</code> plus coercion for clients that cannot adapt: parameters outside the OpenAI dialect are dropped rather than forwarded, and degenerate fields (empty <code>tools</code>, an orphaned <code>tool_choice</code>) are removed.</td></tr>`)
+	p(`</table>`)
+	p(`<p class="mut">In <code>auto</code> and <code>force</code>, an upstream that still rejects the output-length parameter triggers exactly one retry with the other spelling; the answer is remembered per model, so an unclassified model self-corrects after one request.</p>`)
+
 	// Limits / governance
 	p(`<h2 id="limits">Rate limits &amp; budgets</h2>`)
 	p(`<p>A managed key may carry a rolling <strong>cost budget</strong> (USD, from configured model pricing) and <strong>rate limits</strong> (requests &amp; tokens per window). On exhaustion you get:</p>`)
@@ -966,6 +997,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 		{"Authorization: Bearer &lt;KEY&gt;", "Client API key (or x-api-key)."},
 		{"X-Cerber-Cred: oauth|key|&lt;name&gt;", "Pin which pooled credential serves the request; omit to rotate."},
 		{"X-Cerber-Fallback: m2,m3", "Per-request fallback chain (OpenAI endpoint)."},
+		{"X-Cerber-Compat: auto|raw|force", "How much cerber may rewrite the request (OpenAI endpoint). auto = fix known-wrong parameters; raw = forward verbatim (OpenAI-dialect upstreams only); force = also drop parameters the target rejects."},
 		{"X-Cerber-Management: &lt;KEY&gt;", "Management key for /admin/* (if configured)."},
 		{"anthropic-version, anthropic-beta", "Passed through to Anthropic on the native endpoint."},
 	} {
@@ -1515,12 +1547,18 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	body, model := s.canonicalModel(body)
 	stream := wantsStream(body)
 
+	mode, err := compat.ParseMode(strings.TrimSpace(r.Header.Get("X-Cerber-Compat")), s.compatMode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Try the requested model, then any fallback targets, until one succeeds or is
 	// a non-retryable (client) error. Fallback only kicks in before any bytes are
 	// written, so a started stream is never re-attempted.
 	targets := s.openAITargets(r, model)
 	for i, tgt := range targets {
-		if s.tryOpenAITarget(w, r, body, tgt, stream, i == len(targets)-1) {
+		if s.tryOpenAITarget(w, r, body, tgt, stream, i == len(targets)-1, mode) {
 			return
 		}
 		s.log.Info("openai fallback: target failed, trying next",
@@ -1561,7 +1599,7 @@ func (s *Server) openAITargets(r *http.Request, model string) []string {
 // A retryable failure is: no credential available / transport error, or an
 // upstream 5xx. Client (4xx) errors and successes are terminal. last marks the
 // final target, after which even retryable failures are surfaced to the client.
-func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []byte, tgtModel string, stream, last bool) bool {
+func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []byte, tgtModel string, stream, last bool, mode compat.Mode) bool {
 	target := s.route(tgtModel)
 	if target == "" {
 		if last {
@@ -1572,6 +1610,16 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 		return false
 	}
 	tagProvider(r.Context(), target)
+	if mode == compat.ModeRaw && compat.Translating(target) {
+		// Terminal by design: raw promises byte-for-byte forwarding, and this
+		// upstream speaks a different dialect, so honouring it is impossible. Say
+		// so rather than translating anyway and calling it raw.
+		s.record(r.Context(), usage.Event{Model: tgtModel, IsError: true})
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"compat=raw is unavailable for model %q: it routes to the %s upstream, whose API dialect differs from OpenAI's, so the body must be translated. Use POST /v1/messages for a raw Anthropic request, or X-Cerber-Compat: auto.",
+			tgtModel, target))
+		return true
+	}
 	// Point the request body at this target's model.
 	tbody := body
 	if extractModel(body) != tgtModel {
@@ -1589,6 +1637,14 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 				return true
 			}
 			return false
+		}
+		// Normalize parameters the target is known to spell differently. Only for
+		// same-dialect upstreams: a translating target's body is rebuilt field by
+		// field, which is normalizing by construction.
+		if !compat.Translating(target) {
+			if nb, changed, nerr := s.norm.Apply(mode, tgtModel, tbody); nerr == nil && changed {
+				tbody = nb
+			}
 		}
 		resp, err := chatter.Chat(r.Context(), tbody, stream, r.Header)
 		if err != nil {
@@ -1609,6 +1665,9 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 		if resp.Status >= 500 && !last {
 			_ = resp.Body.Close()
 			return false
+		}
+		if mode != compat.ModeRaw && !compat.Translating(target) {
+			resp = s.retryTokenParam(r, chatter, tbody, tgtModel, stream, resp)
 		}
 		s.relayChatter(w, r, resp, chatter.Name(), tgtModel, stream)
 		return true
@@ -2214,4 +2273,57 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{"message": msg, "type": http.StatusText(status)},
 	})
+}
+
+// errBodyPeek caps how much of a failed upstream response is buffered while
+// deciding whether it is the max_tokens/max_completion_tokens quarrel. Error
+// bodies are small; a large one is not one of these and is replayed unchanged.
+const errBodyPeek = 64 << 10
+
+// retryTokenParam turns an upstream's "wrong output-length parameter" rejection
+// into a corrected retry, and remembers the answer so the next request for this
+// model gets it right first time. This is the corner case clients otherwise each
+// have to discover by trial: gpt-5 rejects max_tokens and wants
+// max_completion_tokens, xAI wants the opposite, and the model name alone does
+// not say which.
+//
+// It returns the response to relay: the retried one when the retry produced a
+// usable answer, otherwise the original with its body intact for replay.
+func (s *Server) retryTokenParam(r *http.Request, chatter provider.Chatter, body []byte, model string, stream bool, resp *provider.Response) *provider.Response {
+	if resp.Status != http.StatusBadRequest && resp.Status != http.StatusUnprocessableEntity {
+		return resp
+	}
+	peek, rerr := io.ReadAll(io.LimitReader(resp.Body, errBodyPeek))
+	_ = resp.Body.Close()
+	replay := func() *provider.Response {
+		resp.Body = io.NopCloser(bytes.NewReader(peek))
+		return resp
+	}
+	if rerr != nil {
+		return replay()
+	}
+	sent := compat.SentTokenParam(body)
+	want, ok := compat.TokenParamRejection(resp.Status, peek, sent)
+	if !ok {
+		return replay()
+	}
+	fixed, changed, ferr := compat.SetTokenParam(body, want)
+	if ferr != nil || !changed {
+		return replay()
+	}
+	s.log.Info("compat: upstream rejected the output-length parameter, retrying with the other spelling",
+		zap.String("model", model), zap.String("sent", sent), zap.String("retry_with", want))
+
+	retried, err := chatter.Chat(r.Context(), fixed, stream, r.Header)
+	if err != nil || retried.Status >= 400 {
+		if err == nil {
+			_ = retried.Body.Close()
+		}
+		// The swap was not the problem after all — surface the original error, which
+		// describes what the client actually got wrong, and do not remember a
+		// spelling that did not work either.
+		return replay()
+	}
+	s.norm.Learn(model, want)
+	return retried
 }
