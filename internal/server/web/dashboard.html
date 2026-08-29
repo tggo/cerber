@@ -59,10 +59,13 @@
   tr.detail > td { padding:0 14px 10px; border-bottom:1px solid var(--line); }
   table.sub { width:100%; border:1px solid var(--line); border-radius:8px; }
   table.sub th, table.sub td { padding:5px 10px; font-size:12px; }
-  /* The keys table is the widest one on the page; keep its short cells from
-     wrapping now that the budget column competes for the row. */
-  #keys th, #keys td:nth-child(2), #keys td:nth-child(7), #keys td:nth-child(8),
-  #keys td:nth-child(9) { white-space:nowrap; }
+  /* The keys table is the widest one on the page; keep key / created / last-used
+     from wrapping now that the budget column competes for the row. Scoped to data
+     rows: nth-child counts elements, not colspans, so an unscoped :nth-child(2)
+     would also hit the detail row's wrapper cell and freeze its sub-table. */
+  #keys th, #keys tr:not(.detail) > td:nth-child(2),
+  #keys tr:not(.detail) > td:nth-child(8),
+  #keys tr:not(.detail) > td:nth-child(9) { white-space:nowrap; }
   /* Ten columns is a lot for 1056px: trim the horizontal padding here so the name
      column keeps enough room not to wrap. */
   #keys th, #keys td { padding-left:9px; padding-right:9px; }
@@ -85,9 +88,10 @@
   td .budget.warn .bar > i { background:var(--warn); }
   td .budget.over .n { color:var(--err); }
   td .budget.over .bar > i { background:var(--err); }
+  td .hint { cursor:help; }
   td .budget .flag { font-size:11px; border:1px solid currentColor; border-radius:4px;
     padding:0 4px; margin-left:2px; }
-  td .budget:focus-visible, td .muted:focus-visible { outline:1px solid var(--accent);
+  td .budget:focus-visible, td .hint:focus-visible { outline:1px solid var(--accent);
     outline-offset:2px; border-radius:4px; }
 </style>
 </head>
@@ -153,14 +157,13 @@
   const fmt = (n) => (n ?? 0).toLocaleString();
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const usd = (c) => c ? "$" + (c >= 1 ? c.toFixed(2) : c.toFixed(4)) : "—";
-  const cssId = (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
 
   // Governance windows are rolling spans (see internal/access: week=7d, month=30d),
   // and the store resets a window lazily — only when the key is next admitted. So a
   // key that stopped being used mid-window still reports its spent counters here;
   // treat an elapsed window as already reset, or the dashboard shows a stale 100%.
   const PERIOD_MS = { minute:60e3, min:60e3, hour:3600e3, day:864e5, week:6048e5, month:2592e6 };
-  const windowMs = (period, dflt) => PERIOD_MS[String(period||"").toLowerCase()] || PERIOD_MS[dflt];
+  const windowMs = (period, dflt) => PERIOD_MS[String(period||"").trim().toLowerCase()] || PERIOD_MS[dflt];
   function windowState(startISO, period, dflt) {
     const span = windowMs(period, dflt);
     const start = startISO ? Date.parse(startISO) : NaN;
@@ -169,7 +172,10 @@
     }
     return { spent: true, resets: new Date(start + span) };
   }
-  const money = (c) => "$" + (+c || 0).toFixed(2);
+  // Periods are stored as given (Validate trims, SetLimits does not), so show them trimmed.
+  const periodName = (p, dflt) => String(p || dflt).trim() || dflt;
+  const money = (c) => "$" + (+c || 0).toLocaleString(undefined,
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   // budgetCell renders the key's cost budget as "used / cap" plus a bar, and hangs
   // the rate-limit picture off the tooltip. No cost budget => nothing to show.
   function budgetCell(k) {
@@ -177,21 +183,29 @@
     const bw = windowState(use.budget_window_start, lim.budget_period, "month");
     const rw = windowState(use.rate_window_start, lim.rate_period, "minute");
     const cost = bw.spent ? (use.cost_usd || 0) : 0;
+    // The at-cap test mirrors Admit's raw-float compare, but the figure is truncated
+    // for display so a cost of 4.999 under a $5 cap reads "$4.99" everywhere it is
+    // shown, rather than a neutral, apparently-maxed "$5.00".
+    const atCap = lim.max_cost_usd > 0 && cost >= lim.max_cost_usd;
+    const shown = atCap ? cost : Math.floor(cost * 100) / 100;
     const reqs = rw.spent ? (use.requests || 0) : 0;
     const toks = rw.spent ? (use.tokens || 0) : 0;
     const tip = [];
     if (lim.max_cost_usd > 0) {
-      tip.push(`budget ${money(cost)} of ${money(lim.max_cost_usd)} per ${lim.budget_period || "month"}`
+      tip.push(`budget ${money(shown)} of ${money(lim.max_cost_usd)} per ${periodName(lim.budget_period, "month")}`
         + (bw.resets ? `, resets ${bw.resets.toLocaleString()}` : ", window idle — resets on next call"));
     }
-    if (lim.max_requests > 0) tip.push(`requests ${fmt(reqs)}/${fmt(lim.max_requests)} per ${lim.rate_period || "minute"}`);
-    if (lim.max_tokens > 0) tip.push(`tokens ${fmt(toks)}/${fmt(lim.max_tokens)} per ${lim.rate_period || "minute"}`);
+    if (lim.max_requests > 0) tip.push(`requests ${fmt(reqs)}/${fmt(lim.max_requests)} per ${periodName(lim.rate_period, "minute")}`);
+    if (lim.max_tokens > 0) tip.push(`tokens ${fmt(toks)}/${fmt(lim.max_tokens)} per ${periodName(lim.rate_period, "minute")}`);
     if (!(lim.max_cost_usd > 0)) {
       const t = esc(tip.length ? tip.join("\n") : "no budget or rate limit — this key is unmetered");
-      return `<span class="muted" tabindex="0" title="${t}" aria-label="${t}">${tip.length ? "rate only" : "unlimited"}</span>`;
+      return `<span class="muted hint" tabindex="0" title="${t}" aria-label="${t}">${tip.length ? "rate only" : "unlimited"}</span>`;
     }
-    const pct = Math.min(100, Math.round(cost / lim.max_cost_usd * 100));
-    const cls = cost >= lim.max_cost_usd ? "over" : (pct >= 80 ? "warn" : "");
+    const cls = atCap ? "over" : (cost / lim.max_cost_usd >= 0.8 ? "warn" : "");
+    // Only a key actually at its cap gets a full bar, and any non-zero spend gets a
+    // visible sliver — so "nearly spent" and "unused" never look alike.
+    const pct = atCap ? 100 : Math.min(99, Math.floor(cost / lim.max_cost_usd * 100));
+    const width = cost > 0 ? Math.max(pct, 2) : 0;
     // At/over the cap every request is refused with 402 — say so where it is looked at.
     if (cls === "over") tip.push("AT CAP — requests are refused with 402 until the window resets");
     // Colour alone must not carry the state (colour-blind readers, greyscale): the
@@ -200,8 +214,8 @@
     const flag = cls === "over" ? ` <span class="flag">at cap</span>` : "";
     const label = esc(tip.join("\n"));
     return `<span class="budget ${cls}" tabindex="0" title="${label}" aria-label="${label}">
-      <span class="n">${money(cost)} / ${money(lim.max_cost_usd)}${flag}</span>
-      <span class="bar"><i style="width:${pct}%"></i></span></span>`;
+      <span class="n">${money(shown)} / ${money(lim.max_cost_usd)}${flag}</span>
+      <span class="bar"><i style="width:${width}%"></i></span></span>`;
   }
   const ago = (unix) => {
     if (!unix) return "—";
@@ -414,10 +428,10 @@
   async function loadKeys() {
     try {
       const r = await fetch("/admin/keys", { headers: authHeaders() });
-      if (!r.ok) { $("keys").innerHTML = `<tr><td class="muted">keys: HTTP ${r.status}</td></tr>`; return; }
+      if (!r.ok) { $("keys").innerHTML = `<tr><td colspan="10" class="muted">keys: HTTP ${r.status}</td></tr>`; return; }
       const d = await r.json();
       const head = "<tr><th>name</th><th>key</th><th>state</th><th>requests</th><th>tokens</th><th>spend</th><th>budget</th><th>created</th><th>last used</th><th></th></tr>";
-      const body = (d.keys || []).map(k => {
+      const body = (d.keys || []).map((k, i) => {
         const state = k.enabled ? `<span style="color:var(--ok)">on</span>` : `<span class="muted">off</span>`;
         // Key names are operator-supplied and only whitespace-trimmed by the store,
         // so they are escaped everywhere they reach the DOM. data-n round-trips: the
@@ -433,8 +447,8 @@
         const tok = u ? fmt((u.input_tokens||0)+(u.output_tokens||0)) : "—";
         const spend = u ? usd(u.cost) : "—";
         const nm = (u && u.by_model && u.by_model.length)
-          ? `<a href="#" class="expand" data-n="${nmTxt}">${nmTxt}</a>` : nmTxt;
-        const detail = `<tr class="detail" id="kd-${cssId(k.name)}" hidden><td></td>
+          ? `<a href="#" class="expand" data-i="${i}">${nmTxt}</a>` : nmTxt;
+        const detail = `<tr class="detail" id="kd-${i}" hidden><td></td>
           <td colspan="9"><table class="sub"><tr><th>model</th><th>requests</th><th>input</th><th>output</th><th>cost</th></tr>${
             u && u.by_model ? u.by_model.map(m => `<tr><td>${esc(m.name)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td><td class="muted">${usd(m.cost)}</td></tr>`).join("") : ""
           }</table></td></tr>`;
@@ -447,7 +461,7 @@
       $("keys").innerHTML = head + (body || `<tr><td colspan="10" class="muted">no keys yet</td></tr>`);
       $("keys").querySelectorAll("a.expand").forEach(a => a.addEventListener("click", (ev) => {
         ev.preventDefault();
-        const row = document.getElementById("kd-" + cssId(a.dataset.n));
+        const row = document.getElementById("kd-" + a.dataset.i);
         if (row) row.hidden = !row.hidden;
       }));
       $("keys").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
