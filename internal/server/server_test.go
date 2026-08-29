@@ -661,6 +661,14 @@ func TestMetricsAndDashboardServed(t *testing.T) {
 		rec.Header().Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Errorf("dashboard = %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
+	// The client-keys table must surface each key's governance budget: without it a
+	// key silently walks into its cap and every call starts failing with 402 with
+	// nothing in the UI to explain why.
+	for _, want := range []string{"<th>budget</th>", "function budgetCell", "AT CAP"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("dashboard missing %q", want)
+		}
+	}
 }
 
 func TestAccounts_ListEnableDisable(t *testing.T) {
