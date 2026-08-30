@@ -68,6 +68,6 @@ make lint       # gofmt + go vet
 ## Conventions
 
 - Module path is `cerber` (bare). Change with a single `go mod edit -module` + import rewrite if/when published.
-- Go 1.25. `gofmt`'d, `go vet`-clean.
+- Go 1.26. `gofmt`'d, `go vet`-clean.
 - Errors wrapped with `%w` and context; no naked `panic` in library code.
 - Config is the single source of truth for which hosts cerber may talk to.
