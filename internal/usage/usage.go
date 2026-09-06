@@ -98,6 +98,7 @@ type Tracker struct {
 	pricing       map[string]Price
 	recent        []RequestEvent // bounded ring of per-request events (in-memory only)
 	recentCap     int
+	recentSeq     uint64 // monotonic id handed out by RecordRequest
 }
 
 // Option customizes a Tracker.

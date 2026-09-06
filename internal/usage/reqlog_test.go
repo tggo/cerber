@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,5 +68,37 @@ func TestRecentRequests_DefaultCap(t *testing.T) {
 	tr.RecordRequest(RequestEvent{Model: "a", Time: time.Unix(1, 0)})
 	if got, total := tr.RecentRequests(RequestFilter{}, 0, 0); len(got) != 1 || total != 1 {
 		t.Errorf("default-cap tracker dropped an event: %+v", got)
+	}
+}
+
+func TestAnnotateRequest(t *testing.T) {
+	tr := New()
+	seq := tr.RecordRequest(RequestEvent{Model: "a"})
+	tr.RecordRequest(RequestEvent{Model: "b"})
+	tr.AnnotateRequest(seq, 429, "rate limited")
+	tr.AnnotateRequest(0, 500, "ignored")    // no handle → no-op
+	tr.AnnotateRequest(9999, 500, "ignored") // aged out / unknown → no-op
+
+	got, _ := tr.RecentRequests(RequestFilter{Model: "a"}, 0, 0)
+	if len(got) != 1 {
+		t.Fatalf("events = %d, want 1", len(got))
+	}
+	if got[0].Status != 429 || got[0].Detail != "rate limited" || !got[0].Error {
+		t.Errorf("annotated = %+v", got[0])
+	}
+	// Only the errored event matches the errors-only filter.
+	errs, total := tr.RecentRequests(RequestFilter{ErrorsOnly: true}, 0, 0)
+	if len(errs) != 1 || total != 1 || errs[0].Model != "a" {
+		t.Errorf("errors-only = %+v (total %d), want just the annotated one", errs, total)
+	}
+}
+
+func TestRecordRequest_TruncatesDetail(t *testing.T) {
+	tr := New()
+	long := strings.Repeat("x", maxDetail+50)
+	tr.RecordRequest(RequestEvent{Model: "a", Detail: long})
+	got, _ := tr.RecentRequests(RequestFilter{}, 0, 0)
+	if want := strings.Repeat("x", maxDetail) + "…"; got[0].Detail != want {
+		t.Errorf("detail len = %d, want truncated to %d + ellipsis", len(got[0].Detail), maxDetail)
 	}
 }

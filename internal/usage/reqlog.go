@@ -21,7 +21,17 @@ type RequestEvent struct {
 	OutputTokens int64     `json:"output_tokens"`
 	Cost         float64   `json:"cost"`
 	Error        bool      `json:"error,omitempty"`
+	// Status/Detail are the failure as the client saw it: the HTTP status cerber
+	// returned and a short message extracted from the error body. They are filled
+	// after the fact (the handler records the event before the error response is
+	// written) via AnnotateRequest, keyed by Seq.
+	Status int    `json:"status,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Seq    uint64 `json:"-"` // internal handle for AnnotateRequest
 }
+
+// maxDetail caps how much of an error body is retained per event.
+const maxDetail = 512
 
 // RequestFilter narrows the recent-request log. Empty fields match anything.
 type RequestFilter struct {
@@ -29,6 +39,7 @@ type RequestFilter struct {
 	Provider   string
 	Credential string
 	Client     string
+	ErrorsOnly bool
 }
 
 func (f RequestFilter) match(e RequestEvent) bool {
@@ -41,22 +52,62 @@ func (f RequestFilter) match(e RequestEvent) bool {
 		return false
 	case f.Client != "" && e.Client != f.Client:
 		return false
+	case f.ErrorsOnly && !e.Error:
+		return false
 	}
 	return true
 }
 
 // RecordRequest appends a per-request event to the bounded recent-log, dropping
-// the oldest once the cap is reached.
-func (t *Tracker) RecordRequest(e RequestEvent) {
+// the oldest once the cap is reached. It returns the event's sequence number,
+// with which AnnotateRequest can later attach the error the client was served.
+func (t *Tracker) RecordRequest(e RequestEvent) uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.recentCap <= 0 {
 		t.recentCap = defaultRecentCap
 	}
+	t.recentSeq++
+	e.Seq = t.recentSeq
+	e.Detail = truncate(e.Detail)
 	t.recent = append(t.recent, e)
 	if over := len(t.recent) - t.recentCap; over > 0 {
 		t.recent = append(t.recent[:0], t.recent[over:]...)
 	}
+	return e.Seq
+}
+
+// AnnotateRequest attaches the HTTP status and error message the client was
+// served to an already-recorded event (identified by the sequence number
+// RecordRequest returned), and marks it as errored for status >= 400. A seq of 0
+// or an event that has already aged out of the ring is a no-op.
+func (t *Tracker) AnnotateRequest(seq uint64, status int, detail string) {
+	if seq == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := len(t.recent) - 1; i >= 0; i-- {
+		if t.recent[i].Seq != seq {
+			continue
+		}
+		t.recent[i].Status = status
+		if detail != "" {
+			t.recent[i].Detail = truncate(detail)
+		}
+		if status >= 400 {
+			t.recent[i].Error = true
+		}
+		return
+	}
+}
+
+// truncate bounds a stored error message.
+func truncate(s string) string {
+	if len(s) <= maxDetail {
+		return s
+	}
+	return s[:maxDetail] + "…"
 }
 
 // RecentRequests returns a page of recent events matching f, newest first:

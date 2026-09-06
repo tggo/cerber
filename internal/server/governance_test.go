@@ -172,3 +172,80 @@ func TestGovernance_AdminSetLimits(t *testing.T) {
 		t.Fatalf("bad period = %d, want 400", rec.Code)
 	}
 }
+
+// A failed request must say WHY in the recent-request log: the status cerber
+// returned plus the upstream/local error message, so the dashboard can show it.
+func TestRequestsLog_RecordsErrorDetail(t *testing.T) {
+	s, up, key := managedKeyServer(t, access.Limits{})
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(429, "application/json",
+			`{"type":"error","error":{"type":"rate_limit_error","message":"out of extra usage"}}`), nil)
+	h := s.Handler()
+	do(t, h, "POST", "/v1/messages", `{"model":"claude","stream":false}`, key)
+
+	var out struct {
+		Requests []usage.RequestEvent `json:"requests"`
+	}
+	body := do(t, h, "GET", "/admin/requests?errors=1", "", key).Body.String()
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, body)
+	}
+	if len(out.Requests) != 1 {
+		t.Fatalf("errored requests = %d, want 1\n%s", len(out.Requests), body)
+	}
+	e := out.Requests[0]
+	if !e.Error || e.Status < 400 {
+		t.Errorf("event = %+v, want errored with a 4xx/5xx status", e)
+	}
+	if !strings.Contains(e.Detail, "out of extra usage") {
+		t.Errorf("detail = %q, want the upstream message", e.Detail)
+	}
+}
+
+// A request rejected before any usage is recorded (bad client key) still gets an
+// entry, otherwise the failure is invisible in the UI.
+func TestRequestsLog_RecordsPreAuthFailure(t *testing.T) {
+	s, _, key := managedKeyServer(t, access.Limits{})
+	h := s.Handler()
+	if rec := do(t, h, "POST", "/v1/messages", `{"model":"claude"}`, "wrong-key"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad key = %d, want 401", rec.Code)
+	}
+	var out struct {
+		Requests []usage.RequestEvent `json:"requests"`
+	}
+	body := do(t, h, "GET", "/admin/requests?errors=1", "", key).Body.String()
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, body)
+	}
+	if len(out.Requests) != 1 || out.Requests[0].Status != http.StatusUnauthorized {
+		t.Fatalf("events = %+v, want one 401\n%s", out.Requests, body)
+	}
+	if !strings.Contains(out.Requests[0].Detail, "client API key") {
+		t.Errorf("detail = %q", out.Requests[0].Detail)
+	}
+}
+
+func TestErrMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"nested", `{"error":{"type":"invalid_request_error","message":"bad model"}}`, "invalid_request_error: bad model"},
+		{"type is the status text", `{"error":{"type":"Bad Request","message":"no provider"}}`, "no provider"},
+		{"message only", `{"error":{"message":"boom"}}`, "boom"},
+		{"plain string", `{"error":"nope"}`, "nope"},
+		{"not json", "gateway\n  exploded", "gateway exploded"},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errMessage([]byte(tc.body), 400); got != tc.want {
+				t.Errorf("errMessage(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+	if got := errMessage([]byte(strings.Repeat("x", 900)), 502); got != strings.Repeat("x", 500)+"…" {
+		t.Errorf("long body = %q, want truncated to 500 + ellipsis", got)
+	}
+}

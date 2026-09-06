@@ -334,7 +334,12 @@ func (s *Server) Handler() http.Handler {
 
 // reqTag carries the provider a request resolved to, filled by handlers via
 // tagProvider and read back by logRequests for per-provider metrics.
-type reqTag struct{ provider string }
+// seq is the recent-request-log event this request recorded (0 = none yet), so
+// logRequests can attach the error status/message once the response is written.
+type reqTag struct {
+	provider string
+	seq      uint64
+}
 
 type ctxKey int
 
@@ -358,21 +363,48 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 		dur := s.now().Sub(start)
+		detail := ""
+		if rec.status >= 400 {
+			detail = errMessage(rec.errBody, rec.status)
+			// The recent-request log is written before the error response exists,
+			// so attach the failure now — that is what makes the dashboard able to
+			// answer "the call errored, but with what?". A request that failed
+			// before any usage was recorded (bad key, no such route) has no event
+			// yet; give it one so it is visible at all.
+			if tag.seq != 0 {
+				s.usage.AnnotateRequest(tag.seq, rec.status, detail)
+			} else if isAPIPath(r.URL.Path) {
+				m := reqMetaFrom(r.Context())
+				s.usage.RecordRequest(usage.RequestEvent{
+					Time: s.now(), IP: clientIP(r), UserAgent: r.UserAgent(), Client: m.client,
+					Endpoint: r.URL.Path, Provider: tag.provider,
+					Error: true, Status: rec.status, Detail: detail,
+				})
+			}
+		}
 		s.log.Info("request",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
 			zap.Int("status", rec.status),
+			zap.String("error", detail),
 			zap.Duration("latency", dur),
 		)
 		s.metrics.ObserveHTTP(r.URL.Path, tag.provider, rec.status, dur.Seconds())
 	})
 }
 
-// recorder captures the response status while preserving streaming (Flush).
+// maxErrBody bounds how much of a failed response body is buffered for the
+// recent-request log. Error bodies are small JSON objects.
+const maxErrBody = 4 << 10
+
+// recorder captures the response status — and, for a failure, the first bytes of
+// the error body so the dashboard can show WHY a request failed — while
+// preserving streaming (Flush).
 type recorder struct {
 	http.ResponseWriter
 	status  int
 	written bool
+	errBody []byte
 }
 
 func (r *recorder) WriteHeader(code int) {
@@ -385,7 +417,55 @@ func (r *recorder) Write(b []byte) (int, error) {
 	if !r.written {
 		r.written = true
 	}
+	if r.status >= 400 && len(r.errBody) < maxErrBody {
+		r.errBody = append(r.errBody, b[:min(len(b), maxErrBody-len(r.errBody))]...)
+	}
 	return r.ResponseWriter.Write(b)
+}
+
+// isAPIPath reports whether a path is a proxied API call — the only traffic
+// worth an entry in the recent-request log (dashboard/admin polling is not).
+func isAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/")
+}
+
+// errMessage reduces an error body to one line for the request log: the
+// {"error":{"message":…}} / {"error":"…"} field that both the OpenAI and
+// Anthropic dialects use, else the raw body, whitespace-collapsed and bounded.
+// The error type prefixes the message when it adds anything — cerber's own
+// errors type themselves after the HTTP status, which the log already shows.
+func errMessage(body []byte, status int) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var probe struct {
+		Error json.RawMessage `json:"error"`
+	}
+	msg := ""
+	if json.Unmarshal(body, &probe) == nil && len(probe.Error) > 0 {
+		var nested struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		}
+		var plain string
+		switch {
+		case json.Unmarshal(probe.Error, &nested) == nil && nested.Message != "":
+			msg = nested.Message
+			if nested.Type != "" && nested.Type != http.StatusText(status) {
+				msg = nested.Type + ": " + msg
+			}
+		case json.Unmarshal(probe.Error, &plain) == nil && plain != "":
+			msg = plain
+		}
+	}
+	if msg == "" {
+		msg = string(body)
+	}
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) > 500 {
+		msg = msg[:500] + "…"
+	}
+	return msg
 }
 
 func (r *recorder) Flush() {
@@ -444,6 +524,7 @@ func (s *Server) handleRequestsLog(w http.ResponseWriter, r *http.Request) {
 		Provider:   q.Get("provider"),
 		Credential: q.Get("credential"),
 		Client:     q.Get("client"),
+		ErrorsOnly: q.Get("errors") == "1" || q.Get("errors") == "true",
 	}
 	events, total := s.usage.RecentRequests(filter, offset, limit)
 	w.Header().Set("Content-Type", "application/json")
@@ -1814,6 +1895,9 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 		}
 		if isCredFailure(resp.StatusCode) {
 			status := resp.StatusCode
+			// Keep the upstream's own words: after rotation exhausts the pool the
+			// client (and the request log) would otherwise only see a bare status.
+			peek, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyPeek))
 			_ = resp.Body.Close()
 			// An OAuth 401 usually means the access token was invalidated (e.g. a
 			// rotation elsewhere), not that the account is dead — force one refresh
@@ -1834,10 +1918,14 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 					}
 				}
 			}
+			msg := errMessage(peek, status)
 			s.log.Warn("upstream credential failure, sidelining",
-				zap.String("credential", cred.Name()), zap.Int("status", status))
+				zap.String("credential", cred.Name()), zap.Int("status", status), zap.String("error", msg))
 			s.creds.Penalize(cred, s.cooldown)
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", status)
+			if msg != "" {
+				lastErr = fmt.Errorf("%w: %s", lastErr, msg)
+			}
 			continue
 		}
 		s.quota.Record(cred.Name(), resp.Header) // passive Anthropic quota capture
@@ -2099,11 +2187,14 @@ func (s *Server) record(ctx context.Context, e usage.Event) {
 	if name, ok := clientKeyFrom(ctx); ok {
 		s.keys.Charge(name, cost, e.InputTokens+e.OutputTokens)
 	}
-	s.usage.RecordRequest(usage.RequestEvent{
+	seq := s.usage.RecordRequest(usage.RequestEvent{
 		Time: s.now(), IP: m.ip, UserAgent: m.ua, Client: m.client, Endpoint: m.endpoint,
 		Provider: s.route(e.Model), Model: e.Model, Credential: e.Credential,
 		InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, Cost: cost, Error: e.IsError,
 	})
+	if tag, ok := ctx.Value(tagKey).(*reqTag); ok {
+		tag.seq = seq // logRequests attaches the served status/error message here
+	}
 }
 
 // isLoopback reports whether a "host:port" remote address is a loopback IP.

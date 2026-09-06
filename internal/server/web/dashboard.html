@@ -57,6 +57,11 @@
   td a { color:var(--accent); text-decoration:none; }
   td a:hover { text-decoration:underline; }
   tr.detail > td { padding:0 14px 10px; border-bottom:1px solid var(--line); }
+  label.chk { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--muted); }
+  /* Scoped to #requests: an unscoped tr.detail rule also matches the keys
+     table's expanded per-model sub-table and un-aligns its numbers. */
+  #requests tr.detail td { text-align:left; }
+  #requests tr.detail code { display:block; white-space:pre-wrap; word-break:break-word; font-size:12px; }
   table.sub { width:100%; border:1px solid var(--line); border-radius:8px; }
   table.sub th, table.sub td { padding:5px 10px; font-size:12px; }
   /* The keys table is the widest one on the page; keep key / created / last-used
@@ -134,6 +139,7 @@
       <select id="fModel"><option value="">all models</option></select>
       <select id="fProvider"><option value="">all providers</option></select>
       <select id="fCred"><option value="">all accounts</option></select>
+      <label class="chk"><input type="checkbox" id="fErr"> errors only</label>
       <button id="reqReset" class="muted">reset</button>
       <span class="grow"></span>
       <span id="reqInfo" class="muted"></span>
@@ -307,8 +313,11 @@
   // at the top (page 1, no filter) so browsing/pagination isn't reset.
   const REQ_PAGE = 10;
   let reqRows = [], reqOffset = 0, reqTotal = 0;
-  let reqFilters = { model: "", provider: "", credential: "" };
-  const reqFilterActive = () => reqFilters.model || reqFilters.provider || reqFilters.credential;
+  // Which error rows the operator has opened, keyed by event (not row index) so
+  // an auto-refresh re-render does not snap them shut mid-read.
+  const reqOpen = new Set();
+  let reqFilters = { model: "", provider: "", credential: "", errors: false };
+  const reqFilterActive = () => reqFilters.model || reqFilters.provider || reqFilters.credential || reqFilters.errors;
 
   function refreshRequests() {
     if (reqOffset > REQ_PAGE || reqFilterActive()) return; // user is browsing
@@ -328,6 +337,7 @@
     if (reqFilters.model) qs.set("model", reqFilters.model);
     if (reqFilters.provider) qs.set("provider", reqFilters.provider);
     if (reqFilters.credential) qs.set("credential", reqFilters.credential);
+    if (reqFilters.errors) qs.set("errors", "1");
     try {
       const r = await fetch("/admin/requests?" + qs, { headers: authHeaders() });
       if (!r.ok) { $("requests").innerHTML = `<tr><td class="muted">requests: HTTP ${r.status}</td></tr>`; return; }
@@ -340,11 +350,23 @@
   }
 
   function renderRequests() {
-    const head = "<tr><th>when</th><th>client</th><th>ip</th><th>user-agent</th><th>provider</th><th>model</th><th>account</th><th>in</th><th>out</th><th>cost</th></tr>";
-    const body = reqRows.map(e => {
+    const head = "<tr><th>when</th><th>client</th><th>ip</th><th>user-agent</th><th>provider</th><th>model</th><th>account</th><th>in</th><th>out</th><th>cost</th><th>status</th></tr>";
+    const body = reqRows.map((e, i) => {
       const t = e.time ? ago(Date.parse(e.time)/1000) : "—";
       const ua = (e.user_agent || "").slice(0, 48);
       const mdl = e.error ? `<span class="err" title="errored">${esc(e.model||"—")}</span>` : esc(e.model||"—");
+      // Failures carry the status + message the client was served; clicking the
+      // status opens it, so "there was an error" is answerable from the UI.
+      let status = `<span class="muted">ok</span>`, detail = "";
+      if (e.error || e.status >= 400) {
+        const code = e.status ? e.status : "err";
+        const msg = e.detail || "(no message captured)";
+        const k = `${e.time}|${e.endpoint}|${e.status}`;
+        const open = reqOpen.has(k);
+        status = `<a href="#" class="expand err" data-i="${i}" data-k="${esc(k)}" title="${esc(msg)}">${esc(String(code))} ${open ? "▴" : "▾"}</a>`;
+        detail = `<tr class="detail" id="rd-${i}"${open ? "" : " hidden"}><td class="muted">${esc(e.endpoint||"")}</td>
+          <td colspan="10"><code class="err">${esc(msg)}</code></td></tr>`;
+      }
       return `<tr>
         <td class="muted" title="${esc(e.time||"")}">${t}</td>
         <td>${esc(e.client||"—")}</td>
@@ -356,20 +378,29 @@
         <td>${fmt(e.input_tokens)}</td>
         <td>${fmt(e.output_tokens)}</td>
         <td class="muted">${e.cost ? "$"+e.cost.toFixed(4) : "—"}</td>
-      </tr>`;
+        <td>${status}</td>
+      </tr>${detail}`;
     }).join("");
-    $("requests").innerHTML = head + (body || `<tr><td colspan="10" class="muted">no requests yet</td></tr>`);
+    $("requests").innerHTML = head + (body || `<tr><td colspan="11" class="muted">no requests yet</td></tr>`);
+    $("requests").querySelectorAll("a.expand").forEach(a => a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const row = document.getElementById("rd-" + a.dataset.i);
+      if (!row) return;
+      row.hidden = !row.hidden;
+      row.hidden ? reqOpen.delete(a.dataset.k) : reqOpen.add(a.dataset.k);
+      a.textContent = a.textContent.replace(row.hidden ? "▴" : "▾", row.hidden ? "▾" : "▴");
+    }));
     $("reqInfo").textContent = reqTotal ? `showing ${reqRows.length} of ${reqTotal}` : "";
     $("reqMore").style.display = reqRows.length < reqTotal ? "" : "none";
   }
 
-  ["fModel", "fProvider", "fCred"].forEach(id => $(id).addEventListener("change", () => {
-    reqFilters = { model: $("fModel").value, provider: $("fProvider").value, credential: $("fCred").value };
+  ["fModel", "fProvider", "fCred", "fErr"].forEach(id => $(id).addEventListener("change", () => {
+    reqFilters = { model: $("fModel").value, provider: $("fProvider").value, credential: $("fCred").value, errors: $("fErr").checked };
     loadRequests(true);
   }));
   $("reqReset").addEventListener("click", () => {
-    $("fModel").value = ""; $("fProvider").value = ""; $("fCred").value = "";
-    reqFilters = { model: "", provider: "", credential: "" };
+    $("fModel").value = ""; $("fProvider").value = ""; $("fCred").value = ""; $("fErr").checked = false;
+    reqFilters = { model: "", provider: "", credential: "", errors: false };
     loadRequests(true);
   });
   $("reqMore").addEventListener("click", () => loadRequests(false));
