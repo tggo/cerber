@@ -26,6 +26,7 @@ import (
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/logging"
 	"github.com/tggo/cerber/internal/provider/anthropic"
+	"github.com/tggo/cerber/internal/provider/comfyui"
 	"github.com/tggo/cerber/internal/provider/gemini"
 	"github.com/tggo/cerber/internal/provider/openai"
 	"github.com/tggo/cerber/internal/server"
@@ -408,6 +409,22 @@ func main() {
 		srv.RegisterProviderStore("ollama", ostore)
 		logger.Info("ollama provider enabled", zap.String("base_url", o.BaseURL),
 			zap.Any("hosts", rh), zap.Int("credentials", ostore.Len()))
+	}
+
+	// ComfyUI: chat through a GGUF model inside ComfyUI (CerberLLMChat node), so
+	// an LLM call shares the GPU with image workflows. Keyless — the dummy
+	// credential only lets the probe loop list the node's models.
+	if cu := cfg.Providers.ComfyUI; cu != nil {
+		cstore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "comfyui", Key: "comfyui"}})
+		if err != nil {
+			logger.Fatal("comfyui credentials", zap.Error(err))
+		}
+		srv.RegisterChatter(comfyui.New(cu.BaseURL, newUpstreamClient(cu.Timeout.Std()), comfyui.Options{
+			Node: cu.Node, PollInterval: cu.PollInterval.Std(), MaxWait: cu.MaxWait.Std(),
+			NCtx: cu.NCtx, MaxTokens: cu.MaxTokens, KeepLoaded: cu.KeepLoaded,
+		}))
+		srv.RegisterProviderStore("comfyui", cstore)
+		logger.Info("comfyui provider enabled", zap.String("base_url", cu.BaseURL))
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {

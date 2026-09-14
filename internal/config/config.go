@@ -118,6 +118,7 @@ type Providers struct {
 	Grok       *Grok       `yaml:"grok"`
 	ArliAI     *ArliAI     `yaml:"arliai"`
 	Perplexity *Perplexity `yaml:"perplexity"`
+	ComfyUI    *ComfyUI    `yaml:"comfyui"`
 	Ollama     *Ollama     `yaml:"ollama"`
 	Routing    []Route     `yaml:"routing"`
 	Fallbacks  []Fallback  `yaml:"fallbacks"` // cross-provider/model fallback chains (OpenAI endpoint)
@@ -129,7 +130,7 @@ type Providers struct {
 }
 
 // Route maps a model-name prefix to a provider name
-// (anthropic|openai|gemini|grok|arliai|perplexity|ollama).
+// (anthropic|openai|gemini|grok|arliai|perplexity|comfyui|ollama).
 type Route struct {
 	Prefix   string `yaml:"prefix"`
 	Provider string `yaml:"provider"`
@@ -211,6 +212,22 @@ type Perplexity struct {
 	BaseURL     string       `yaml:"base_url"`
 	Timeout     Duration     `yaml:"timeout"`
 	Credentials []Credential `yaml:"credentials"`
+}
+
+// ComfyUI configures chat through a GGUF model running inside ComfyUI, via the
+// CerberLLMChat custom node (github.com/tggo/comfyui-cerber-llm). Models are
+// listed from the node and routed as comfyui-<model>. Slow (the model loads
+// per request) but shares the GPU with image workflows instead of competing
+// for VRAM. ComfyUI's API has no auth, so there are no credentials.
+type ComfyUI struct {
+	BaseURL      string   `yaml:"base_url"`
+	Timeout      Duration `yaml:"timeout"`       // upstream silence per HTTP call (0 = default)
+	MaxWait      Duration `yaml:"max_wait"`      // give up on a queued/running prompt after this (0 = 30m)
+	PollInterval Duration `yaml:"poll_interval"` // how often /history is polled (0 = 500ms)
+	Node         string   `yaml:"node"`          // custom node class (default CerberLLMChat)
+	NCtx         int      `yaml:"n_ctx"`         // context window (0 = 8192)
+	MaxTokens    int      `yaml:"max_tokens"`    // output cap when a request sets none (0 = 1024)
+	KeepLoaded   bool     `yaml:"keep_loaded"`   // keep the model in VRAM between requests
 }
 
 // Ollama configures a local ollama/vLLM upstream, which is OpenAI-compatible.
@@ -315,6 +332,7 @@ const (
 	defaultGrokBase        = "https://api.x.ai"
 	defaultArliAIBase      = "https://api.arliai.com"
 	defaultPerplexityBase  = "https://api.perplexity.ai"
+	defaultComfyUIBase     = "http://localhost:8188"
 	// defaultArliAIConcurrency matches the entry ArliAI plan: one concurrent
 	// stream. Raise via providers.arliai.concurrency when more are purchased.
 	defaultArliAIConcurrency = 1
@@ -466,6 +484,14 @@ func (c *Config) applyDefaults() {
 			px.Timeout = Duration(defaultProviderWaitNS)
 		}
 	}
+	if cu := c.Providers.ComfyUI; cu != nil {
+		if cu.BaseURL == "" {
+			cu.BaseURL = defaultComfyUIBase
+		}
+		if cu.Timeout == 0 {
+			cu.Timeout = Duration(defaultProviderWaitNS)
+		}
+	}
 	if o := c.Providers.Ollama; o != nil {
 		if o.BaseURL == "" {
 			o.BaseURL = defaultOllamaBase
@@ -496,7 +522,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: access.default_key_limits period must be minute|hour|day|week|month")
 	}
 	p := c.Providers
-	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.ArliAI == nil && p.Perplexity == nil && p.Ollama == nil {
+	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.ArliAI == nil && p.Perplexity == nil && p.ComfyUI == nil && p.Ollama == nil {
 		return fmt.Errorf("config: no providers configured")
 	}
 	if p.Anthropic != nil {
@@ -545,6 +571,14 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if cu := p.ComfyUI; cu != nil {
+		if err := validateCreds("comfyui", cu.BaseURL, nil, false); err != nil {
+			return err
+		}
+		if cu.NCtx < 0 || cu.MaxTokens < 0 {
+			return fmt.Errorf("config: providers.comfyui.n_ctx and max_tokens must be >= 0")
+		}
+	}
 	if p.Ollama != nil {
 		// Local ollama/vLLM needs no key: credentials are optional.
 		if err := validateCreds("ollama", p.Ollama.BaseURL, p.Ollama.Credentials, false); err != nil {
@@ -574,9 +608,9 @@ func (c *Config) Validate() error {
 	}
 	for i, r := range p.Routing {
 		switch r.Provider {
-		case "anthropic", "openai", "gemini", "grok", "arliai", "perplexity", "ollama":
+		case "anthropic", "openai", "gemini", "grok", "arliai", "perplexity", "comfyui", "ollama":
 		default:
-			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini|grok|arliai|perplexity|ollama", i, r.Provider)
+			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini|grok|arliai|perplexity|comfyui|ollama", i, r.Provider)
 		}
 		if strings.TrimSpace(r.Prefix) == "" {
 			return fmt.Errorf("config: providers.routing[%d].prefix is empty", i)

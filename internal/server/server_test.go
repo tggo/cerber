@@ -847,17 +847,18 @@ func TestRoute(t *testing.T) {
 		{Prefix: "llama", Provider: "ollama"},
 	})
 	cases := map[string]string{
-		"claude-sonnet-4-6": "anthropic",
-		"gpt-4o":            "openai",
-		"o3-mini":           "openai",
-		"chatgpt-x":         "openai",
-		"gemini-2.5-flash":  "gemini",
-		"grok-2":            "grok",
-		"sonar-pro":         "perplexity",
-		"custom-model":      "openai", // config override
-		"llama3.1":          "ollama", // config override (arbitrary model name)
-		"claude-3-5-haiku":  "anthropic",
-		"mystery":           "", // unknown -> no provider (rejected by caller)
+		"claude-sonnet-4-6":  "anthropic",
+		"gpt-4o":             "openai",
+		"o3-mini":            "openai",
+		"chatgpt-x":          "openai",
+		"gemini-2.5-flash":   "gemini",
+		"grok-2":             "grok",
+		"sonar-pro":          "perplexity",
+		"comfyui-ollama/x:1": "comfyui",
+		"custom-model":       "openai", // config override
+		"llama3.1":           "ollama", // config override (arbitrary model name)
+		"claude-3-5-haiku":   "anthropic",
+		"mystery":            "", // unknown -> no provider (rejected by caller)
 	}
 	for model, want := range cases {
 		if got := s.route(model); got != want {
@@ -1253,6 +1254,7 @@ func TestLLMDoc(t *testing.T) {
 		"Tool/function calling is translated for every provider", // no longer a gap
 		"X-Cerber-Compat", "`raw`", "`force`", "max_completion_tokens", // compatibility mode
 		"/v1/search", "sonar*", "citations", // perplexity: web search endpoint + web-grounded chat
+		"comfyui-*", "ComfyUI's queue", // local GGUF inside ComfyUI
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("llm.md missing %q\n%s", want, body)

@@ -52,6 +52,8 @@ On `/v1/chat/completions`, cerber routes by model name:
 | `gpt* o1* o3* o4* chatgpt*` | OpenAI | passthrough |
 | `gemini*` | Gemini | OpenAI↔Gemini translation |
 | `grok*` | xAI / Grok | passthrough (OpenAI-compatible) |
+| `sonar*` | Perplexity | passthrough, web-grounded; plus `POST /v1/search` |
+| `comfyui-*` | local GGUF inside ComfyUI | shares the GPU with image workflows — [docs](docs/providers/comfyui.md) |
 
 Override routing with `providers.routing` in the config. Each provider pools
 multiple credentials with rotation; Anthropic adds OAuth refresh + Claude Code spoofing.

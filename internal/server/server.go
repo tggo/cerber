@@ -35,6 +35,7 @@ import (
 	"github.com/tggo/cerber/internal/metrics"
 	"github.com/tggo/cerber/internal/provider"
 	"github.com/tggo/cerber/internal/provider/anthropic"
+	"github.com/tggo/cerber/internal/provider/comfyui"
 	"github.com/tggo/cerber/internal/quota"
 	"github.com/tggo/cerber/internal/translator"
 	"github.com/tggo/cerber/internal/usage"
@@ -242,7 +243,7 @@ func (s *Server) SetUpstreamProxy(target *url.URL, transport http.RoundTripper, 
 // route returns the provider name a model should go to on the OpenAI endpoint.
 // Order: configured prefixes, then discovered models, then built-in prefixes
 // (gpt*/o*→openai, gemini*→gemini, grok*→grok, sonar*→perplexity,
-// claude*→anthropic). An unknown
+// comfyui-*→comfyui, claude*→anthropic). An unknown
 // model returns "" so the caller can reject it instead of silently using
 // Anthropic.
 func (s *Server) route(model string) string {
@@ -268,6 +269,8 @@ func (s *Server) route(model string) string {
 		return "grok"
 	case strings.HasPrefix(model, "sonar"):
 		return "perplexity"
+	case strings.HasPrefix(model, "comfyui-"):
+		return "comfyui"
 	case strings.HasPrefix(model, "claude"):
 		return "anthropic"
 	default:
@@ -850,6 +853,13 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- Perplexity Agent API models (names with a vendor prefix, e.g. `openai/gpt-5-mini`, `anthropic/claude-sonnet-5`, `perplexity/sonar`; see the perplexity list below) work **only on `POST /v1/responses`**, not on chat completions. Add `\"tools\":[{\"type\":\"web_search\"}]` to let them search.\n")
 	fmt.Fprintf(&b, "- Just need links, not an answer? Use `POST /v1/search` (cheaper, no generation).\n\n")
 
+	fmt.Fprintf(&b, "## Local models inside ComfyUI (`comfyui-*`)\n\n")
+	fmt.Fprintf(&b, "`comfyui-<model>` (exact ids in the comfyui list below) runs a local GGUF model inside ComfyUI, on the same GPU as image generation. Use it for an occasional short prompt, not for bulk or latency-sensitive work:\n\n")
+	fmt.Fprintf(&b, "- **Slow:** each request waits its turn in ComfyUI's queue behind image jobs, then loads the model (seconds to a minute) and unloads it after answering. A stream stays silent (SSE `:` keep-alive comments only) until the whole answer is ready, then arrives in one piece.\n")
+	fmt.Fprintf(&b, "- **Text only:** `system`/`user`/`assistant` messages with string or text-part content. No tools, no images, `n` = 1 → 400 otherwise.\n")
+	fmt.Fprintf(&b, "- Honoured: `max_tokens`/`max_completion_tokens` (default %d), `temperature`, `top_p`, `seed` (random when omitted), `stop`. `reasoning_effort` (anything but `none`) turns on the model's thinking mode; the thinking comes back as `reasoning_content`.\n", comfyui.DefaultMaxTokens)
+	fmt.Fprintf(&b, "- Free: no cost is charged; tokens are still counted.\n\n")
+
 	fmt.Fprintf(&b, "## Recommended models\n\n")
 	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; works on both endpoints, tool calling included).\n")
 	fmt.Fprintf(&b, "- Most capable: `claude-opus-4-8`.\n")
@@ -903,6 +913,7 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- `gemini*` → Gemini\n")
 	fmt.Fprintf(&b, "- `grok*` → xAI (Grok)\n")
 	fmt.Fprintf(&b, "- `sonar*` → Perplexity (web-grounded)\n")
+	fmt.Fprintf(&b, "- `comfyui-*` → a local GGUF model inside ComfyUI (see below)\n")
 	fmt.Fprintf(&b, "- `claude*` → Anthropic (Claude)\n")
 	fmt.Fprintf(&b, "- the local models listed below → ollama\n")
 	fmt.Fprintf(&b, "- anything else → 400 (unknown model)\n\n")
@@ -1039,7 +1050,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	// Routing + aliases
 	p(`<h2 id="routing">Model routing &amp; aliases</h2>`)
 	p(`<p>Just set <code>model</code>; cerber routes by name:</p><table><tr><th>Model prefix</th><th>Provider</th></tr>`)
-	for _, rr := range [][2]string{{"gpt*, o1*, o3*, o4*, chatgpt*", "OpenAI"}, {"gemini*", "Gemini"}, {"grok*", "xAI (Grok)"}, {"sonar*", "Perplexity"}, {"claude*", "Anthropic"}, {"(discovered local names)", "ollama / vLLM"}} {
+	for _, rr := range [][2]string{{"gpt*, o1*, o3*, o4*, chatgpt*", "OpenAI"}, {"gemini*", "Gemini"}, {"grok*", "xAI (Grok)"}, {"sonar*", "Perplexity"}, {"comfyui-*", "local GGUF inside ComfyUI"}, {"claude*", "Anthropic"}, {"(discovered local names)", "ollama / vLLM"}} {
 		p(`<tr><td><code>%s</code></td><td>%s</td></tr>`, rr[0], rr[1])
 	}
 	p(`</table><p class="mut">Configured <code>routing</code> prefixes and discovered model names take precedence; an unmatched model → <code>400</code>.</p>`)

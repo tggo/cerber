@@ -108,6 +108,16 @@ providers:
   #   credentials:                            # raw web search on POST /v1/search
   #     - { type: api_key, name: perplexity, key: "${PERPLEXITY_API_KEY}" }
 
+  # comfyui: # local GGUF chat INSIDE ComfyUI, sharing the GPU with image workflows.
+  #   # Needs the CerberLLMChat node: github.com/tggo/comfyui-cerber-llm. Slow (the model
+  #   # loads per request, waits behind image jobs) but never fights them for VRAM.
+  #   # Models route as comfyui-<model> (listed from the node). No credentials.
+  #   base_url: "http://localhost:8188"
+  #   # max_wait: 30m        # give up on a queued/running prompt after this
+  #   # n_ctx: 8192          # context window
+  #   # max_tokens: 1024     # output cap when a request sets none
+  #   # keep_loaded: false   # true = keep the model in VRAM between requests
+
   # ollama:  # local ollama/vLLM (OpenAI-compatible); needs no API key.
   #   base_url: "http://localhost:11434"   # e.g. "http://gpu0:11434" on the LAN
   #   # Model names are arbitrary, so route them explicitly under `routing` above:

@@ -64,7 +64,7 @@ access:
 
 providers:
   # /v1/chat/completions routes by model: gpt*/o1*/o3*/o4*/chatgpt* -> openai,
-  # gemini* -> gemini, grok* -> grok, sonar* -> perplexity, configured prefixes below -> ollama,
+  # gemini* -> gemini, grok* -> grok, sonar* -> perplexity, comfyui-* -> comfyui, configured prefixes below -> ollama,
   # everything else -> anthropic.
   anthropic: {}        # credentials come from auth_dir (OAuth)
 
@@ -88,6 +88,9 @@ providers:
   perplexity:                               # api.perplexity.ai: sonar* chat (web-grounded), agent models on /v1/responses, POST /v1/search
     credentials:
       - { type: api_key, name: perplexity, key: "${PERPLEXITY_API_KEY}" }
+
+  comfyui:                                  # GGUF chat inside gpu0's ComfyUI (CerberLLMChat node), shares the GPU with image jobs
+    base_url: "http://192.168.89.233:8188"
 
   ollama:                                   # local models on gpu0 (HomeOffice, via WG)
     base_url: "http://192.168.89.233:11434"

@@ -363,6 +363,33 @@ func TestParse_PricingRequestFee(t *testing.T) {
 	}
 }
 
+func TestParse_ComfyUI(t *testing.T) {
+	c, err := Parse([]byte("access: {keys: [k]}\nproviders: {comfyui: {}}"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cu := c.Providers.ComfyUI; cu == nil || cu.BaseURL != defaultComfyUIBase || cu.Timeout.Std() != defaultProviderWaitNS {
+		t.Errorf("comfyui defaults = %+v", c.Providers.ComfyUI)
+	}
+	y := "access: {keys: [k]}\nproviders: {comfyui: {base_url: 'http://gpu0:8188', max_wait: 10m, poll_interval: 1s, node: MyNode, n_ctx: 4096, max_tokens: 256, keep_loaded: true}, routing: [{prefix: local-, provider: comfyui}]}"
+	if c, err = Parse([]byte(y)); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := ComfyUI{BaseURL: "http://gpu0:8188", Timeout: Duration(defaultProviderWaitNS), MaxWait: Duration(10 * time.Minute),
+		PollInterval: Duration(time.Second), Node: "MyNode", NCtx: 4096, MaxTokens: 256, KeepLoaded: true}
+	if *c.Providers.ComfyUI != want {
+		t.Errorf("comfyui = %+v, want %+v", *c.Providers.ComfyUI, want)
+	}
+	for _, bad := range []string{
+		"access: {keys: [k]}\nproviders: {comfyui: {base_url: 'gpu0:8188'}}",
+		"access: {keys: [k]}\nproviders: {comfyui: {n_ctx: -1}}",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("expected error for %q", bad)
+		}
+	}
+}
+
 func TestParse_PerplexityNoCreds(t *testing.T) {
 	// Perplexity requires a key: an empty credential list is rejected.
 	y := "access: {keys: [k]}\nproviders: {perplexity: {credentials: []}}"
