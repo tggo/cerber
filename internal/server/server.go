@@ -876,8 +876,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(&b, "## Compatibility mode (OpenAI endpoint)\n\n")
 	fmt.Fprintf(&b, "Upstreams disagree on parameter names even when they all claim the OpenAI dialect: `gpt-5*` rejects `max_tokens` and wants `max_completion_tokens`, xAI wants the opposite. cerber settles that for you, and header `X-Cerber-Compat` says how much it may rewrite:\n\n")
-	fmt.Fprintf(&b, "- `auto` (default on this instance: `%s`) — fixes only what is deterministically known wrong for the resolved target: the `max_tokens`/`max_completion_tokens` spelling, plus full tool translation. Unknown parameters pass through untouched.\n", s.compatMode)
-	fmt.Fprintf(&b, "- `raw` — forwards your body byte-for-byte. You own every corner case. Only valid for models that route to an OpenAI-dialect upstream (OpenAI/Grok/ollama/vLLM); a `claude*` or `gemini*` model returns 400, because that body must be translated — use `/v1/messages` for a raw Anthropic request.\n")
+	fmt.Fprintf(&b, "- `auto` (default on this instance: `%s`) — fixes only what is deterministically known wrong for the resolved target: the `max_tokens`/`max_completion_tokens` spelling, plus full tool translation. Unknown parameters pass through untouched. On a stream to an OpenAI-dialect upstream it also adds `stream_options.include_usage` (for token accounting) and strips the resulting usage-only chunk unless you asked for it yourself.\n", s.compatMode)
+	fmt.Fprintf(&b, "- `raw` — forwards your body byte-for-byte (no `include_usage` injection either). You own every corner case. Only valid for models that route to an OpenAI-dialect upstream (OpenAI/Grok/ollama/vLLM); a `claude*` or `gemini*` model returns 400, because that body must be translated — use `/v1/messages` for a raw Anthropic request.\n")
 	fmt.Fprintf(&b, "- `force` — `auto` plus coercion for clients that cannot adapt: parameters outside the OpenAI dialect are dropped instead of forwarded, and degenerate fields (an empty `tools` array, a `tool_choice` with no tools) are removed.\n\n")
 	fmt.Fprintf(&b, "In `auto`/`force`, if an upstream still rejects the output-length parameter, cerber retries once with the other spelling and remembers the answer for that model — so a model nobody has classified yet self-corrects after one request.\n\n")
 
@@ -1074,7 +1074,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	p(`<h2 id="compat">Compatibility mode</h2>`)
 	p(`<p>Upstreams that all claim the OpenAI dialect disagree on details: <code>gpt-5*</code> rejects <code>max_tokens</code> and wants <code>max_completion_tokens</code>, xAI wants the opposite, and the model name alone does not say which. Header <code>X-Cerber-Compat</code> sets how much cerber may rewrite the request; this instance defaults to <code>%s</code>.</p>`, esc(string(s.compatMode)))
 	p(`<table><tr><th>Mode</th><th>Behaviour</th></tr>`)
-	p(`<tr><td><code>auto</code></td><td>Fixes only what is deterministically known wrong for the resolved target — the output-length parameter spelling, plus full tool translation. Unknown parameters pass through, so provider-specific extensions keep working.</td></tr>`)
+	p(`<tr><td><code>auto</code></td><td>Fixes only what is deterministically known wrong for the resolved target — the output-length parameter spelling, plus full tool translation. Unknown parameters pass through, so provider-specific extensions keep working. Streams to an OpenAI-dialect upstream get <code>stream_options.include_usage</code> for token accounting; the extra usage-only chunk is stripped unless the client asked for it.</td></tr>`)
 	p(`<tr><td><code>raw</code></td><td>Forwards the body byte-for-byte; the client owns every corner case. Valid only for OpenAI-dialect upstreams — a model routing to Anthropic or Gemini returns <code>400</code>, because that body must be translated. Use <code>/v1/messages</code> for a raw Anthropic request.</td></tr>`)
 	p(`<tr><td><code>force</code></td><td><code>auto</code> plus coercion for clients that cannot adapt: parameters outside the OpenAI dialect are dropped rather than forwarded, and degenerate fields (empty <code>tools</code>, an orphaned <code>tool_choice</code>) are removed.</td></tr>`)
 	p(`</table>`)
@@ -1595,7 +1595,7 @@ func (s *Server) handleForward(subpath string) http.HandlerFunc {
 			writeUpstreamError(w, err)
 			return
 		}
-		s.relayChatter(w, r, resp, target, model, stream)
+		s.relayChatter(w, r, resp, target, model, stream, false)
 	}
 }
 
@@ -1641,7 +1641,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeUpstreamError(w, err)
 		return
 	}
-	s.relayChatter(w, r, resp, searchProvider, model, false)
+	s.relayChatter(w, r, resp, searchProvider, model, false, false)
 }
 
 // handleCountTokens proxies Anthropic's /v1/messages/count_tokens through the
@@ -1781,9 +1781,18 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 		// Normalize parameters the target is known to spell differently. Only for
 		// same-dialect upstreams: a translating target's body is rebuilt field by
 		// field, which is normalizing by construction.
+		// stripUsage: cerber added include_usage for its own accounting, so the
+		// usage-only chunk the client didn't ask for is removed from the relay.
+		stripUsage := false
 		if !compat.Translating(target) {
 			if nb, changed, nerr := s.norm.Apply(mode, tgtModel, tbody); nerr == nil && changed {
 				tbody = nb
+			}
+		}
+		clientBody := tbody // the request without cerber's include_usage, for the rejection retry
+		if !compat.Translating(target) && mode != compat.ModeRaw && stream {
+			if nb, injected, ierr := compat.RequestStreamUsage(tbody); ierr == nil && injected {
+				tbody, stripUsage = nb, true
 			}
 		}
 		resp, err := chatter.Chat(r.Context(), tbody, stream, r.Header)
@@ -1806,10 +1815,17 @@ func (s *Server) tryOpenAITarget(w http.ResponseWriter, r *http.Request, body []
 			_ = resp.Body.Close()
 			return false
 		}
+		if stripUsage {
+			var kept bool
+			resp, kept = s.retryWithoutStreamUsage(r, chatter, clientBody, tgtModel, resp)
+			if !kept {
+				tbody, stripUsage = clientBody, false
+			}
+		}
 		if mode != compat.ModeRaw && !compat.Translating(target) {
 			resp = s.retryTokenParam(r, chatter, tbody, tgtModel, stream, resp)
 		}
-		s.relayChatter(w, r, resp, chatter.Name(), tgtModel, stream)
+		s.relayChatter(w, r, resp, chatter.Name(), tgtModel, stream, stripUsage)
 		return true
 	}
 
@@ -2329,10 +2345,67 @@ func streamCopy(w http.ResponseWriter, body io.Reader) {
 	}
 }
 
+// streamCopyWithoutUsageChunks relays an SSE stream event by event, dropping
+// any event whose data is a usage-only chat chunk ("choices": [] with a
+// non-null "usage") — the chunk include_usage adds at the end. Each kept event
+// is written and flushed as soon as its terminating blank line arrives.
+func streamCopyWithoutUsageChunks(w http.ResponseWriter, body io.Reader) {
+	flush := flusher(w)
+	br := bufio.NewReaderSize(body, 32*1024)
+	var event []byte
+	drop := false
+	emit := func() bool {
+		if len(event) > 0 && !drop {
+			if _, err := w.Write(event); err != nil {
+				return false
+			}
+			flush()
+		}
+		event, drop = event[:0], false
+		return true
+	}
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			event = append(event, line...)
+			trimmed := bytes.TrimSpace(line)
+			if bytes.HasPrefix(trimmed, []byte("data:")) && isUsageOnlyChunk(bytes.TrimSpace(trimmed[len("data:"):])) {
+				drop = true
+			}
+			if len(trimmed) == 0 && !emit() {
+				return
+			}
+		}
+		if err != nil {
+			emit()
+			return
+		}
+	}
+}
+
+// isUsageOnlyChunk reports whether an SSE data payload is a chat chunk with an
+// empty choices array and a usage object.
+func isUsageOnlyChunk(data []byte) bool {
+	if !bytes.Contains(data, []byte(`"usage"`)) {
+		return false
+	}
+	var c struct {
+		Choices *[]json.RawMessage `json:"choices"`
+		Usage   json.RawMessage    `json:"usage"`
+	}
+	if json.Unmarshal(data, &c) != nil || c.Choices == nil || len(*c.Choices) != 0 {
+		return false
+	}
+	u := bytes.TrimSpace(c.Usage)
+	return len(u) > 0 && !bytes.Equal(u, []byte("null"))
+}
+
 // relayChatter writes an already-obtained provider.Response (OpenAI-format) to
 // the client: error status relayed as-is, success streamed or buffered (with
-// token usage recorded). It closes resp.Body.
-func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *provider.Response, providerName, model string, stream bool) {
+// token usage recorded). stripUsage drops usage-only chunks from a stream (set
+// when cerber injected include_usage the client didn't ask for). It closes
+// resp.Body.
+func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *provider.Response, providerName, model string, stream, stripUsage bool) {
 	defer resp.Body.Close()
 
 	ct := resp.Header.Get("Content-Type")
@@ -2359,7 +2432,11 @@ func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *prov
 		// (OpenAI's include_usage chunk, Perplexity's final chunk, a Responses
 		// response.completed), and record once the stream ends.
 		sc := &sseUsage{}
-		streamCopy(w, io.TeeReader(resp.Body, sc))
+		if stripUsage {
+			streamCopyWithoutUsageChunks(w, io.TeeReader(resp.Body, sc))
+		} else {
+			streamCopy(w, io.TeeReader(resp.Body, sc))
+		}
 		u := sc.usage()
 		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model,
 			InputTokens: u.in, OutputTokens: u.out, ReportedCost: u.cost})
@@ -2471,7 +2548,8 @@ func (s *sseUsage) appendLine(p []byte) {
 
 func (s *sseUsage) endLine() {
 	line := bytes.TrimSpace(s.line)
-	if !s.overflow && bytes.HasPrefix(line, []byte("data:")) && bytes.Contains(line, []byte(`"usage"`)) {
+	if !s.overflow && bytes.HasPrefix(line, []byte("data:")) && bytes.Contains(line, []byte(`"usage"`)) &&
+		!bytes.Contains(line, []byte(`"usage":null`)) && !bytes.Contains(line, []byte(`"usage": null`)) {
 		s.last = append(s.last[:0], bytes.TrimSpace(line[len("data:"):])...)
 	}
 	s.line = s.line[:0]
@@ -2531,6 +2609,31 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // deciding whether it is the max_tokens/max_completion_tokens quarrel. Error
 // bodies are small; a large one is not one of these and is replayed unchanged.
 const errBodyPeek = 64 << 10
+
+// retryWithoutStreamUsage handles an upstream that rejects the
+// stream_options.include_usage cerber injected: it retries once with the body
+// the client actually sent (clientBody). kept reports whether the injected
+// request stands (false = the retry replaced it, so there is no usage chunk to
+// strip). Any other failure is returned with its body intact for replay.
+func (s *Server) retryWithoutStreamUsage(r *http.Request, chatter provider.Chatter, clientBody []byte, model string, resp *provider.Response) (*provider.Response, bool) {
+	if resp.Status != http.StatusBadRequest && resp.Status != http.StatusUnprocessableEntity {
+		return resp, true
+	}
+	peek, rerr := io.ReadAll(io.LimitReader(resp.Body, errBodyPeek))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(peek))
+	if rerr != nil || !compat.StreamOptionsRejection(resp.Status, peek) {
+		return resp, true
+	}
+	s.log.Info("compat: upstream rejected stream_options.include_usage, retrying without it",
+		zap.String("model", model))
+	retried, err := chatter.Chat(r.Context(), clientBody, true, r.Header)
+	if err != nil {
+		return resp, true
+	}
+	_ = resp.Body.Close()
+	return retried, false
+}
 
 // retryTokenParam turns an upstream's "wrong output-length parameter" rejection
 // into a corrected retry, and remembers the answer so the next request for this

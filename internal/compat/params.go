@@ -235,3 +235,50 @@ func SentTokenParam(body []byte) string {
 	}
 	return ""
 }
+
+// RequestStreamUsage asks a streamed OpenAI-dialect chat request to end with a
+// usage chunk (stream_options.include_usage = true) so cerber can charge tokens
+// for it. Other stream_options keys are kept. injected reports that the client
+// had not asked for usage itself — the caller should then strip the extra
+// usage-only chunk from the stream it relays. A non-streaming body, one that
+// already requests usage, or an unparsable one is returned untouched.
+func RequestStreamUsage(body []byte) (out []byte, injected bool, err error) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return body, false, nil
+	}
+	var stream bool
+	if json.Unmarshal(m["stream"], &stream) != nil || !stream {
+		return body, false, nil
+	}
+	opts := map[string]json.RawMessage{}
+	if raw, ok := m["stream_options"]; ok && !emptyArray(raw) {
+		if json.Unmarshal(raw, &opts) != nil {
+			return body, false, nil // malformed stream_options: the upstream's call
+		}
+	}
+	var include bool
+	if json.Unmarshal(opts["include_usage"], &include) == nil && include {
+		return body, false, nil
+	}
+	opts["include_usage"] = json.RawMessage("true")
+	rawOpts, err := json.Marshal(opts)
+	if err != nil {
+		return nil, false, err
+	}
+	m["stream_options"] = rawOpts
+	if out, err = json.Marshal(m); err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// StreamOptionsRejection reports whether a failed upstream response is a
+// complaint about stream_options (an upstream that doesn't know the field), in
+// which case the request is retried as the client sent it.
+func StreamOptionsRejection(status int, body []byte) bool {
+	if status != 400 && status != 422 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(body)), "stream_options")
+}

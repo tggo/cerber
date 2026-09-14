@@ -209,3 +209,62 @@ func TestSentTokenParam(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestStreamUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name, in     string
+		wantInjected bool
+		want         string // expected stream_options after (JSON), "" = body untouched
+	}{
+		{"stream without options", `{"model":"m","stream":true}`, true, `{"include_usage":true}`},
+		{"keeps other stream_options keys", `{"stream":true,"stream_options":{"continuous_usage_stats":true}}`, true, `{"continuous_usage_stats":true,"include_usage":true}`},
+		{"client declined", `{"stream":true,"stream_options":{"include_usage":false}}`, true, `{"include_usage":true}`},
+		{"null stream_options", `{"stream":true,"stream_options":null}`, true, `{"include_usage":true}`},
+		{"client already asked", `{"stream":true,"stream_options":{"include_usage":true}}`, false, ""},
+		{"not streaming", `{"stream":false}`, false, ""},
+		{"no stream field", `{"model":"m"}`, false, ""},
+		{"stream not a bool", `{"stream":"yes"}`, false, ""},
+		{"malformed stream_options", `{"stream":true,"stream_options":"x"}`, false, ""},
+		{"not JSON", `{`, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, injected, err := RequestStreamUsage([]byte(tc.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if injected != tc.wantInjected {
+				t.Fatalf("injected = %v, want %v", injected, tc.wantInjected)
+			}
+			if !injected {
+				if string(out) != tc.in {
+					t.Errorf("body changed: %s", out)
+				}
+				return
+			}
+			var m map[string]json.RawMessage
+			if err := json.Unmarshal(out, &m); err != nil {
+				t.Fatal(err)
+			}
+			if string(m["stream_options"]) != tc.want {
+				t.Errorf("stream_options = %s, want %s", m["stream_options"], tc.want)
+			}
+		})
+	}
+}
+
+func TestStreamOptionsRejection(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `{"error":"Unrecognized request argument supplied: stream_options"}`, true},
+		{422, `{"detail":"extra field Stream_Options not permitted"}`, true},
+		{400, `{"error":"invalid messages"}`, false},
+		{500, `stream_options exploded`, false},
+	} {
+		if got := StreamOptionsRejection(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("StreamOptionsRejection(%d, %s) = %v, want %v", tc.status, tc.body, got, tc.want)
+		}
+	}
+}

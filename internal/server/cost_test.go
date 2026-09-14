@@ -66,7 +66,7 @@ func TestCost_ReportedCostOverridesPricing(t *testing.T) {
 	}{
 		{"chat non-stream", "/v1/chat/completions", `{"model":"sonar","messages":[{"role":"user","content":"hi"}]}`,
 			`{"object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":27,"cost":{"request_cost":0.014,"total_cost":0.01441}}}`, 3, 27, 0.01441},
-		{"chat stream: last usage chunk wins", "/v1/chat/completions", `{"model":"sonar","stream":true,"messages":[]}`, sse, 2, 5, 0.0144},
+		{"chat stream: last usage chunk wins", "/v1/chat/completions", `{"model":"sonar","stream":true,"stream_options":{"include_usage":true},"messages":[]}`, sse, 2, 5, 0.0144},
 		{"responses stream: response.completed, no trailing newline", "/v1/responses", `{"model":"openai/gpt-5-mini","stream":true,"input":"hi"}`, completed, 28, 353, 0.00014},
 		{"responses non-stream", "/v1/responses", `{"model":"openai/gpt-5-mini","input":"hi"}`,
 			`{"object":"response","usage":{"input_tokens":10,"output_tokens":20,"cost":{"total_cost":0.002}}}`, 10, 20, 0.002},
