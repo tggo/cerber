@@ -10,25 +10,37 @@
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --muted:#8b93a7;
     --accent:#7c9cff; --err:#ff7b72; --ok:#5ad17e; --warn:#e3b341;
+    color-scheme:dark;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
     font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  header { display:flex; align-items:center; gap:12px; padding:16px 22px;
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:16px 22px; z-index:1;
     border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); }
   header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
   header h1 span { color:var(--accent); }
   .grow { flex:1; }
   input, button, select { font:inherit; color:var(--fg); background:var(--panel);
     border:1px solid var(--line); border-radius:8px; padding:7px 11px; }
-  input { width:300px; }
+  input { width:300px; max-width:100%; }
+  header #key { flex:1 1 180px; width:auto; }
+  /* A wrapped header is 2-3 rows on a phone; don't pin that over the content. */
+  @media (max-width:700px) { header { position:static; } }
   button { cursor:pointer; }
   button:hover { border-color:var(--accent); }
-  main { padding:22px; display:grid; gap:22px; max-width:1100px; margin:0 auto; }
+  /* minmax(0,1fr) + min-width:0: a grid item's default min-width is its content,
+     so one wide table would stretch the whole column past max-width (content
+     spills right, page looks off-centre) instead of scrolling inside .tscroll. */
+  main { padding:22px; display:grid; grid-template-columns:minmax(0,1fr); gap:22px;
+    max-width:1100px; margin:0 auto; }
+  main > * { min-width:0; }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
   .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.6px; }
-  .card .v { font-size:26px; margin-top:6px; }
+  /* Scale the figure to the card, not the viewport: "3,867,816,939" must fit a
+     ~200px card without spilling into its neighbour. */
+  .card { container-type:inline-size; min-width:0; }
+  .card .v { font-size:clamp(14px, calc(100cqi / (var(--n, 8) * .62)), 26px); margin-top:6px; white-space:nowrap; }
   section h2 { font-size:13px; color:var(--muted); text-transform:uppercase;
     letter-spacing:.6px; margin:0 0 10px; }
   section h2 .sub-note { font-weight:400; text-transform:none; letter-spacing:0; }
@@ -46,7 +58,8 @@
   .chart rect.req { fill:var(--accent); }
   .chart rect.err { fill:var(--err); }
   .chart text { fill:var(--muted); font-size:10px; }
-  .keybar { display:flex; gap:10px; margin-bottom:12px; }
+  .keybar { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px; }
+  .keybar select { max-width:100%; }
   .keybar input { flex:1; width:auto; }
   #newKeyReveal { margin-bottom:12px; }
   #newKeyReveal .reveal { background:var(--panel); border:1px solid var(--ok);
@@ -80,6 +93,7 @@
      short kind / key / state cells on one line and let only the name wrap. */
   #accounts th, #accounts td:nth-child(3), #accounts td:nth-child(4),
   #accounts td:nth-child(5) { white-space:nowrap; }
+  #accounts td:nth-child(2) { overflow-wrap:break-word; }
   #accounts th, #accounts td { padding-left:9px; padding-right:9px; }
   #accounts td:first-child, #accounts th:first-child { padding-left:14px; }
   #accounts td:last-child, #accounts th:last-child { padding-right:14px; }
@@ -89,7 +103,9 @@
      sideways on a narrow viewport. #keys still resolves — the id stays on the
      table, the wrapper only clips it. */
   .tscroll { overflow-x:auto; }
-  .tscroll > table { min-width:860px; }
+  .tscroll { background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+  .tscroll > table { border:0; border-radius:0; }
+  #keys, #accounts, #requests { min-width:860px; }
   /* align-items:stretch makes the bar inherit the width of the number line, so the
      column costs exactly "$50.01 / $150.00" instead of a fixed 104px. */
   td .budget { display:inline-flex; flex-direction:column; align-items:stretch;
@@ -129,7 +145,7 @@
 <main>
   <div class="cards" id="cards"></div>
   <section><h2>requests / hour (last 48h)</h2><div id="chart" class="chart"></div></section>
-  <section><h2>providers</h2><table id="providers"></table></section>
+  <section><h2>providers</h2><div class="tscroll"><table id="providers"></table></div></section>
   <section><h2>accounts (credentials)</h2><div class="tscroll"><table id="accounts"></table></div></section>
   <section>
     <h2>client keys <span class="sub-note">— spend = selected range · budget = the key's own rolling limit window</span></h2>
@@ -140,8 +156,8 @@
     <div id="newKeyReveal"></div>
     <div class="tscroll"><table id="keys"></table></div>
   </section>
-  <section><h2>by credential</h2><table id="byCred"></table></section>
-  <section><h2>by model</h2><table id="byModel"></table></section>
+  <section><h2>by credential</h2><div class="tscroll"><table id="byCred"></table></div></section>
+  <section><h2>by model</h2><div class="tscroll"><table id="byModel"></table></div></section>
   <section id="reqSection">
     <h2>recent requests <span class="muted" style="font-weight:400">— who called what</span></h2>
     <div class="keybar">
@@ -153,7 +169,7 @@
       <span class="grow"></span>
       <span id="reqInfo" class="muted"></span>
     </div>
-    <table id="requests"></table>
+    <div class="tscroll"><table id="requests"></table></div>
     <div style="text-align:center;margin-top:10px">
       <button id="reqMore">load more</button>
     </div>
@@ -274,7 +290,7 @@
         ["input tokens", fmt(t.input_tokens)],
         ["output tokens", fmt(t.output_tokens)],
         ["cost", "$" + (d.total_cost || 0).toFixed(2)],
-      ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+      ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v" style="--n:${String(v).length}">${v}</div></div>`).join("");
       rows($("byCred"), d.by_credential || [], ["name","requests","errors","input","output","last"]);
       rows($("byModel"), d.by_model || [], ["name","requests","errors","input","output","cost","last"], true);
       byClientMap = Object.fromEntries((d.by_client || []).map(c => [c.name, c]));
