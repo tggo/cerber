@@ -19,11 +19,16 @@ import (
 
 // Stat is the aggregate for one key (a credential or a model).
 type Stat struct {
-	Requests     int64     `json:"requests"`
-	Errors       int64     `json:"errors"`
-	InputTokens  int64     `json:"input_tokens"`
-	OutputTokens int64     `json:"output_tokens"`
-	LastUsed     time.Time `json:"last_used"`
+	Requests     int64 `json:"requests"`
+	Errors       int64 `json:"errors"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	// ExtraCost is cost not derivable from tokens × pricing, fixed at record
+	// time: per-request fees, and the difference between an upstream-reported
+	// cost and the token-priced estimate (so it may be negative). Reported cost
+	// is modelCost = tokens × current pricing + ExtraCost.
+	ExtraCost float64   `json:"extra_cost,omitempty"`
+	LastUsed  time.Time `json:"last_used"`
 }
 
 // Entry is a named Stat for JSON output. Cost is set for model entries when
@@ -66,10 +71,12 @@ type Report struct {
 // retentionHours bounds how much hourly history is kept (~30 days).
 const retentionHours = 24 * 30
 
-// Price is per-model pricing in cost units per 1,000,000 tokens.
+// Price is per-model pricing: Input/Output in cost units per 1,000,000 tokens,
+// Request a flat fee per successful request (e.g. a web-search charge).
 type Price struct {
-	Input  float64 `json:"input"`
-	Output float64 `json:"output"`
+	Input   float64 `json:"input"`
+	Output  float64 `json:"output"`
+	Request float64 `json:"request,omitempty"`
 }
 
 // Event is one recorded request outcome.
@@ -80,6 +87,12 @@ type Event struct {
 	IsError      bool
 	InputTokens  int64
 	OutputTokens int64
+	// ReportedCost is the cost the upstream itself reported for this request
+	// (e.g. Perplexity's usage.cost.total_cost, which includes its search fee).
+	// When > 0 it is authoritative: pricing is not applied to this event.
+	ReportedCost float64
+
+	extraCost float64 // set by Record: EventCost minus the token-priced part
 }
 
 // Tracker accumulates usage. The zero value is not usable; call New.
@@ -151,11 +164,33 @@ func (t *Tracker) SetPricing(p map[string]Price) {
 }
 
 // Cost returns the configured cost for a model's input/output tokens, or 0 when
-// no pricing is set for the model. Used by per-key budget enforcement.
+// no pricing is set for the model. Per-request fees are not included (see
+// EventCost).
 func (t *Tracker) Cost(model string, in, out int64) float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.modelCost(model, Stat{InputTokens: in, OutputTokens: out})
+}
+
+// EventCost returns what one event costs: the upstream-reported cost when
+// present, else tokens × pricing plus the model's per-request fee (charged only
+// for a successful request). Used by per-key budgets and the request log; it
+// equals what Record adds to the aggregates.
+func (t *Tracker) EventCost(e Event) float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.eventCost(e)
+}
+
+func (t *Tracker) eventCost(e Event) float64 {
+	if e.ReportedCost > 0 {
+		return e.ReportedCost
+	}
+	cost := t.modelCost(e.Model, Stat{InputTokens: e.InputTokens, OutputTokens: e.OutputTokens})
+	if p, ok := t.priceFor(e.Model); ok && !e.IsError {
+		cost += p.Request
+	}
+	return cost
 }
 
 // priceFor resolves a model's price: an exact match wins, otherwise the
@@ -181,9 +216,9 @@ func (t *Tracker) priceFor(model string) (Price, bool) {
 func (t *Tracker) modelCost(model string, s Stat) float64 {
 	p, ok := t.priceFor(model)
 	if !ok {
-		return 0
+		return s.ExtraCost
 	}
-	return float64(s.InputTokens)/1e6*p.Input + float64(s.OutputTokens)/1e6*p.Output
+	return float64(s.InputTokens)/1e6*p.Input + float64(s.OutputTokens)/1e6*p.Output + s.ExtraCost
 }
 
 // Record adds one event to the aggregates.
@@ -202,6 +237,9 @@ func (t *Tracker) Record(e Event) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Fix the non-token part of this event's cost now, so later snapshots
+	// (tokens × pricing + ExtraCost) add up to EventCost.
+	e.extraCost = t.eventCost(e) - t.modelCost(e.Model, Stat{InputTokens: e.InputTokens, OutputTokens: e.OutputTokens})
 	apply(&t.totals, e, now)
 	apply(get(t.byCredential, cred), e, now)
 	apply(get(t.byModel, model), e, now)
@@ -293,6 +331,7 @@ func apply(s *Stat, e Event, now time.Time) {
 	}
 	s.InputTokens += e.InputTokens
 	s.OutputTokens += e.OutputTokens
+	s.ExtraCost += e.extraCost
 	s.LastUsed = now
 }
 
@@ -361,6 +400,7 @@ func (t *Tracker) SnapshotWindow(window time.Duration) Report {
 		totals.Errors += st.Errors
 		totals.InputTokens += st.InputTokens
 		totals.OutputTokens += st.OutputTokens
+		totals.ExtraCost += st.ExtraCost
 		if st.LastUsed.After(totals.LastUsed) {
 			totals.LastUsed = st.LastUsed
 		}
@@ -437,6 +477,7 @@ func apply2(dst *Stat, src Stat) {
 	dst.Errors += src.Errors
 	dst.InputTokens += src.InputTokens
 	dst.OutputTokens += src.OutputTokens
+	dst.ExtraCost += src.ExtraCost
 	if src.LastUsed.After(dst.LastUsed) {
 		dst.LastUsed = src.LastUsed
 	}
@@ -474,6 +515,7 @@ func (t *Tracker) clientReportFromModels(name string, byModelStat map[string]*St
 		cr.Errors += byModel[i].Errors
 		cr.InputTokens += byModel[i].InputTokens
 		cr.OutputTokens += byModel[i].OutputTokens
+		cr.ExtraCost += byModel[i].ExtraCost
 		if byModel[i].LastUsed.After(cr.LastUsed) {
 			cr.LastUsed = byModel[i].LastUsed
 		}

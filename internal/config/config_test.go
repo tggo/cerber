@@ -349,6 +349,20 @@ func TestParse_PerplexityDefaults(t *testing.T) {
 	}
 }
 
+func TestParse_PricingRequestFee(t *testing.T) {
+	y := "access: {keys: [k]}\nusage: {pricing: {perplexity-search: {request: 0.005}, sonar: {input: 1, output: 1, request: 0.006}}}\nproviders: {perplexity: {credentials: [{type: api_key, key: x}]}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := c.Usage.Pricing["perplexity-search"]; got != (Price{Request: 0.005}) {
+		t.Errorf("perplexity-search price = %+v", got)
+	}
+	if got := c.Usage.Pricing["sonar"]; got != (Price{Input: 1, Output: 1, Request: 0.006}) {
+		t.Errorf("sonar price = %+v", got)
+	}
+}
+
 func TestParse_PerplexityNoCreds(t *testing.T) {
 	// Perplexity requires a key: an empty credential list is rejected.
 	y := "access: {keys: [k]}\nproviders: {perplexity: {credentials: []}}"

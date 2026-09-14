@@ -44,12 +44,15 @@ usage:
     gemini-2.5-flash:       { input: 0.3,  output: 2.5 }
     gemini-2.5-pro:         { input: 1.25, output: 10 }
     gemini-2.0-flash:       { input: 0.1,  output: 0.4 }
-    # Perplexity Sonar — token price only; the per-request search fee
-    # ($5–14 / 1k requests by search_context_size) isn't modelled.
-    sonar-deep-research:    { input: 2,    output: 8 }
-    sonar-reasoning-pro:    { input: 2,    output: 8 }
-    sonar-pro:              { input: 3,    output: 15 }
-    sonar:                  { input: 1,    output: 1 }
+    # Perplexity. Chat and /v1/responses report their real cost (usage.cost,
+    # incl. the search fee), which overrides these — they are the fallback when
+    # a response carries none. `request` = flat fee per successful request
+    # (search fee at the lowest search_context_size).
+    sonar-deep-research:    { input: 2,    output: 8,  request: 0.005 }
+    sonar-reasoning-pro:    { input: 2,    output: 8,  request: 0.006 }
+    sonar-pro:              { input: 3,    output: 15, request: 0.006 }
+    sonar:                  { input: 1,    output: 1,  request: 0.005 }
+    perplexity-search:      { request: 0.005 }                          # POST /v1/search: $5 / 1k requests
 
 access:
   # No keyless localhost: the nginx vhost injects the client key for LAN/WG

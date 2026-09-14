@@ -112,6 +112,75 @@ func TestCost_PrefixMatch(t *testing.T) {
 	}
 }
 
+func approx(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+
+func TestEventCost_RequestFeeAndReportedCost(t *testing.T) {
+	tr := fixedTracker()
+	tr.SetPricing(map[string]Price{
+		"perplexity-search": {Request: 0.005},
+		"sonar":             {Input: 1, Output: 1, Request: 0.005},
+	})
+	cases := []struct {
+		name string
+		e    Event
+		want float64
+	}{
+		{"flat fee, no tokens", Event{Model: "perplexity-search"}, 0.005},
+		{"fee not charged on error", Event{Model: "perplexity-search", IsError: true}, 0},
+		{"tokens + fee", Event{Model: "sonar-pro", InputTokens: 1_000_000, OutputTokens: 1_000_000}, 2.005},
+		{"reported cost wins over pricing", Event{Model: "sonar", InputTokens: 1_000_000, ReportedCost: 0.0144}, 0.0144},
+		{"reported cost on unpriced model", Event{Model: "openai/gpt-5-mini", InputTokens: 50, ReportedCost: 0.0042}, 0.0042},
+		{"unpriced, nothing reported", Event{Model: "llama3", InputTokens: 10}, 0},
+	}
+	for _, c := range cases {
+		if got := tr.EventCost(c.e); !approx(got, c.want) {
+			t.Errorf("%s: EventCost = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSnapshot_ExtraCostAddsUp(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	tr := New(WithClock(func() time.Time { return now }))
+	tr.SetPricing(map[string]Price{
+		"perplexity-search": {Request: 0.005},
+		"sonar":             {Input: 1, Output: 1},
+	})
+	events := []Event{
+		{Client: "k", Model: "perplexity-search"},
+		{Client: "k", Model: "perplexity-search"},
+		{Client: "k", Model: "perplexity-search", IsError: true},
+		// reported cost below the token estimate: ExtraCost goes negative, total still exact
+		{Client: "k", Model: "sonar", InputTokens: 1_000_000, ReportedCost: 0.5},
+		{Client: "k", Model: "openai/gpt-5-mini", ReportedCost: 0.25},
+	}
+	var want float64
+	for _, e := range events {
+		want += tr.EventCost(e)
+		tr.Record(e)
+	}
+	if !approx(want, 0.76) {
+		t.Fatalf("sum of EventCost = %v, want 0.76", want)
+	}
+	for name, rep := range map[string]Report{"all-time": tr.Snapshot(), "window": tr.SnapshotWindow(time.Hour)} {
+		if !approx(rep.TotalCost, want) {
+			t.Errorf("%s TotalCost = %v, want %v", name, rep.TotalCost, want)
+		}
+		if len(rep.ByClient) != 1 || !approx(rep.ByClient[0].Cost, want) {
+			t.Errorf("%s client cost = %+v, want %v", name, rep.ByClient, want)
+		}
+		for _, e := range rep.ByModel {
+			if e.Name == "perplexity-search" && !approx(e.Cost, 0.01) {
+				t.Errorf("%s perplexity-search cost = %v, want 0.01", name, e.Cost)
+			}
+		}
+	}
+	cr, _ := tr.ClientUsage("k")
+	if !approx(cr.Cost, want) {
+		t.Errorf("ClientUsage cost = %v, want %v", cr.Cost, want)
+	}
+}
+
 func TestSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data", "usage.json")

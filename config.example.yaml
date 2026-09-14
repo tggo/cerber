@@ -48,13 +48,16 @@ access:
 # Persist usage to disk (survives restart) and price models for cost reporting.
 usage:
   file: "./data/usage.json"
-  # pricing: cost per 1,000,000 tokens. A model matches by EXACT name first, else
+  # pricing: cost per 1,000,000 tokens (input/output) plus an optional flat
+  # `request` fee per successful request. A cost the upstream reports itself
+  # (Perplexity's usage.cost) overrides pricing. A model matches by EXACT name first, else
   # the longest key that is a PREFIX of it — so a family key prices every dated
   # variant (e.g. "claude-opus" → "claude-opus-4-8"). Unpriced models cost 0.
   # pricing:
   #   claude-opus:  { input: 5, output: 25 }
   #   claude-sonnet:{ input: 3, output: 15 }
   #   gpt-4o-mini:  { input: 0.15, output: 0.6 }
+  #   perplexity-search: { request: 0.005 }   # POST /v1/search, $5 per 1k
   # recent_log: 1000               # # of recent per-request events kept in memory
   #                                # (GET /admin/requests: who/IP/UA/model/tokens/cost)
 

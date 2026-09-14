@@ -2242,7 +2242,7 @@ func (s *Server) record(ctx context.Context, e usage.Event) {
 	m := reqMetaFrom(ctx)
 	e.Client = m.client // attribute cumulative usage to the caller (key name / config / localhost)
 	s.usage.Record(e)
-	cost := s.usage.Cost(e.Model, e.InputTokens, e.OutputTokens)
+	cost := s.usage.EventCost(e)
 	if name, ok := clientKeyFrom(ctx); ok {
 		s.keys.Charge(name, cost, e.InputTokens+e.OutputTokens)
 	}
@@ -2350,13 +2350,19 @@ func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *prov
 	}
 
 	if stream {
-		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model})
 		if ct == "" {
 			ct = "text/event-stream"
 		}
 		w.Header().Set("Content-Type", ct)
 		w.WriteHeader(http.StatusOK)
-		streamCopy(w, resp.Body)
+		// Tee the SSE stream past a scanner that keeps the last usage-bearing event
+		// (OpenAI's include_usage chunk, Perplexity's final chunk, a Responses
+		// response.completed), and record once the stream ends.
+		sc := &sseUsage{}
+		streamCopy(w, io.TeeReader(resp.Body, sc))
+		u := sc.usage()
+		s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model,
+			InputTokens: u.in, OutputTokens: u.out, ReportedCost: u.cost})
 		return
 	}
 
@@ -2366,8 +2372,9 @@ func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *prov
 		writeError(w, http.StatusBadGateway, "read provider response")
 		return
 	}
-	in, out := openaiUsage(buf)
-	s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model, InputTokens: in, OutputTokens: out})
+	u := parseOpenAIUsage(buf)
+	s.record(r.Context(), usage.Event{Credential: resp.Credential, Model: model,
+		InputTokens: u.in, OutputTokens: u.out, ReportedCost: u.cost})
 	if ct == "" {
 		ct = "application/json"
 	}
@@ -2376,16 +2383,111 @@ func (s *Server) relayChatter(w http.ResponseWriter, r *http.Request, resp *prov
 	_, _ = w.Write(buf)
 }
 
-// openaiUsage extracts token counts from an OpenAI chat-completion response.
-func openaiUsage(body []byte) (in, out int64) {
-	var probe struct {
-		Usage struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-		} `json:"usage"`
+// upstreamUsage is the token counts and (optionally) upstream-reported cost of
+// one OpenAI-compatible response.
+type upstreamUsage struct {
+	in, out int64
+	cost    float64 // usage.cost.total_cost when the upstream reports it (Perplexity), else 0
+}
+
+// usageBlock covers both OpenAI usage spellings: chat completions
+// (prompt_tokens/completion_tokens) and the Responses API
+// (input_tokens/output_tokens), plus Perplexity's usage.cost.total_cost.
+type usageBlock struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	Cost             *struct {
+		TotalCost float64 `json:"total_cost"`
+	} `json:"cost"`
+}
+
+func (u *usageBlock) toUsage() upstreamUsage {
+	out := upstreamUsage{in: u.PromptTokens + u.InputTokens, out: u.CompletionTokens + u.OutputTokens}
+	if u.Cost != nil {
+		out.cost = u.Cost.TotalCost
 	}
-	_ = json.Unmarshal(body, &probe)
-	return probe.Usage.PromptTokens, probe.Usage.CompletionTokens
+	return out
+}
+
+// parseOpenAIUsage extracts usage from an OpenAI-compatible response body or a
+// single SSE event payload: top-level "usage" (chat completions, Responses
+// API) or "response.usage" (a streamed Responses response.completed event).
+func parseOpenAIUsage(body []byte) upstreamUsage {
+	var probe struct {
+		Usage    *usageBlock `json:"usage"`
+		Response *struct {
+			Usage *usageBlock `json:"usage"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(body, &probe) != nil {
+		return upstreamUsage{}
+	}
+	switch {
+	case probe.Usage != nil:
+		return probe.Usage.toUsage()
+	case probe.Response != nil && probe.Response.Usage != nil:
+		return probe.Response.Usage.toUsage()
+	}
+	return upstreamUsage{}
+}
+
+// maxSSELine bounds how much of one SSE line sseUsage buffers. Perplexity's
+// chunks carry the search results, so lines run to tens of KB; anything past
+// the cap is not a usage event we can parse and is skipped.
+const maxSSELine = 1 << 20
+
+// sseUsage is an io.Writer fed a copy of an SSE stream. It keeps the last
+// "data:" payload that mentions "usage", to be parsed when the stream ends.
+type sseUsage struct {
+	line     []byte
+	overflow bool
+	last     []byte
+}
+
+func (s *sseUsage) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			s.appendLine(p)
+			break
+		}
+		s.appendLine(p[:i])
+		s.endLine()
+		p = p[i+1:]
+	}
+	return n, nil
+}
+
+func (s *sseUsage) appendLine(p []byte) {
+	if s.overflow || len(s.line)+len(p) > maxSSELine {
+		s.overflow = true
+		return
+	}
+	s.line = append(s.line, p...)
+}
+
+func (s *sseUsage) endLine() {
+	line := bytes.TrimSpace(s.line)
+	if !s.overflow && bytes.HasPrefix(line, []byte("data:")) && bytes.Contains(line, []byte(`"usage"`)) {
+		s.last = append(s.last[:0], bytes.TrimSpace(line[len("data:"):])...)
+	}
+	s.line = s.line[:0]
+	s.overflow = false
+}
+
+// usage parses the last usage-bearing event seen (zero if none), including a
+// final line not terminated by a newline.
+func (s *sseUsage) usage() upstreamUsage {
+	if len(s.line) > 0 {
+		s.endLine()
+	}
+	if s.last == nil {
+		return upstreamUsage{}
+	}
+	return parseOpenAIUsage(s.last)
 }
 
 // relayError buffers a small upstream error response, logs it (status + body

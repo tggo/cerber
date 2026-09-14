@@ -31,14 +31,17 @@ type Config struct {
 // Usage configures usage persistence and per-model pricing (for cost reporting).
 type Usage struct {
 	File      string           `yaml:"file"`       // where to persist aggregates (empty = in-memory only)
-	Pricing   map[string]Price `yaml:"pricing"`    // model -> cost per 1M tokens
+	Pricing   map[string]Price `yaml:"pricing"`    // model -> cost per 1M tokens + per-request fee
 	RecentLog int              `yaml:"recent_log"` // # of recent per-request events kept in memory (0 = default 1000)
 }
 
-// Price is per-model cost per 1,000,000 tokens.
+// Price is per-model cost: Input/Output per 1,000,000 tokens, Request a flat
+// fee per successful request (e.g. a web-search charge). A cost the upstream
+// reports itself (Perplexity's usage.cost) takes precedence over all three.
 type Price struct {
-	Input  float64 `yaml:"input"`
-	Output float64 `yaml:"output"`
+	Input   float64 `yaml:"input"`
+	Output  float64 `yaml:"output"`
+	Request float64 `yaml:"request"`
 }
 
 // Server holds HTTP listener settings.
