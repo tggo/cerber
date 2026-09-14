@@ -34,6 +34,7 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | Gemini | ✅ | api_key (OpenAI↔Gemini translate) |
 | Grok / xAI | ✅ | api_key + OAuth (Grok Build / SuperGrok subscription, device flow) |
 | ArliAI | ✅ | api_key (OpenAI-compatible passthrough; models via discovery) |
+| Perplexity | ✅ | api_key (sonar* chat at /chat/completions; Agent API models via discovery on /v1/responses; Search API as /v1/search) |
 | Ollama / vLLM (local) | ✅ | keyless (OpenAI-compatible passthrough) |
 | Codex, Kimi, Vertex, Antigravity, Gemini-CLI OAuth, OpenRouter | ❌ | |
 

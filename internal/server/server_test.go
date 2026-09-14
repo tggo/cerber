@@ -853,6 +853,7 @@ func TestRoute(t *testing.T) {
 		"chatgpt-x":         "openai",
 		"gemini-2.5-flash":  "gemini",
 		"grok-2":            "grok",
+		"sonar-pro":         "perplexity",
 		"custom-model":      "openai", // config override
 		"llama3.1":          "ollama", // config override (arbitrary model name)
 		"claude-3-5-haiku":  "anthropic",
@@ -1251,6 +1252,7 @@ func TestLLMDoc(t *testing.T) {
 		"X-Cerber-Fallback", "402", "429", "/docs", // fallback + governance + docs link
 		"Tool/function calling is translated for every provider", // no longer a gap
 		"X-Cerber-Compat", "`raw`", "`force`", "max_completion_tokens", // compatibility mode
+		"/v1/search", "sonar*", "citations", // perplexity: web search endpoint + web-grounded chat
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("llm.md missing %q\n%s", want, body)

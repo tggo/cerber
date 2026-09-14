@@ -44,6 +44,12 @@ usage:
     gemini-2.5-flash:       { input: 0.3,  output: 2.5 }
     gemini-2.5-pro:         { input: 1.25, output: 10 }
     gemini-2.0-flash:       { input: 0.1,  output: 0.4 }
+    # Perplexity Sonar — token price only; the per-request search fee
+    # ($5–14 / 1k requests by search_context_size) isn't modelled.
+    sonar-deep-research:    { input: 2,    output: 8 }
+    sonar-reasoning-pro:    { input: 2,    output: 8 }
+    sonar-pro:              { input: 3,    output: 15 }
+    sonar:                  { input: 1,    output: 1 }
 
 access:
   # No keyless localhost: the nginx vhost injects the client key for LAN/WG
@@ -55,7 +61,7 @@ access:
 
 providers:
   # /v1/chat/completions routes by model: gpt*/o1*/o3*/o4*/chatgpt* -> openai,
-  # gemini* -> gemini, grok* -> grok, configured prefixes below -> ollama,
+  # gemini* -> gemini, grok* -> grok, sonar* -> perplexity, configured prefixes below -> ollama,
   # everything else -> anthropic.
   anthropic: {}        # credentials come from auth_dir (OAuth)
 
@@ -75,6 +81,10 @@ providers:
     concurrency: 2                          # plan limit: 2 concurrent streams (upgraded 2026-06-23 from 1). Extra requests queue.
     credentials:
       - { type: api_key, name: arliai, key: "${ARLIAI_API_KEY}" }
+
+  perplexity:                               # api.perplexity.ai: sonar* chat (web-grounded), agent models on /v1/responses, POST /v1/search
+    credentials:
+      - { type: api_key, name: perplexity, key: "${PERPLEXITY_API_KEY}" }
 
   ollama:                                   # local models on gpu0 (HomeOffice, via WG)
     base_url: "http://192.168.89.233:11434"

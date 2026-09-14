@@ -335,6 +335,28 @@ func TestParse_ArliAINoCreds(t *testing.T) {
 	}
 }
 
+func TestParse_PerplexityDefaults(t *testing.T) {
+	y := "access: {keys: [k]}\nproviders: {perplexity: {credentials: [{type: api_key, key: x}]}, routing: [{prefix: sonar, provider: perplexity}]}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Providers.Perplexity == nil {
+		t.Fatal("perplexity should be set")
+	}
+	if c.Providers.Perplexity.BaseURL != defaultPerplexityBase || c.Providers.Perplexity.Timeout.Std() != defaultProviderWaitNS {
+		t.Errorf("perplexity defaults = %+v", c.Providers.Perplexity)
+	}
+}
+
+func TestParse_PerplexityNoCreds(t *testing.T) {
+	// Perplexity requires a key: an empty credential list is rejected.
+	y := "access: {keys: [k]}\nproviders: {perplexity: {credentials: []}}"
+	if _, err := Parse([]byte(y)); err == nil {
+		t.Fatal("expected error for perplexity with no credentials")
+	}
+}
+
 func TestParse_OllamaDefaultsNoCreds(t *testing.T) {
 	// Local ollama needs no key: an empty credential list is valid, and it can
 	// be the only configured provider.

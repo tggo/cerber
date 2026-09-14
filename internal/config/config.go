@@ -109,15 +109,16 @@ func validKeyPeriod(p string) bool {
 // are reachable; a nil entry means the provider is disabled. Routing maps model
 // name prefixes to a provider on the OpenAI-compatible endpoint.
 type Providers struct {
-	Anthropic *Anthropic `yaml:"anthropic"`
-	OpenAI    *OpenAI    `yaml:"openai"`
-	Gemini    *Gemini    `yaml:"gemini"`
-	Grok      *Grok      `yaml:"grok"`
-	ArliAI    *ArliAI    `yaml:"arliai"`
-	Ollama    *Ollama    `yaml:"ollama"`
-	Routing   []Route    `yaml:"routing"`
-	Fallbacks []Fallback `yaml:"fallbacks"` // cross-provider/model fallback chains (OpenAI endpoint)
-	Strategy  string     `yaml:"strategy"`  // credential selection: "round-robin" (default) | "fill-first"
+	Anthropic  *Anthropic  `yaml:"anthropic"`
+	OpenAI     *OpenAI     `yaml:"openai"`
+	Gemini     *Gemini     `yaml:"gemini"`
+	Grok       *Grok       `yaml:"grok"`
+	ArliAI     *ArliAI     `yaml:"arliai"`
+	Perplexity *Perplexity `yaml:"perplexity"`
+	Ollama     *Ollama     `yaml:"ollama"`
+	Routing    []Route     `yaml:"routing"`
+	Fallbacks  []Fallback  `yaml:"fallbacks"` // cross-provider/model fallback chains (OpenAI endpoint)
+	Strategy   string      `yaml:"strategy"`  // credential selection: "round-robin" (default) | "fill-first"
 	// ModelAliases maps a stable client-facing model name to the canonical model
 	// a provider actually serves (e.g. "opus" -> "claude-opus-4-20250514"). The
 	// alias is resolved before routing and before the request reaches upstream.
@@ -125,7 +126,7 @@ type Providers struct {
 }
 
 // Route maps a model-name prefix to a provider name
-// (anthropic|openai|gemini|grok|arliai|ollama).
+// (anthropic|openai|gemini|grok|arliai|perplexity|ollama).
 type Route struct {
 	Prefix   string `yaml:"prefix"`
 	Provider string `yaml:"provider"`
@@ -196,6 +197,17 @@ type ArliAI struct {
 	// plan's allowed concurrent streams (default 1; raise when more are bought).
 	// Requests beyond the cap queue until an in-flight one releases its slot.
 	Concurrency int `yaml:"concurrency"`
+}
+
+// Perplexity configures the Perplexity upstream (https://api.perplexity.ai).
+// Sonar models (sonar*) are served on /chat/completions (no /v1 prefix) and
+// routed by the built-in sonar* prefix; Agent API models (openai/gpt-5, …) are
+// discovered via /v1/models and served on /v1/responses. The raw web-search
+// API backs cerber's /v1/search.
+type Perplexity struct {
+	BaseURL     string       `yaml:"base_url"`
+	Timeout     Duration     `yaml:"timeout"`
+	Credentials []Credential `yaml:"credentials"`
 }
 
 // Ollama configures a local ollama/vLLM upstream, which is OpenAI-compatible.
@@ -299,6 +311,7 @@ const (
 	defaultGeminiBase      = "https://generativelanguage.googleapis.com"
 	defaultGrokBase        = "https://api.x.ai"
 	defaultArliAIBase      = "https://api.arliai.com"
+	defaultPerplexityBase  = "https://api.perplexity.ai"
 	// defaultArliAIConcurrency matches the entry ArliAI plan: one concurrent
 	// stream. Raise via providers.arliai.concurrency when more are purchased.
 	defaultArliAIConcurrency = 1
@@ -442,6 +455,14 @@ func (c *Config) applyDefaults() {
 			a.Concurrency = defaultArliAIConcurrency
 		}
 	}
+	if px := c.Providers.Perplexity; px != nil {
+		if px.BaseURL == "" {
+			px.BaseURL = defaultPerplexityBase
+		}
+		if px.Timeout == 0 {
+			px.Timeout = Duration(defaultProviderWaitNS)
+		}
+	}
 	if o := c.Providers.Ollama; o != nil {
 		if o.BaseURL == "" {
 			o.BaseURL = defaultOllamaBase
@@ -472,7 +493,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: access.default_key_limits period must be minute|hour|day|week|month")
 	}
 	p := c.Providers
-	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.ArliAI == nil && p.Ollama == nil {
+	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.ArliAI == nil && p.Perplexity == nil && p.Ollama == nil {
 		return fmt.Errorf("config: no providers configured")
 	}
 	if p.Anthropic != nil {
@@ -516,6 +537,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: providers.arliai.concurrency must be >= 0 (0 = default 1), got %d", p.ArliAI.Concurrency)
 		}
 	}
+	if p.Perplexity != nil {
+		if err := validateCreds("perplexity", p.Perplexity.BaseURL, p.Perplexity.Credentials, true); err != nil {
+			return err
+		}
+	}
 	if p.Ollama != nil {
 		// Local ollama/vLLM needs no key: credentials are optional.
 		if err := validateCreds("ollama", p.Ollama.BaseURL, p.Ollama.Credentials, false); err != nil {
@@ -545,9 +571,9 @@ func (c *Config) Validate() error {
 	}
 	for i, r := range p.Routing {
 		switch r.Provider {
-		case "anthropic", "openai", "gemini", "grok", "arliai", "ollama":
+		case "anthropic", "openai", "gemini", "grok", "arliai", "perplexity", "ollama":
 		default:
-			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini|grok|arliai|ollama", i, r.Provider)
+			return fmt.Errorf("config: providers.routing[%d].provider %q is not anthropic|openai|gemini|grok|arliai|perplexity|ollama", i, r.Provider)
 		}
 		if strings.TrimSpace(r.Prefix) == "" {
 			return fmt.Errorf("config: providers.routing[%d].prefix is empty", i)

@@ -227,6 +227,17 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `providers.arliai.concurrency` (default 1; must be >= 0, 0 → 1) caps simultaneous in-flight requests to ArliAI to match the plan's allowed concurrent streams. A slot is held for the whole request — including while the client streams the response body — and released when the body is closed; requests beyond the cap queue (FIFO-ish) and a queued request whose client disconnects drops out without hitting upstream. Raise the value when more streams are purchased (e.g. 6).
 **Verified:** reuses `internal/provider/openai` + config arliai tests (defaults/no-creds/concurrency) + openai concurrency tests (serialise-until-body-closed, queued-ctx-cancel, unlimited) `-race` — 2026-06-14.
 
+
+## Perplexity provider + /v1/search
+**What:** Perplexity (https://api.perplexity.ai) as an upstream — web-grounded Sonar chat, its Agent API models, and a raw web-search endpoint.
+**DoD:**
+- `providers.perplexity` config (base_url default `https://api.perplexity.ai`, api_key required); `perplexity` valid in `routing`.
+- `/v1/chat/completions` with `sonar*` (built-in prefix: `sonar`, `sonar-pro`, `sonar-reasoning-pro`, `sonar-deep-research`) → Perplexity `POST /chat/completions` (no `/v1`; Bearer key, credential rotation, streaming). Response relayed unchanged, incl. Perplexity's extra `citations` / `search_results`; Perplexity-only request fields (`search_domain_filter`, `search_recency_filter`, `web_search_options`, …) pass through.
+- Agent API models (`openai/gpt-5-mini`, `anthropic/claude-sonnet-5`, `perplexity/sonar`, …) are discovered via `GET /v1/models` and routed by exact name; they work on `/v1/responses` (upstream `/v1/responses`), not on chat completions (upstream 400 relayed).
+- `POST /v1/search` (client-key auth like the API) → Perplexity `POST /search`, body passed through unchanged, ranked results relayed. Body must be JSON with a non-empty `query` (string or array) else 400; Perplexity not configured → 501; upstream 4xx relayed; 401/429 rotate keys (all exhausted → 502). Recorded in usage as model `perplexity-search` (request count, no tokens).
+- `/llm.md` and `/docs` list `/v1/search`, the `sonar*` route and the chat-vs-responses split.
+- Cost: Sonar token prices in `usage.pricing`; Perplexity's per-request search fee is not modelled.
+**Verified:** openai `WithChatPath` test, server tests (sonar route + chat path, /v1/search forward/errors/auth, llm.md), config tests, live smoke against api.perplexity.ai via cerber — 2026-09-14.
 ## Access — allow_localhost
 **What:** optional open access for loopback clients, so a local Claude Code (which sends its own token) can use cerber without a matching key.
 **DoD:**

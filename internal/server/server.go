@@ -241,7 +241,8 @@ func (s *Server) SetUpstreamProxy(target *url.URL, transport http.RoundTripper, 
 
 // route returns the provider name a model should go to on the OpenAI endpoint.
 // Order: configured prefixes, then discovered models, then built-in prefixes
-// (gpt*/o*→openai, gemini*→gemini, grok*→grok, claude*→anthropic). An unknown
+// (gpt*/o*→openai, gemini*→gemini, grok*→grok, sonar*→perplexity,
+// claude*→anthropic). An unknown
 // model returns "" so the caller can reject it instead of silently using
 // Anthropic.
 func (s *Server) route(model string) string {
@@ -265,6 +266,8 @@ func (s *Server) route(model string) string {
 		return "gemini"
 	case strings.HasPrefix(model, "grok"):
 		return "grok"
+	case strings.HasPrefix(model, "sonar"):
+		return "perplexity"
 	case strings.HasPrefix(model, "claude"):
 		return "anthropic"
 	default:
@@ -299,6 +302,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/embeddings", s.handleForward("/v1/embeddings"))
 	mux.HandleFunc("POST /v1/completions", s.handleForward("/v1/completions"))
 	mux.HandleFunc("POST /v1/responses", s.handleForward("/v1/responses"))
+	mux.HandleFunc("POST /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
 	mux.HandleFunc("GET /admin/requests", s.handleRequestsLog)
@@ -836,9 +840,15 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- `POST /v1/embeddings` — OpenAI embeddings (passthrough to the provider serving the model).\n")
 	fmt.Fprintf(&b, "- `POST /v1/completions` — legacy OpenAI text completions (passthrough).\n")
 	fmt.Fprintf(&b, "- `POST /v1/responses` — OpenAI Responses API (passthrough; supports streaming).\n")
+	fmt.Fprintf(&b, "- `POST /v1/search` — raw web search via Perplexity: body `{\"query\":\"...\",\"max_results\":5}` (`query` may be an array for multi-query; optional `search_domain_filter`, `search_recency_filter`, `country`, `max_tokens_per_page`). Returns `{\"results\":[{\"title\",\"url\",\"snippet\",\"date\",\"last_updated\"}]}` — ranked pages, no LLM answer. No `model` field. 501 if Perplexity isn't configured.\n")
 	fmt.Fprintf(&b, "- `GET /v1/models` — list available model ids (use these exact strings as `model`).\n")
 	fmt.Fprintf(&b, "- `GET /llm.md` — this document. `GET /docs` — full HTML reference of every mechanic.\n\n")
-	fmt.Fprintf(&b, "Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama), not Anthropic; an unsupported model → 400/501.\n\n")
+	fmt.Fprintf(&b, "Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/Perplexity/ollama), not Anthropic; an unsupported model → 400/501.\n\n")
+
+	fmt.Fprintf(&b, "## Web-grounded answers (Perplexity)\n\n")
+	fmt.Fprintf(&b, "- `sonar`, `sonar-pro`, `sonar-reasoning-pro`, `sonar-deep-research` on `POST /v1/chat/completions` answer from a live web search. The response is standard OpenAI chat plus extra top-level `citations` (URL list) and `search_results` (`title`/`url`/`date`/`snippet`); `[1]`-style markers in the text index into `citations`. Perplexity-only request fields pass through: `search_domain_filter`, `search_recency_filter` (`hour|day|week|month|year`), `return_images`, `return_related_questions`, `web_search_options.search_context_size` (`low|medium|high`). Sonar has no tool calling; `max_tokens` must be ≥ 16.\n")
+	fmt.Fprintf(&b, "- Perplexity Agent API models (names with a vendor prefix, e.g. `openai/gpt-5-mini`, `anthropic/claude-sonnet-5`, `perplexity/sonar`; see the perplexity list below) work **only on `POST /v1/responses`**, not on chat completions. Add `\"tools\":[{\"type\":\"web_search\"}]` to let them search.\n")
+	fmt.Fprintf(&b, "- Just need links, not an answer? Use `POST /v1/search` (cheaper, no generation).\n\n")
 
 	fmt.Fprintf(&b, "## Recommended models\n\n")
 	fmt.Fprintf(&b, "- Default: `claude-sonnet-5` (strong; works on both endpoints, tool calling included).\n")
@@ -892,6 +902,7 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- `gpt*`, `o1*`, `o3*`, `o4*`, `chatgpt*` → OpenAI\n")
 	fmt.Fprintf(&b, "- `gemini*` → Gemini\n")
 	fmt.Fprintf(&b, "- `grok*` → xAI (Grok)\n")
+	fmt.Fprintf(&b, "- `sonar*` → Perplexity (web-grounded)\n")
 	fmt.Fprintf(&b, "- `claude*` → Anthropic (Claude)\n")
 	fmt.Fprintf(&b, "- the local models listed below → ollama\n")
 	fmt.Fprintf(&b, "- anything else → 400 (unknown model)\n\n")
@@ -929,6 +940,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "```sh\ncurl %s/v1/messages \\\n  -H 'Authorization: Bearer $KEY' -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"claude-sonnet-5\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n", base)
 	fmt.Fprintf(&b, "OpenAI Python SDK:\n\n")
 	fmt.Fprintf(&b, "```python\nfrom openai import OpenAI\nclient = OpenAI(base_url=\"%s/v1\", api_key=\"$KEY\")\nclient.chat.completions.create(model=\"claude-sonnet-5\", messages=[{\"role\":\"user\",\"content\":\"hi\"}])\n```\n\n", base)
+	fmt.Fprintf(&b, "Web search (curl):\n\n")
+	fmt.Fprintf(&b, "```sh\ncurl %s/v1/search \\\n  -H 'Authorization: Bearer $KEY' -H 'Content-Type: application/json' \\\n  -d '{\"query\":\"go 1.26 release notes\",\"max_results\":5}'\n```\n\n", base)
 	fmt.Fprintf(&b, "Streaming is supported on both endpoints (`\"stream\": true`).\n")
 
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
@@ -1009,6 +1022,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 		{"POST", "/v1/completions", "OpenAI", "Legacy text completions, passthrough."},
 		{"POST", "/v1/responses", "OpenAI", "Responses API, passthrough (streaming)."},
 		{"POST", "/v1/images/generations", "OpenAI", "Image generation (e.g. grok-imagine-*, gpt-image-*)."},
+		{"POST", "/v1/search", "Perplexity", "Raw web search (ranked title/url/snippet results, no LLM answer). Body {query, max_results, search_domain_filter, search_recency_filter, country}. 501 when Perplexity isn't configured."},
 		{"GET", "/v1/models", "OpenAI", "List discovered model ids per provider."},
 		{"GET", "/llm.md", "—", "Concise agent-facing usage guide (markdown)."},
 		{"GET", "/docs", "—", "This reference."},
@@ -1016,7 +1030,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	} {
 		p(`<tr><td><span class="method">%s</span> <code>%s</code></td><td>%s</td><td>%s</td></tr>`, e.m, e.path, e.dia, e.desc)
 	}
-	p(`</table><p class="mut">Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/ollama). A model that routes to Anthropic, or an unknown model, → <code>400</code>; a provider lacking the capability → <code>501</code>.</p>`)
+	p(`</table><p class="mut">Embeddings/completions/responses are served only by OpenAI-compatible providers (OpenAI/Grok/Perplexity/ollama). Perplexity Agent API models (<code>openai/gpt-5-mini</code>, <code>anthropic/…</code>) work only on <code>/v1/responses</code>; <code>sonar*</code> works on chat completions and returns <code>citations</code> + <code>search_results</code>. A model that routes to Anthropic, or an unknown model, → <code>400</code>; a provider lacking the capability → <code>501</code>.</p>`)
 
 	// Dialects
 	p(`<h2 id="dialects">Two dialects, one gateway</h2>`)
@@ -1025,7 +1039,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	// Routing + aliases
 	p(`<h2 id="routing">Model routing &amp; aliases</h2>`)
 	p(`<p>Just set <code>model</code>; cerber routes by name:</p><table><tr><th>Model prefix</th><th>Provider</th></tr>`)
-	for _, rr := range [][2]string{{"gpt*, o1*, o3*, o4*, chatgpt*", "OpenAI"}, {"gemini*", "Gemini"}, {"grok*", "xAI (Grok)"}, {"claude*", "Anthropic"}, {"(discovered local names)", "ollama / vLLM"}} {
+	for _, rr := range [][2]string{{"gpt*, o1*, o3*, o4*, chatgpt*", "OpenAI"}, {"gemini*", "Gemini"}, {"grok*", "xAI (Grok)"}, {"sonar*", "Perplexity"}, {"claude*", "Anthropic"}, {"(discovered local names)", "ollama / vLLM"}} {
 		p(`<tr><td><code>%s</code></td><td>%s</td></tr>`, rr[0], rr[1])
 	}
 	p(`</table><p class="mut">Configured <code>routing</code> prefixes and discovered model names take precedence; an unmatched model → <code>400</code>.</p>`)
@@ -1583,6 +1597,51 @@ func (s *Server) handleForward(subpath string) http.HandlerFunc {
 		}
 		s.relayChatter(w, r, resp, target, model, stream)
 	}
+}
+
+// searchProvider is the provider behind POST /v1/search. Only Perplexity
+// exposes a raw web-search API today.
+const searchProvider = "perplexity"
+
+// searchUpstreamPath is Perplexity's Search API path (no /v1 prefix).
+const searchUpstreamPath = "/search"
+
+// handleSearch passes a web-search request ({"query": ..., "max_results": ...})
+// through to Perplexity's Search API with credential rotation and relays the
+// ranked results unchanged. Not model-routed: 501 when Perplexity isn't
+// configured. Recorded as a request (no tokens) under the model name
+// "perplexity-search".
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	tagProvider(r.Context(), searchProvider)
+	const model = "perplexity-search"
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var probe struct {
+		Query json.RawMessage `json:"query"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil || len(probe.Query) == 0 || string(probe.Query) == `""` || string(probe.Query) == "null" {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusBadRequest, `search: body must be JSON with a non-empty "query" (string or array of strings)`)
+		return
+	}
+	fwd, ok := s.chatters[searchProvider].(provider.Forwarder)
+	if !ok {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusNotImplemented, "search: provider perplexity is not configured")
+		return
+	}
+	resp, err := fwd.Forward(r.Context(), searchUpstreamPath, body, false, r.Header)
+	if err != nil {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeUpstreamError(w, err)
+		return
+	}
+	s.relayChatter(w, r, resp, searchProvider, model, false)
 }
 
 // handleCountTokens proxies Anthropic's /v1/messages/count_tokens through the

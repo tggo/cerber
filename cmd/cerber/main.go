@@ -325,6 +325,21 @@ func main() {
 		logger.Info("arliai provider enabled", zap.Int("credentials", astore.Len()), zap.Int("concurrency", a.Concurrency))
 	}
 
+	// Perplexity (https://api.perplexity.ai) is OpenAI-compatible, but serves
+	// Sonar chat at /chat/completions (no /v1). sonar* routes here by built-in
+	// prefix; Agent API models (openai/gpt-5, …) are discovered via /v1/models and
+	// served on /v1/responses; its Search API backs cerber's POST /v1/search.
+	if px := cfg.Providers.Perplexity; px != nil {
+		pstore, err := credential.NewStore(px.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		if err != nil {
+			logger.Fatal("perplexity credentials", zap.Error(err))
+		}
+		srv.RegisterChatter(openai.New("perplexity", px.BaseURL, pstore, newUpstreamClient(px.Timeout.Std()),
+			openai.WithChatPath("/chat/completions"), openai.WithQueueMetrics(srv.Metrics())))
+		srv.RegisterProviderStore("perplexity", pstore)
+		logger.Info("perplexity provider enabled", zap.Int("credentials", pstore.Len()))
+	}
+
 	// Grok = config API keys + xAI OAuth (Grok Build / SuperGrok subscription)
 	// tokens written by --xai-login to auth_dir/xai. Enable the provider if either
 	// is present.

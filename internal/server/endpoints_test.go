@@ -33,6 +33,104 @@ func openaiProvider(t *testing.T, status int, respBody string, urlOut *string) *
 	return openai.New("openai", "https://api.openai.com", st, doer)
 }
 
+// perplexityProvider is openaiProvider named "perplexity" on api.perplexity.ai,
+// capturing the last upstream URL and request body.
+func perplexityProvider(t *testing.T, status int, respBody string, urlOut, bodyOut *string) *openai.Provider {
+	t.Helper()
+	doer := provmocks.NewHTTPDoer(t)
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		*urlOut = r.URL.String()
+		b, _ := io.ReadAll(r.Body)
+		*bodyOut = string(b)
+		h := http.Header{"Content-Type": {"application/json"}}
+		return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(respBody))}, nil
+	}).Maybe()
+	st, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "px", Key: "pplx"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return openai.New("perplexity", "https://api.perplexity.ai", st, doer, openai.WithChatPath("/chat/completions"))
+}
+
+func TestSearch_ForwardsToPerplexity(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	var gotURL, gotBody string
+	s.RegisterChatter(perplexityProvider(t, 200, `{"results":[{"title":"Go","url":"https://go.dev"}]}`, &gotURL, &gotBody))
+	in := `{"query":"go 1.26","max_results":3}`
+	rec := do(t, s.Handler(), "POST", "/v1/search", in, clientKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/search = %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotURL != "https://api.perplexity.ai/search" {
+		t.Errorf("upstream url = %q", gotURL)
+	}
+	if gotBody != in {
+		t.Errorf("upstream body = %q, want passthrough", gotBody)
+	}
+	if !strings.Contains(rec.Body.String(), "https://go.dev") {
+		t.Errorf("body = %q", rec.Body.String())
+	}
+	var searches int64
+	for _, e := range s.Usage().Snapshot().ByModel {
+		if e.Name == "perplexity-search" {
+			searches = e.Requests
+		}
+	}
+	if searches != 1 {
+		t.Errorf("perplexity-search requests = %d, want 1", searches)
+	}
+}
+
+func TestSearch_Errors(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		configured bool
+		upstream   int
+		want       int
+	}{
+		{"not configured", `{"query":"x"}`, false, 0, http.StatusNotImplemented},
+		{"invalid json", `{`, true, 0, http.StatusBadRequest},
+		{"missing query", `{"max_results":3}`, true, 0, http.StatusBadRequest},
+		{"empty query", `{"query":""}`, true, 0, http.StatusBadRequest},
+		{"upstream 400 relayed", `{"query":"x"}`, true, 400, http.StatusBadRequest},
+		{"upstream 401 exhausts keys", `{"query":"x"}`, true, 401, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newServer(t, newStore(t, 1))
+			if tc.configured {
+				var u, b string
+				s.RegisterChatter(perplexityProvider(t, tc.upstream, `{"error":"nope"}`, &u, &b))
+			}
+			if rec := do(t, s.Handler(), "POST", "/v1/search", tc.body, clientKey); rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSearch_RequiresAuth(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	if rec := do(t, s.Handler(), "POST", "/v1/search", `{"query":"x"}`, "wrong-key"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated search = %d, want 401", rec.Code)
+	}
+}
+
+func TestSonarChat_RoutesToPerplexityChatPath(t *testing.T) {
+	s, _ := newServer(t, newStore(t, 1))
+	var gotURL, gotBody string
+	s.RegisterChatter(perplexityProvider(t, 200, `{"object":"chat.completion","citations":["https://go.dev"],"usage":{"prompt_tokens":3,"completion_tokens":4}}`, &gotURL, &gotBody))
+	rec := do(t, s.Handler(), "POST", "/v1/chat/completions", `{"model":"sonar","messages":[{"role":"user","content":"hi"}]}`, clientKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sonar chat = %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotURL != "https://api.perplexity.ai/chat/completions" {
+		t.Errorf("upstream url = %q", gotURL)
+	}
+	if !strings.Contains(rec.Body.String(), "citations") {
+		t.Errorf("citations not relayed: %s", rec.Body.String())
+	}
+}
+
 func TestForwardEndpoints_RouteToProvider(t *testing.T) {
 	for _, tc := range []struct {
 		path    string

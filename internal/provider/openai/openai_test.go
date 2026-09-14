@@ -72,6 +72,25 @@ func TestChat_Passthrough(t *testing.T) {
 	}
 }
 
+func TestChat_CustomChatPath(t *testing.T) {
+	// Perplexity serves chat at /chat/completions (no /v1 prefix).
+	doer := mocks.NewHTTPDoer(t)
+	var captured *http.Request
+	doer.EXPECT().Do(mock.Anything).RunAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return resp(200, `{}`), nil
+	})
+	p := New("perplexity", "https://api.perplexity.ai", store(t, "pplx"), doer, WithChatPath("/chat/completions"), WithChatPath(""))
+	out, err := p.Chat(context.Background(), []byte(`{"model":"sonar"}`), false, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	defer out.Body.Close()
+	if captured.URL.String() != "https://api.perplexity.ai/chat/completions" {
+		t.Errorf("url = %s", captured.URL)
+	}
+}
+
 func TestForward_Passthrough(t *testing.T) {
 	doer := mocks.NewHTTPDoer(t)
 	var captured *http.Request

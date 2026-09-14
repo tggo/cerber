@@ -50,6 +50,7 @@ type Provider struct {
 	store    *credential.Store
 	http     provider.HTTPDoer
 	cooldown time.Duration
+	chatPath string // ChatPath unless overridden by WithChatPath
 
 	// hosts is the ordered upstream list: primary first, then failover targets
 	// (e.g. a second ollama box). On a transport error or 5xx from one host the
@@ -155,6 +156,16 @@ func WithTransportPenaltyDisabled() Option {
 	return func(p *Provider) { p.penalizeTransport = false }
 }
 
+// WithChatPath overrides the chat-completions sub-path for an upstream that
+// doesn't serve it under /v1 (e.g. Perplexity: /chat/completions).
+func WithChatPath(path string) Option {
+	return func(p *Provider) {
+		if path != "" {
+			p.chatPath = path
+		}
+	}
+}
+
 // New builds a Provider with the given name (e.g. "openai", "grok") and base URL
 // (e.g. https://api.openai.com, https://api.x.ai).
 func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer, opts ...Option) *Provider {
@@ -164,6 +175,7 @@ func New(name, baseURL string, store *credential.Store, doer provider.HTTPDoer, 
 		store:             store,
 		http:              doer,
 		cooldown:          defaultCooldown,
+		chatPath:          ChatPath,
 		penalizeTransport: true,
 	}
 	for _, opt := range opts {
@@ -455,7 +467,7 @@ func (p *Provider) Chat(ctx context.Context, body []byte, stream bool, clientHea
 	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
 	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
 		return p.sendHosts(ctx, func(base string) (*http.Request, error) {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+ChatPath, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+p.chatPath, bytes.NewReader(body))
 			if err != nil {
 				return nil, fmt.Errorf("openai: build request: %w", err)
 			}
