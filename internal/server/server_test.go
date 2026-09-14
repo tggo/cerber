@@ -664,7 +664,10 @@ func TestMetricsAndDashboardServed(t *testing.T) {
 	// The client-keys table must surface each key's governance budget: without it a
 	// key silently walks into its cap and every call starts failing with 402 with
 	// nothing in the UI to explain why.
-	for _, want := range []string{"<th>budget</th>", "function budgetCell", "AT CAP"} {
+	// The accounts table shows both Anthropic unified windows: the weekly cap is the
+	// one that silently locks a subscription for days once it's spent.
+	for _, want := range []string{"<th>budget</th>", "function budgetCell", "AT CAP",
+		"<th>5h quota</th><th>7d quota</th>", `quotaCell(a.quota, "seven_day", "7d")`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("dashboard missing %q", want)
 		}

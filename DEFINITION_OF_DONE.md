@@ -284,7 +284,7 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - `/admin/accounts` includes each account's quota (5h/7d utilization/status/reset) captured passively from Anthropic rate-limit headers.
 - `providers.strategy: fill-first` drains one credential before the next (default round-robin).
 - `access.management_key`, when set, gates `/admin/*` (Bearer/x-api-key/X-Cerber-Management) instead of client keys.
-- Dashboard shows a total-cost card, a per-model **cost** column in the "by model" table, and an accounts table with enable/disable buttons and 5h quota.
+- Dashboard shows a total-cost card, a per-model **cost** column in the "by model" table, and an accounts table with enable/disable buttons and **5h + 7d quota** columns: utilization % with a bar (amber from 80% or an Anthropic `*warning` status, red + a `limited` flag at 100% or a `rejected` status; the % is floored and capped at 99 below that so `100%` only means limited), tooltip with status, reset time + countdown and when it was captured; a reading older than 1h is dimmed (only requests through that account refresh it); a window whose reset time has passed shows `reset` rather than a stale %; `—` for accounts with no quota data. The table scrolls inside its own box on narrow viewports.
 **Verified:** `internal/usage` (Save/Load/cost), `internal/quota` (100%), `internal/credential` (fill-first), `internal/server` (management key) tests — 2026-06-08.
 
 ## Analytics (time-series) + embedded UI

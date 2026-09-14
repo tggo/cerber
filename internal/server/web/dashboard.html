@@ -76,6 +76,15 @@
   #keys th, #keys td { padding-left:9px; padding-right:9px; }
   #keys td:first-child, #keys th:first-child { padding-left:14px; }
   #keys td:last-child, #keys th:last-child { padding-right:14px; }
+  /* Accounts: with two quota columns the row is tight; keep the headers and the
+     short kind / key / state cells on one line and let only the name wrap. */
+  #accounts th, #accounts td:nth-child(3), #accounts td:nth-child(4),
+  #accounts td:nth-child(5) { white-space:nowrap; }
+  #accounts th, #accounts td { padding-left:9px; padding-right:9px; }
+  #accounts td:first-child, #accounts th:first-child { padding-left:14px; }
+  #accounts td:last-child, #accounts th:last-child { padding-right:14px; }
+  /* A quota reading older than an hour may not reflect the subscription anymore. */
+  td .budget.stale { opacity:.55; }
   /* Wide tables scroll inside their own box rather than pushing the document
      sideways on a narrow viewport. #keys still resolves — the id stays on the
      table, the wrapper only clips it. */
@@ -121,7 +130,7 @@
   <div class="cards" id="cards"></div>
   <section><h2>requests / hour (last 48h)</h2><div id="chart" class="chart"></div></section>
   <section><h2>providers</h2><table id="providers"></table></section>
-  <section><h2>accounts (credentials)</h2><table id="accounts"></table></section>
+  <section><h2>accounts (credentials)</h2><div class="tscroll"><table id="accounts"></table></div></section>
   <section>
     <h2>client keys <span class="sub-note">— spend = selected range · budget = the key's own rolling limit window</span></h2>
     <div class="keybar">
@@ -405,14 +414,55 @@
   });
   $("reqMore").addEventListener("click", () => loadRequests(false));
 
+  // quotaCell renders one Anthropic unified rate-limit window (5h or 7d) captured
+  // from response headers: utilization % plus a bar, amber from 80% or when
+  // Anthropic flags a warning, red at 100% or when it rejects. The numbers are as
+  // of the last request on that account, so a window whose reset time has passed
+  // is shown as reset instead of a stale percentage.
+  function quotaCell(q, key, label) {
+    const w = q && q[key];
+    if (!w || (!w.status && !w.utilization && !w.reset_unix)) return `<span class="muted">—</span>`;
+    const now = Date.now() / 1000;
+    const util = w.utilization || 0, status = w.status || "";
+    const over = util >= 1 || /reject/.test(status);
+    const warn = !over && (util >= 0.8 || /warn/.test(status));
+    // Floor and cap at 99 like budgetCell, so "100%" only ever means limited.
+    const pct = over ? 100 : Math.min(99, Math.floor(util * 100));
+    const tip = [`${label} window: ${Math.floor(util * 100)}% used` + (status ? ` (${status})` : "")];
+    if (over) tip.push("LIMITED — Anthropic rejects this window until it resets");
+    const secs = w.reset_unix ? w.reset_unix - now : 0;
+    if (w.reset_unix) {
+      const mins = Math.ceil(secs / 60);
+      const left = mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor(mins % 1440 / 60)}h`
+        : mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
+      tip.push(secs > 0 ? `resets ${new Date(w.reset_unix * 1000).toLocaleString()} (in ${left})`
+        : `reset at ${new Date(w.reset_unix * 1000).toLocaleString()}`);
+    }
+    // Only requests through this account refresh the numbers; usage elsewhere on
+    // the same subscription (claude.ai, other tools) isn't seen. Dim old readings.
+    const age = q.updated_unix ? now - q.updated_unix : 0;
+    if (q.updated_unix) {
+      const ago = age >= 3600 ? `${Math.floor(age / 3600)}h ago` : age >= 60 ? `${Math.floor(age / 60)}m ago` : "just now";
+      tip.push(`as of the last request through this account, ${new Date(q.updated_unix * 1000).toLocaleString()} (${ago})`);
+    }
+    const t = esc(tip.join("\n"));
+    if (w.reset_unix && secs <= 0) {
+      return `<span class="muted hint" tabindex="0" title="${t}" aria-label="${t}">reset</span>`;
+    }
+    const cls = [over ? "over" : warn ? "warn" : "", age > 3600 ? "stale" : ""].join(" ");
+    const flag = over ? ` <span class="flag">limited</span>` : "";
+    const width = util > 0 ? Math.max(pct, 2) : 0;
+    return `<span class="budget ${cls}" tabindex="0" title="${t}" aria-label="${t}">
+      <span class="n">${pct}%${flag}</span><span class="bar"><i style="width:${width}%"></i></span></span>`;
+  }
+
   async function loadAccounts() {
     try {
       const r = await fetch("/admin/accounts", { headers: authHeaders() });
       if (!r.ok) { $("accounts").innerHTML = `<tr><td class="muted">accounts: HTTP ${r.status}</td></tr>`; return; }
       const d = await r.json();
-      const head = "<tr><th>provider</th><th>name</th><th>kind</th><th>key</th><th>state</th><th>requests</th><th>errors</th><th>5h quota</th><th></th></tr>";
+      const head = "<tr><th>provider</th><th>name</th><th>kind</th><th>key</th><th>state</th><th>requests</th><th>errors</th><th>5h quota</th><th>7d quota</th><th></th></tr>";
       const body = (d.accounts || []).map(a => {
-        const q = a.quota ? (Math.round((a.quota.five_hour.utilization || 0) * 100) + "%") : "—";
         const btn = a.enabled
           ? `<button data-n="${a.name}" data-act="disable">disable</button>`
           : `<button data-n="${a.name}" data-act="enable">enable</button>`;
@@ -422,9 +472,9 @@
         else if (a.healthy) key = `<span style="color:var(--ok)">✓ valid</span>`;
         else key = `<span class="err" title="${(a.health_error||'').replace(/"/g,'')}">✗ invalid</span>`;
         const chat = `<a href="/chat?provider=${encodeURIComponent(a.provider||'')}&cred=${encodeURIComponent(a.name)}" title="chat with this account">${a.name}</a>`;
-        return `<tr><td class="muted">${a.provider||"—"}</td><td>${chat}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td class="muted">${q}</td><td>${btn}</td></tr>`;
+        return `<tr><td class="muted">${a.provider||"—"}</td><td>${chat}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td>${quotaCell(a.quota, "five_hour", "5h")}</td><td>${quotaCell(a.quota, "seven_day", "7d")}</td><td>${btn}</td></tr>`;
       }).join("");
-      $("accounts").innerHTML = head + (body || `<tr><td colspan="9" class="muted">no accounts</td></tr>`);
+      $("accounts").innerHTML = head + (body || `<tr><td colspan="10" class="muted">no accounts</td></tr>`);
       setOpts($("fProvider"), (d.accounts || []).map(a => a.provider));
       setOpts($("fCred"), (d.accounts || []).map(a => a.name));
       $("accounts").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
