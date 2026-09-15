@@ -55,11 +55,11 @@ usage:
     perplexity-search:      { request: 0.005 }                          # POST /v1/search: $5 / 1k requests
 
 access:
-  # No keyless localhost: the nginx vhost injects the client key for LAN/WG
-  # source IPs (keyless from the LAN), and requires it from the public/CF side.
+  # No keyless access anywhere: Caddy forwards each caller's own key (LAN/WG and
+  # public alike) and cerber validates it — accounting is per key.
   allow_localhost: false
   keys:
-    - "${CERBER_CLIENT_KEY}"          # bootstrap key (env); also what nginx injects for the LAN
+    - "${CERBER_CLIENT_KEY}"          # bootstrap/operator key (env); dashboard + admin curls
   keys_file: "/work/data/keys.json"   # dashboard-managed client keys (persisted)
 
 providers:

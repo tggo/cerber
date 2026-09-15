@@ -26,19 +26,24 @@ Config (overridable via `.env` or the environment):
 The container listens on `0.0.0.0:8080` internally and publishes **only** to
 `127.0.0.1:18080` on the host — the nginx vhost is the sole front door.
 
-## Network model (split-horizon, LAN-keyless / public-key-required)
+## Network model (key required from everywhere)
 
 - **Internal DNS** (both MikroTiks): `cerber.ihatebot.com → 192.168.88.35`.
-  LAN/WG clients hit firebat nginx directly; the vhost injects the client key
-  for them, so the LAN is **keyless**.
+  LAN/WG clients hit firebat Caddy directly.
 - **Public DNS** (Cloudflare, proxied): `cerber.ihatebot.com → 193.56.148.246`
-  → router forwards `:80/:443` → firebat nginx. From the outside the client
-  **must** present `Authorization: Bearer $CERBER_CLIENT_KEY`; nginx passes it
-  through and cerber validates it.
+  → router forwards `:80/:443` → firebat Caddy.
+- From **both** sides the client must present its own key
+  (`Authorization: Bearer …` or `X-Api-Key`); Caddy forwards it unchanged and
+  cerber validates it and attributes the spend to that key.
 
-The decision is made per source IP in `deploy/nginx/cerber-maps.conf`
-(`geo`/`map`). LAN ranges (`192.168.0.0/16`, `10.10.10.0/30`, loopback) get the
-key injected; everyone else must supply their own.
+Until 2026-09-15 the LAN was *keyless*: the vhost injected a shared bearer for
+LAN/WG source IPs. That was removed on purpose — every keyless LAN process
+landed in one unbudgeted `config` bucket and the per-client accounting could
+not say who was spending. Give each program a managed key from the dashboard
+instead; the dashboard itself asks for a key on 401 and remembers it.
+
+The vhost source is `deploy/caddy/cerber.caddy`; the live copy is the
+`(cerber)` snippet in `/etc/caddy/Caddyfile` on firebat (root-owned).
 
 ## One-time firebat setup (already done, documented for rebuilds)
 

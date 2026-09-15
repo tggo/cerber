@@ -7,44 +7,24 @@
 # and routes to whichever is healthy — `make deploy` just starts the idle colour
 # and stops the active one; Caddy follows, no reload needed.
 #
-# Behaviour preserved from the original vhost:
+# Behaviour:
 #   - CF Flexible: identical content on :80 and :443, no HTTPS redirect.
 #   - Origin allow-list: Cloudflare edge + home LAN/WG only.
-#   - LAN/WG clients with NO key of their own get the shared bearer injected
-#     (keyless UX); a LAN/WG caller that already presents its own Authorization
-#     or X-Api-Key is passed through UNCHANGED, same as a public caller — so a
-#     LAN-origin process with its own managed cerber key (e.g. a healer/cron
-#     running on the host itself, not behind a client IP) keeps its own
-#     identity/budget instead of being silently reattributed to the shared key.
+#   - NO keyless path (removed 2026-09-15). Every caller — LAN/WG or public —
+#     must present its own Authorization/X-Api-Key, which is forwarded
+#     unchanged for cerber to validate. The LAN used to get a shared bearer
+#     injected; that lumped every keyless LAN process (Claude Code sessions,
+#     ad-hoc curls, scripts) into one `config` bucket with no budget, so
+#     per-client accounting could not say who spent what. Each program now
+#     gets a managed key (dashboard → keys) and is attributed/governed by it.
 #   - flush_interval -1 for SSE streaming.
-# $CERBER_BEARER comes from /etc/default/caddy (not committed).
 
 (cerber) {
 	import noleak
 	@cerber_blocked not remote_ip 127.0.0.1 192.168.0.0/16 10.10.10.0/30 172.16.0.0/12 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29
 	respond @cerber_blocked 403
 
-	# LAN/WG *with no key presented*: inject the shared bearer (keyless UX).
-	@cerber_lan_keyless {
-		remote_ip 127.0.0.1 192.168.0.0/16 10.10.10.0/30
-		not header Authorization *
-		not header X-Api-Key *
-	}
-	handle @cerber_lan_keyless {
-		reverse_proxy 127.0.0.1:18080 127.0.0.1:18082 {
-			lb_policy first
-			lb_retries 2
-			lb_try_duration 5s
-			fail_duration 15s
-			health_uri /healthz
-			health_interval 3s
-			health_timeout 2s
-			flush_interval -1
-			header_up Authorization "Bearer {$CERBER_BEARER}"
-		}
-	}
-	# Everyone else (public, or LAN/WG with their own key): forward the client's
-	# own Authorization/X-Api-Key unchanged; cerber validates it.
+	# Forward the client's own Authorization/X-Api-Key unchanged; cerber validates it.
 	handle {
 		reverse_proxy 127.0.0.1:18080 127.0.0.1:18082 {
 			lb_policy first
