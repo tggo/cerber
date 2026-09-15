@@ -14,8 +14,8 @@ import (
 func TestCollectorAndHandler(t *testing.T) {
 	tr := usage.New()
 	tr.SetPricing(map[string]usage.Price{"claude-x": {Input: 1_000_000, Output: 1_000_000}}) // $1/token
-	tr.Record(usage.Event{Credential: "acct-a", Model: "claude-x", InputTokens: 10, OutputTokens: 4})
-	tr.Record(usage.Event{Credential: "acct-a", Model: "claude-x", IsError: true})
+	tr.Record(usage.Event{Credential: "acct-a", Client: "app-1", Model: "claude-x", InputTokens: 10, OutputTokens: 4})
+	tr.Record(usage.Event{Credential: "acct-a", Client: "app-1", Model: "claude-x", IsError: true})
 
 	rec := httptest.NewRecorder()
 	Handler(tr, "v1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -32,6 +32,10 @@ func TestCollectorAndHandler(t *testing.T) {
 		`cerber_cost_usd_total{model="claude-x"} 14`, // 10 in + 4 out at $1/token
 		`cerber_input_tokens_by_model_total{model="claude-x"} 10`,
 		`cerber_output_tokens_by_model_total{model="claude-x"} 4`,
+		`cerber_requests_by_client_total{client="app-1",model="claude-x"} 2`,
+		`cerber_cost_usd_by_client_total{client="app-1",model="claude-x"} 14`,
+		`cerber_input_tokens_by_client_total{client="app-1",model="claude-x"} 10`,
+		`cerber_output_tokens_by_client_total{client="app-1",model="claude-x"} 4`,
 		`cerber_build_info{version="v1.2.3"} 1`,
 	}
 	for _, w := range want {
@@ -114,7 +118,7 @@ func TestCollector_Describe(t *testing.T) {
 	for range ch {
 		n++
 	}
-	if n != 9 {
-		t.Errorf("Describe emitted %d descs, want 9", n)
+	if n != 13 {
+		t.Errorf("Describe emitted %d descs, want 13", n)
 	}
 }

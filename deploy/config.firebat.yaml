@@ -61,6 +61,10 @@ access:
   keys:
     - "${CERBER_CLIENT_KEY}"          # bootstrap/operator key (env); dashboard + admin curls
   keys_file: "/work/data/keys.json"   # dashboard-managed client keys (persisted)
+  # /admin/* (dashboard, key/account management, usage) is gated by THIS key
+  # only. Without it every managed client key is also an admin: it could mint
+  # keys, toggle accounts and lift its own limits. Enter it in the dashboard.
+  management_key: "${CERBER_MANAGEMENT_KEY}"
 
 providers:
   # /v1/chat/completions routes by model: gpt*/o1*/o3*/o4*/chatgpt* -> openai,

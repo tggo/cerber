@@ -32,24 +32,34 @@ type Collector struct {
 	costByModel   *prometheus.Desc
 	inTokByModel  *prometheus.Desc
 	outTokByModel *prometheus.Desc
-	buildInfo     *prometheus.Desc
+	// Per client key × model — the "who spent it" view. Client names are
+	// managed-key names (or config/localhost), never secrets.
+	reqByClient    *prometheus.Desc
+	costByClient   *prometheus.Desc
+	inTokByClient  *prometheus.Desc
+	outTokByClient *prometheus.Desc
+	buildInfo      *prometheus.Desc
 }
 
 // NewCollector builds a Collector over the given tracker. version labels the
 // build_info metric (e.g. version.String()).
 func NewCollector(tr *usage.Tracker, version string) *Collector {
 	return &Collector{
-		tr:            tr,
-		version:       version,
-		requests:      prometheus.NewDesc("cerber_requests_total", "Total requests per credential.", []string{"credential"}, nil),
-		errors:        prometheus.NewDesc("cerber_errors_total", "Total errored requests per credential.", []string{"credential"}, nil),
-		inTokens:      prometheus.NewDesc("cerber_input_tokens_total", "Total input tokens per credential.", []string{"credential"}, nil),
-		outTokens:     prometheus.NewDesc("cerber_output_tokens_total", "Total output tokens per credential.", []string{"credential"}, nil),
-		reqByModel:    prometheus.NewDesc("cerber_requests_by_model_total", "Total requests per model.", []string{"model"}, nil),
-		costByModel:   prometheus.NewDesc("cerber_cost_usd_total", "Cumulative cost (USD) per model from configured pricing.", []string{"model"}, nil),
-		inTokByModel:  prometheus.NewDesc("cerber_input_tokens_by_model_total", "Total input tokens per model.", []string{"model"}, nil),
-		outTokByModel: prometheus.NewDesc("cerber_output_tokens_by_model_total", "Total output tokens per model.", []string{"model"}, nil),
-		buildInfo:     prometheus.NewDesc("cerber_build_info", "Build info; constant 1 with the version label.", []string{"version"}, nil),
+		tr:             tr,
+		version:        version,
+		requests:       prometheus.NewDesc("cerber_requests_total", "Total requests per credential.", []string{"credential"}, nil),
+		errors:         prometheus.NewDesc("cerber_errors_total", "Total errored requests per credential.", []string{"credential"}, nil),
+		inTokens:       prometheus.NewDesc("cerber_input_tokens_total", "Total input tokens per credential.", []string{"credential"}, nil),
+		outTokens:      prometheus.NewDesc("cerber_output_tokens_total", "Total output tokens per credential.", []string{"credential"}, nil),
+		reqByModel:     prometheus.NewDesc("cerber_requests_by_model_total", "Total requests per model.", []string{"model"}, nil),
+		costByModel:    prometheus.NewDesc("cerber_cost_usd_total", "Cumulative cost (USD) per model from configured pricing.", []string{"model"}, nil),
+		inTokByModel:   prometheus.NewDesc("cerber_input_tokens_by_model_total", "Total input tokens per model.", []string{"model"}, nil),
+		outTokByModel:  prometheus.NewDesc("cerber_output_tokens_by_model_total", "Total output tokens per model.", []string{"model"}, nil),
+		reqByClient:    prometheus.NewDesc("cerber_requests_by_client_total", "Total requests per client key and model.", []string{"client", "model"}, nil),
+		costByClient:   prometheus.NewDesc("cerber_cost_usd_by_client_total", "Cumulative cost (USD) per client key and model from configured pricing.", []string{"client", "model"}, nil),
+		inTokByClient:  prometheus.NewDesc("cerber_input_tokens_by_client_total", "Total input tokens per client key and model.", []string{"client", "model"}, nil),
+		outTokByClient: prometheus.NewDesc("cerber_output_tokens_by_client_total", "Total output tokens per client key and model.", []string{"client", "model"}, nil),
+		buildInfo:      prometheus.NewDesc("cerber_build_info", "Build info; constant 1 with the version label.", []string{"version"}, nil),
 	}
 }
 
@@ -63,6 +73,10 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.costByModel
 	ch <- c.inTokByModel
 	ch <- c.outTokByModel
+	ch <- c.reqByClient
+	ch <- c.costByClient
+	ch <- c.inTokByClient
+	ch <- c.outTokByClient
 	ch <- c.buildInfo
 }
 
@@ -81,6 +95,16 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.outTokByModel, prometheus.CounterValue, float64(e.OutputTokens), e.Name)
 		if e.Cost > 0 {
 			ch <- prometheus.MustNewConstMetric(c.costByModel, prometheus.CounterValue, e.Cost, e.Name)
+		}
+	}
+	for _, cl := range rep.ByClient {
+		for _, e := range cl.ByModel {
+			ch <- prometheus.MustNewConstMetric(c.reqByClient, prometheus.CounterValue, float64(e.Requests), cl.Name, e.Name)
+			ch <- prometheus.MustNewConstMetric(c.inTokByClient, prometheus.CounterValue, float64(e.InputTokens), cl.Name, e.Name)
+			ch <- prometheus.MustNewConstMetric(c.outTokByClient, prometheus.CounterValue, float64(e.OutputTokens), cl.Name, e.Name)
+			if e.Cost > 0 {
+				ch <- prometheus.MustNewConstMetric(c.costByClient, prometheus.CounterValue, e.Cost, cl.Name, e.Name)
+			}
 		}
 	}
 	ch <- prometheus.MustNewConstMetric(c.buildInfo, prometheus.GaugeValue, 1, c.version)
