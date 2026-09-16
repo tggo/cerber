@@ -75,6 +75,19 @@
      table's expanded per-model sub-table and un-aligns its numbers. */
   #requests tr.detail td { text-align:left; }
   #requests tr.detail code { display:block; white-space:pre-wrap; word-break:break-word; font-size:12px; }
+  /* Inline limits editor (one per key row, opened from the "limits" button). */
+  form.limits { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:end;
+    padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel);
+    /* The keys table scrolls sideways on a phone; the editor must not scroll with
+       it and hide its save button off-screen. Pin it to the visible left edge of
+       .tscroll and cap it to the viewport so the fields wrap instead. */
+    position:sticky; left:0; max-width:calc(100vw - 62px); box-sizing:border-box; }
+  form.limits label { display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--muted); text-align:left; }
+  form.limits input { width:110px; padding:5px 8px; font-size:13px; }
+  form.limits select { padding:5px 8px; font-size:13px; }
+  form.limits .actions { display:flex; gap:6px; margin-left:auto; align-items:center; }
+  form.limits .note { flex-basis:100%; font-size:11px; color:var(--muted); }
+  form.limits .err { flex-basis:100%; font-size:12px; }
   table.sub { width:100%; border:1px solid var(--line); border-radius:8px; }
   table.sub th, table.sub td { padding:5px 10px; font-size:12px; }
   /* The keys table is the widest one on the page; keep key / created / last-used
@@ -275,8 +288,7 @@
   let byClientMap = {};
 
   async function load() {
-    // Try anyway with no key: on the LAN, nginx injects the key for us (keyless).
-    // Only prompt for a key if the server actually rejects us (401).
+    // Try with whatever key is stored; prompt only when the server rejects it (401).
     try {
       const days = period.value && period.value !== "0" ? "?days=" + encodeURIComponent(period.value) : "";
       const r = await fetch("/admin/stats" + days, { headers: authHeaders() });
@@ -522,7 +534,73 @@
 
   function authHeaders() { return { Authorization: "Bearer " + key.value }; }
 
+  // While a limits editor is open the 5s auto-refresh must not re-render the
+  // keys table under the operator's cursor — that would drop half-typed values.
+  let limitsOpen = null;   // key name being edited, or null
+
+  const PERIODS = ["minute", "hour", "day", "week", "month"];
+  const periodOptions = (sel, dflt) => PERIODS.map(p =>
+    `<option value="${p}"${(String(sel || dflt).trim() || dflt) === p ? " selected" : ""}>${p}</option>`).join("");
+
+  // limitsEditor renders the per-key governance form. Empty fields mean "no
+  // limit" for that dimension; "remove all" POSTs an empty body (= unlimited).
+  function limitsEditor(k, i) {
+    const lim = k.limits || {}, nm = esc(k.name);
+    const num = (v) => (v > 0 ? v : "");
+    return `<form class="limits" id="lf-${i}" data-n="${nm}" autocomplete="off">
+      <label>cost budget, $<input name="max_cost_usd" type="number" min="0" step="0.01" inputmode="decimal" value="${num(lim.max_cost_usd)}" placeholder="none"></label>
+      <label>budget per<select name="budget_period">${periodOptions(lim.budget_period, "month")}</select></label>
+      <label>max requests<input name="max_requests" type="number" min="0" step="1" inputmode="numeric" value="${num(lim.max_requests)}" placeholder="none"></label>
+      <label>max tokens<input name="max_tokens" type="number" min="0" step="1" inputmode="numeric" value="${num(lim.max_tokens)}" placeholder="none"></label>
+      <label>rate per<select name="rate_period">${periodOptions(lim.rate_period, "minute")}</select></label>
+      <span class="actions">
+        <button type="submit">save</button>
+        <button type="button" data-act="cancel" class="muted">cancel</button>
+        <button type="button" data-act="clear" class="danger">remove all</button>
+      </span>
+      <span class="note">Windows are rolling (e.g. "day" = any 24h), not calendar-aligned. Over budget → 402, over rate → 429 until the window rolls.</span>
+      <span class="err" hidden></span>
+    </form>`;
+  }
+
+  async function submitLimits(form, clearAll) {
+    const n = form.dataset.n;
+    const errEl = form.querySelector(".err");
+    let body = "";
+    if (!clearAll) {
+      const f = new FormData(form), lim = {};
+      const cost = parseFloat(f.get("max_cost_usd"));
+      const reqs = parseInt(f.get("max_requests"), 10);
+      const toks = parseInt(f.get("max_tokens"), 10);
+      if (cost > 0) { lim.max_cost_usd = cost; lim.budget_period = f.get("budget_period"); }
+      if (reqs > 0) lim.max_requests = reqs;
+      if (toks > 0) lim.max_tokens = toks;
+      if (reqs > 0 || toks > 0) lim.rate_period = f.get("rate_period");
+      body = JSON.stringify(lim);
+    }
+    form.querySelectorAll("button").forEach(b => b.disabled = true);
+    try {
+      const r = await fetch(`/admin/keys/${encodeURIComponent(n)}/limits`, {
+        method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body,
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        errEl.textContent = e.error || ("HTTP " + r.status);
+        errEl.hidden = false;
+        form.querySelectorAll("button").forEach(b => b.disabled = false);
+        return;
+      }
+      limitsOpen = null;
+      loadKeys();
+    } catch (e) {
+      errEl.textContent = "network error — not saved";
+      errEl.hidden = false;
+      form.querySelectorAll("button").forEach(b => b.disabled = false);
+    }
+  }
+
   async function loadKeys() {
+    if (limitsOpen !== null) return;
     try {
       const r = await fetch("/admin/keys", { headers: authHeaders() });
       if (!r.ok) { $("keys").innerHTML = `<tr><td colspan="10" class="muted">keys: HTTP ${r.status}</td></tr>`; return; }
@@ -538,6 +616,7 @@
           ? `<button data-n="${nmTxt}" data-act="disable">disable</button>`
           : `<button data-n="${nmTxt}" data-act="enable">enable</button>`;
         const del = `<button class="danger" data-n="${nmTxt}" data-act="delete">delete</button>`;
+        const limitsBtn = `<button data-n="${nmTxt}" data-act="limits" data-i="${i}" aria-expanded="false" aria-controls="kl-${i}">limits</button>`;
         const created = k.created_at ? new Date(k.created_at).toLocaleDateString() : "—";
         const used = k.last_used_at && Date.parse(k.last_used_at) > 0 ? ago(Date.parse(k.last_used_at)/1000) : "—";
         const u = byClientMap[k.name];
@@ -549,11 +628,14 @@
           <td colspan="9"><table class="sub"><tr><th>model</th><th>requests</th><th>input</th><th>output</th><th>cost</th></tr>${
             u && u.by_model ? u.by_model.map(m => `<tr><td>${esc(m.name)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td><td class="muted">${usd(m.cost)}</td></tr>`).join("") : ""
           }</table></td></tr>`;
+        // Spans all columns (no leading blank cell like the per-model row) so
+        // the editor starts at the table's left edge and fits a phone viewport.
+        const editor = `<tr class="detail" id="kl-${i}" hidden><td colspan="10">${limitsEditor(k, i)}</td></tr>`;
         return `<tr><td>${nm}</td><td class="muted">…${k.last4}</td><td>${state}</td>
           <td>${u?fmt(u.requests):"—"}</td><td>${tok}</td><td class="muted">${spend}</td>
           <td>${budgetCell(k)}</td>
           <td class="muted">${created}</td><td class="muted">${used}</td>
-          <td><div class="row-actions">${toggle}${del}</div></td></tr>${detail}`;
+          <td><div class="row-actions">${limitsBtn}${toggle}${del}</div></td></tr>${detail}${editor}`;
       }).join("");
       $("keys").innerHTML = head + (body || `<tr><td colspan="10" class="muted">no keys yet</td></tr>`);
       $("keys").querySelectorAll("a.expand").forEach(a => a.addEventListener("click", (ev) => {
@@ -561,8 +643,36 @@
         const row = document.getElementById("kd-" + a.dataset.i);
         if (row) row.hidden = !row.hidden;
       }));
-      $("keys").querySelectorAll("button").forEach(b => b.addEventListener("click", async () => {
+      $("keys").querySelectorAll("form.limits").forEach(f => {
+        f.addEventListener("input", () => { f.dataset.dirty = "1"; });
+        f.addEventListener("submit", (ev) => { ev.preventDefault(); submitLimits(f, false); });
+        f.querySelector('[data-act="cancel"]').addEventListener("click", () => {
+          limitsOpen = null; loadKeys();
+        });
+        f.querySelector('[data-act="clear"]').addEventListener("click", () => {
+          if (!confirm(`Remove every limit from "${f.dataset.n}"? The key becomes unmetered.`)) return;
+          submitLimits(f, true);
+        });
+      });
+      $("keys").querySelectorAll("tr:not(.detail) > td button").forEach(b => b.addEventListener("click", async () => {
         const n = b.dataset.n, act = b.dataset.act;
+        if (act === "limits") {
+          const row = document.getElementById("kl-" + b.dataset.i);
+          if (!row) return;
+          const open = row.hidden;
+          // One editor at a time: opening this one closes any other — but not
+          // over unsaved typing; the guard exists to protect exactly that.
+          const dirty = $("keys").querySelector("tr.detail[id^='kl-']:not([hidden]) form.limits[data-dirty]");
+          if (dirty && dirty.dataset.n !== n
+              && !confirm(`Discard unsaved limits for "${dirty.dataset.n}"?`)) return;
+          $("keys").querySelectorAll("tr.detail[id^='kl-']").forEach(r => { r.hidden = true; });
+          $("keys").querySelectorAll("button[data-act='limits']").forEach(x => x.setAttribute("aria-expanded", "false"));
+          row.hidden = !open;
+          b.setAttribute("aria-expanded", String(open));
+          limitsOpen = open ? n : null;
+          if (open) row.querySelector("input").focus();
+          return;
+        }
         if (act === "delete") {
           if (!confirm(`Delete client key "${n}"? Anything using it stops working.`)) return;
           await fetch(`/admin/keys/${encodeURIComponent(n)}`, { method: "DELETE", headers: authHeaders() });
