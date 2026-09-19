@@ -16,6 +16,9 @@ Legend: ✅ done · 🟡 partial · ❌ not yet
 | `/v1/messages/count_tokens` | ✅ | proxied to Anthropic via pooled creds |
 | `/v1/images/generations` (image gen) | ✅ | passthrough (grok-imagine-*, openai gpt-image/dall-e) |
 | `/v1/embeddings`, `/v1/completions`, `/v1/responses` | ✅ | OpenAI passthrough to routed provider (Forwarder); not Anthropic |
+| `/v1/moderations` | ✅ | openai only, not model-routed (Anthropic has no moderation API) |
+| `/v1/audio/transcriptions` | ✅ | openai only, multipart/form-data relayed with its Content-Type (RawForwarder) |
+| `response_format` on Anthropic models | ✅ | `json_object`/`json_schema` become a forced `cerber_json_response` tool; the answer comes back as message content |
 | video gen | ❌ | |
 | Streaming SSE + flush | ✅ | |
 | Request/response header passthrough | ✅ | incl. anthropic-ratelimit-* |

@@ -418,6 +418,29 @@ func (p *Provider) Forward(ctx context.Context, subpath string, body []byte, str
 	})
 }
 
+// ForwardRaw relays a non-JSON body (multipart/form-data for
+// /v1/audio/transcriptions) to the provider with its Content-Type intact and credential rotation.
+// Forward cannot be used for this: it sets application/json, which makes an upstream reject a
+// multipart upload outright.
+func (p *Provider) ForwardRaw(ctx context.Context, subpath string, body []byte, contentType string, clientHeader http.Header) (*provider.Response, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	match := credential.MatchHeader(headerGet(clientHeader, "X-Cerber-Cred"))
+	return p.gatedRotate(ctx, match, func(cred *credential.Credential) (*http.Response, error) {
+		return p.sendHosts(ctx, func(base string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+subpath, bytes.NewReader(body))
+			if err != nil {
+				return nil, fmt.Errorf("openai: build raw forward request: %w", err)
+			}
+			req.Header.Set("Content-Type", contentType)
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Authorization", "Bearer "+p.bearer(ctx, cred))
+			return req, nil
+		})
+	})
+}
+
 // ProbeCredential validates a single credential by calling GET /v1/models with
 // its key and returns the model IDs it can access. A 401/403 yields
 // provider.ErrInvalidCredential; other non-200 / transport / decode failures

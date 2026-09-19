@@ -19,6 +19,19 @@ type openaiRequest struct {
 	Tools             []openaiTool    `json:"tools,omitempty"`
 	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"` // string or object
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	ResponseFormat    *openaiResponseFormat `json:"response_format,omitempty"`
+}
+
+// openaiResponseFormat is OpenAI's {"type":"json_object"} / {"type":"json_schema", ...}.
+// Anthropic has no equivalent field, so it is translated into a forced tool call — see
+// JSONResponseToolName.
+type openaiResponseFormat struct {
+	Type       string `json:"type"`
+	JSONSchema *struct {
+		Name   string          `json:"name"`
+		Schema json.RawMessage `json:"schema"`
+		Strict *bool           `json:"strict,omitempty"`
+	} `json:"json_schema,omitempty"`
 }
 
 type openaiMessage struct {
@@ -186,6 +199,8 @@ func (t *Translator) OpenAIToAnthropic(body []byte) (out []byte, stream bool, er
 		}
 	}
 	ar.System = strings.Join(systemParts, "\n\n")
+	// After the system prompt is assembled: the fallback path appends to it.
+	applyJSONResponseFormat(&ar, in.ResponseFormat)
 
 	if len(ar.Messages) == 0 {
 		return nil, false, fmt.Errorf("translator: no user/assistant messages after conversion")
@@ -196,6 +211,62 @@ func (t *Translator) OpenAIToAnthropic(body []byte) (out []byte, stream bool, er
 		return nil, false, fmt.Errorf("translator: marshal anthropic request: %w", err)
 	}
 	return out, ar.Stream, nil
+}
+
+
+// JSONResponseToolName is the synthetic Anthropic tool cerber uses to honour OpenAI's
+// `response_format: {"type":"json_object"}` (and `json_schema`).
+//
+// Anthropic's Messages API has no response_format, and simply asking for JSON in the system
+// prompt is not a contract: Haiku answers a "reply with JSON" instruction with a markdown-fenced
+// object followed by a paragraph of prose, which every strict `json.Unmarshal` on the client side
+// rejects. Forcing a tool call is Anthropic's own documented way to get a guaranteed-shaped
+// object, and the argument block *is* the JSON — no fences, no commentary.
+//
+// The name is deliberately cerber-prefixed so a real client tool can never collide with it, which
+// is what lets the response side recognise it by name alone and put the object back where an
+// OpenAI client expects it (message.content). That keeps both translations stateless.
+const JSONResponseToolName = "cerber_json_response"
+
+// permissiveJSONSchema accepts any object: `json_object` asks for "valid JSON", not a shape.
+var permissiveJSONSchema = json.RawMessage(`{"type":"object","additionalProperties":true}`)
+
+// applyJSONResponseFormat turns response_format into a forced tool call.
+//
+// Skipped when the caller already sent tools of their own: forcing ours would suppress theirs, and
+// silently dropping a client's tool calls is worse than returning prose they can still parse. Such
+// a request instead gets an instruction appended to the system prompt — best-effort, and the only
+// case where json_object is not a guarantee.
+func applyJSONResponseFormat(ar *anthropicRequest, rf *openaiResponseFormat) {
+	if rf == nil || (rf.Type != "json_object" && rf.Type != "json_schema") {
+		return
+	}
+
+	if len(ar.Tools) > 0 {
+		const instruction = "Reply with a single valid JSON object and nothing else: no prose, no explanation, no markdown code fences."
+		if ar.System == "" {
+			ar.System = instruction
+		} else {
+			ar.System += "\n\n" + instruction
+		}
+		return
+	}
+
+	schema := permissiveJSONSchema
+	description := "Return the answer as a single JSON object."
+	if rf.JSONSchema != nil && len(rf.JSONSchema.Schema) > 0 {
+		schema = rf.JSONSchema.Schema
+		if rf.JSONSchema.Name != "" {
+			description = "Return the answer as a single JSON object named " + rf.JSONSchema.Name + "."
+		}
+	}
+
+	ar.Tools = []anthropicTool{{
+		Name:        JSONResponseToolName,
+		Description: description,
+		InputSchema: schema,
+	}}
+	ar.ToolChoice = &anthropicToolChoice{Type: "tool", Name: JSONResponseToolName}
 }
 
 // parseStop normalizes OpenAI `stop` (string | []string | null) to []string.

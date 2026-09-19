@@ -305,6 +305,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/embeddings", s.handleForward("/v1/embeddings"))
 	mux.HandleFunc("POST /v1/completions", s.handleForward("/v1/completions"))
 	mux.HandleFunc("POST /v1/responses", s.handleForward("/v1/responses"))
+	mux.HandleFunc("POST /v1/moderations", s.handleModerations)
+	mux.HandleFunc("POST /v1/audio/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("POST /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /admin/stats", s.handleStats)
@@ -841,6 +843,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- `POST /v1/messages/count_tokens` — Anthropic token counting.\n")
 	fmt.Fprintf(&b, "- `POST /v1/images/generations` — image generation (OpenAI Images shape; e.g. `grok-imagine-image`).\n")
 	fmt.Fprintf(&b, "- `POST /v1/embeddings` — OpenAI embeddings (passthrough to the provider serving the model).\n")
+	fmt.Fprintf(&b, "- `POST /v1/moderations` — OpenAI moderation (openai only; Anthropic has no moderation API).\n")
+	fmt.Fprintf(&b, "- `POST /v1/audio/transcriptions` — speech to text, multipart/form-data (openai only).\n")
 	fmt.Fprintf(&b, "- `POST /v1/completions` — legacy OpenAI text completions (passthrough).\n")
 	fmt.Fprintf(&b, "- `POST /v1/responses` — OpenAI Responses API (passthrough; supports streaming).\n")
 	fmt.Fprintf(&b, "- `POST /v1/search` — raw web search via Perplexity: body `{\"query\":\"...\",\"max_results\":5}` (`query` may be an array for multi-query; optional `search_domain_filter`, `search_recency_filter`, `country`, `max_tokens_per_page`). Returns `{\"results\":[{\"title\",\"url\",\"snippet\",\"date\",\"last_updated\"}]}` — ranked pages, no LLM answer. No `model` field. 501 if Perplexity isn't configured.\n")
@@ -1030,6 +1034,8 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 		{"POST", "/v1/messages", "Anthropic", "Native Anthropic Messages, transparent passthrough (streaming). Use it to send Anthropic's own dialect with no translation."},
 		{"POST", "/v1/messages/count_tokens", "Anthropic", "Token counting via pooled credentials."},
 		{"POST", "/v1/embeddings", "OpenAI", "Embeddings, passthrough to the provider serving the model."},
+		{"POST", "/v1/moderations", "OpenAI", "Moderation. Not model-routed: openai only."},
+		{"POST", "/v1/audio/transcriptions", "OpenAI", "Speech to text, multipart/form-data. openai only."},
 		{"POST", "/v1/completions", "OpenAI", "Legacy text completions, passthrough."},
 		{"POST", "/v1/responses", "OpenAI", "Responses API, passthrough (streaming)."},
 		{"POST", "/v1/images/generations", "OpenAI", "Image generation (e.g. grok-imagine-*, gpt-image-*)."},
@@ -1608,6 +1614,84 @@ func (s *Server) handleForward(subpath string) http.HandlerFunc {
 		}
 		s.relayChatter(w, r, resp, target, model, stream, false)
 	}
+}
+
+
+// moderationProvider and transcriptionProvider are the provider behind the two OpenAI-only
+// endpoints below. Neither is model-routed: Anthropic has no moderation API and no speech-to-text,
+// so "route by model prefix" would send `omni-moderation-latest` and `whisper-1` to Anthropic and
+// fail. Same shape as handleSearch, which is Perplexity-only for the same reason.
+const (
+	moderationProvider    = "openai"
+	transcriptionProvider = "openai"
+
+	moderationsPath    = "/v1/moderations"
+	transcriptionsPath = "/v1/audio/transcriptions"
+)
+
+// handleModerations passes OpenAI's moderation endpoint through with credential rotation.
+//
+// It exists so a caller can route *everything* through cerber. Without it a service that moderates
+// user text has to keep a second, direct OpenAI key next to its cerber key — which is exactly the
+// split that let fridge.menu talk to api.openai.com unnoticed while every other project went
+// through here.
+func (s *Server) handleModerations(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	tagProvider(r.Context(), moderationProvider)
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	body, model := s.canonicalModel(body)
+	if model == "" {
+		model = "omni-moderation-latest"
+	}
+	fwd, ok := s.chatters[moderationProvider].(provider.Forwarder)
+	if !ok {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusNotImplemented, "moderations: provider openai is not configured")
+		return
+	}
+	resp, err := fwd.Forward(r.Context(), moderationsPath, body, false, r.Header)
+	if err != nil {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeUpstreamError(w, err)
+		return
+	}
+	s.relayChatter(w, r, resp, moderationProvider, model, false, false)
+}
+
+// handleTranscriptions passes OpenAI's speech-to-text endpoint through.
+//
+// Unlike every other forward this one is **not** JSON: the client sends multipart/form-data with
+// the audio file, so the body and its Content-Type are relayed byte for byte and the model cannot
+// be read from a JSON field. That is why it needs RawForwarder rather than Forwarder.
+func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	tagProvider(r.Context(), transcriptionProvider)
+	const model = "whisper-1"
+
+	fwd, ok := s.chatters[transcriptionProvider].(provider.RawForwarder)
+	if !ok {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeError(w, http.StatusNotImplemented, "transcriptions: provider openai is not configured")
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	resp, err := fwd.ForwardRaw(r.Context(), transcriptionsPath, body, r.Header.Get("Content-Type"), r.Header)
+	if err != nil {
+		s.record(r.Context(), usage.Event{Model: model, IsError: true})
+		writeUpstreamError(w, err)
+		return
+	}
+	s.relayChatter(w, r, resp, transcriptionProvider, model, false, false)
 }
 
 // searchProvider is the provider behind POST /v1/search. Only Perplexity

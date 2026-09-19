@@ -71,6 +71,14 @@ type Forwarder interface {
 	Forward(ctx context.Context, subpath string, openaiBody []byte, stream bool, clientHeader http.Header) (*Response, error)
 }
 
+// RawForwarder is an optional capability: a provider that can relay a request body **and its
+// Content-Type** unchanged, for endpoints that are not JSON — today only
+// /v1/audio/transcriptions, which is multipart/form-data carrying an audio file. Forwarder cannot
+// serve those: it hard-codes application/json.
+type RawForwarder interface {
+	ForwardRaw(ctx context.Context, subpath string, body []byte, contentType string, clientHeader http.Header) (*Response, error)
+}
+
 // BadRequestError marks a client-side error (e.g. an untranslatable request) so
 // callers can map it to HTTP 400 instead of a 502 upstream error.
 type BadRequestError struct{ Err error }

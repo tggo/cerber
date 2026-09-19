@@ -70,11 +70,19 @@ func (t *Translator) AnthropicToOpenAI(body []byte) ([]byte, error) {
 
 	var text strings.Builder
 	var calls []openaiToolCall
+	// jsonResponse holds the argument object of the synthetic tool cerber forces for
+	// response_format (see JSONResponseToolName). The client asked for JSON content, not a tool
+	// call, so it is put back as the message content and never surfaces as a call.
+	var jsonResponse string
 	for _, b := range in.Content {
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
 		case "tool_use":
+			if b.Name == JSONResponseToolName {
+				jsonResponse = toolArguments(b.Input)
+				continue
+			}
 			calls = append(calls, openaiToolCall{
 				ID:   b.ID,
 				Type: "function",
@@ -87,8 +95,15 @@ func (t *Translator) AnthropicToOpenAI(body []byte) ([]byte, error) {
 	}
 
 	msg := openaiRespMsg{Role: "assistant", ToolCalls: calls}
-	if s := text.String(); s != "" || len(calls) == 0 {
-		msg.Content = &s
+	switch {
+	case jsonResponse != "":
+		// Any text the model produced alongside the forced call is the prose the client
+		// explicitly asked not to get; dropping it is the point of json_object.
+		msg.Content = &jsonResponse
+	default:
+		if s := text.String(); s != "" || len(calls) == 0 {
+			msg.Content = &s
+		}
 	}
 
 	resp := openaiResponse{
@@ -99,7 +114,7 @@ func (t *Translator) AnthropicToOpenAI(body []byte) ([]byte, error) {
 		Choices: []openaiChoice{{
 			Index:        0,
 			Message:      msg,
-			FinishReason: finishReason(in.StopReason),
+			FinishReason: jsonFinishReason(jsonResponse != "", in.StopReason),
 		}},
 		Usage: openaiUsage{
 			PromptTokens:     in.Usage.InputTokens,
@@ -112,6 +127,18 @@ func (t *Translator) AnthropicToOpenAI(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("translator: marshal openai response: %w", err)
 	}
 	return out, nil
+}
+
+// jsonFinishReason reports "stop" for a response_format answer. Anthropic ends a forced tool call
+// with stop_reason "tool_use", which would translate to OpenAI's "tool_calls" — a client that
+// asked for JSON *content* and is told the turn ended in tool calls it cannot see would be right
+// to be confused.
+func jsonFinishReason(isJSONResponse bool, stopReason string) string {
+	if isJSONResponse {
+		return "stop"
+	}
+
+	return finishReason(stopReason)
 }
 
 // chatID derives an OpenAI-style id from the Anthropic message id.
