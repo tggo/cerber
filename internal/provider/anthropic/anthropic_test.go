@@ -186,7 +186,7 @@ func TestSend_MergesClientBeta_OAuth(t *testing.T) {
 }
 
 func TestSend_Injects1MBeta_OAuth1MModel(t *testing.T) {
-	for _, model := range []string{"claude-sonnet-5", "claude-opus-4-8"} {
+	for _, model := range []string{"claude-sonnet-5", "claude-opus-5-5", "claude-opus-4-8"} {
 		t.Run(model, func(t *testing.T) {
 			doer := mocks.NewHTTPDoer(t)
 			var captured *http.Request

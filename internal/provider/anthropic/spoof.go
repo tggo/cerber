@@ -20,6 +20,7 @@ const claudeCodeAgentPrompt = "You are Claude Code, Anthropic's official CLI for
 // a targeted spoof, not a blanket rewrite of every request.
 var fullCloakModelMarkers = []string{
 	"claude-sonnet-5",
+	"claude-opus-5-5",
 	"claude-opus-4-8",
 	"claude-haiku-4-5",
 }

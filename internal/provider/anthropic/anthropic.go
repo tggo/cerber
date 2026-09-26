@@ -35,7 +35,7 @@ const context1MBeta = "context-1m-2025-08-07"
 // oneMModelMarkers are model-id substrings whose Claude models serve a 1M context
 // window (gated by context1MBeta). haiku-4-5 is 200k and is deliberately absent.
 // Keep in sync with the subscription lineup (SubscriptionModels).
-var oneMModelMarkers = []string{"claude-sonnet-5", "claude-opus-4-8"}
+var oneMModelMarkers = []string{"claude-sonnet-5", "claude-opus-5-5", "claude-opus-4-8"}
 
 // supports1M reports whether model serves a 1M context window (see oneMModelMarkers).
 func supports1M(model string) bool {
@@ -81,6 +81,7 @@ const ModelsPath = "/v1/models"
 // provider. Keep in sync with the cloak gate (fullCloakModelMarkers) and
 // Anthropic's current subscription lineup.
 var SubscriptionModels = []string{
+	"claude-opus-5-5",
 	"claude-opus-4-8",
 	"claude-sonnet-5",
 	"claude-haiku-4-5-20251001",

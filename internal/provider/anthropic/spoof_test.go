@@ -148,6 +148,7 @@ func TestOAuthSystemForModel(t *testing.T) {
 		"claude-sonnet-5",
 		"claude-sonnet-5-20250929",
 		"claude-opus-4-8",
+		"claude-opus-5-5",
 		"claude-haiku-4-5-20251001",
 	} {
 		body := []byte(`{"model":"` + model + `","system":"be brief","messages":[{"role":"user","content":"hi"}]}`)
