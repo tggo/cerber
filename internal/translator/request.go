@@ -9,16 +9,16 @@ import (
 // --- OpenAI request shapes (only the fields we translate) ---
 
 type openaiRequest struct {
-	Model             string          `json:"model"`
-	Messages          []openaiMessage `json:"messages"`
-	MaxTokens         *int            `json:"max_tokens,omitempty"`
-	Temperature       *float64        `json:"temperature,omitempty"`
-	TopP              *float64        `json:"top_p,omitempty"`
-	Stop              json.RawMessage `json:"stop,omitempty"` // string or []string
-	Stream            bool            `json:"stream,omitempty"`
-	Tools             []openaiTool    `json:"tools,omitempty"`
-	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"` // string or object
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Model             string                `json:"model"`
+	Messages          []openaiMessage       `json:"messages"`
+	MaxTokens         *int                  `json:"max_tokens,omitempty"`
+	Temperature       *float64              `json:"temperature,omitempty"`
+	TopP              *float64              `json:"top_p,omitempty"`
+	Stop              json.RawMessage       `json:"stop,omitempty"` // string or []string
+	Stream            bool                  `json:"stream,omitempty"`
+	Tools             []openaiTool          `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage       `json:"tool_choice,omitempty"` // string or object
+	ParallelToolCalls *bool                 `json:"parallel_tool_calls,omitempty"`
 	ResponseFormat    *openaiResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -213,7 +213,6 @@ func (t *Translator) OpenAIToAnthropic(body []byte) (out []byte, stream bool, er
 	return out, ar.Stream, nil
 }
 
-
 // JSONResponseToolName is the synthetic Anthropic tool cerber uses to honour OpenAI's
 // `response_format: {"type":"json_object"}` (and `json_schema`).
 //
@@ -266,7 +265,36 @@ func applyJSONResponseFormat(ar *anthropicRequest, rf *openaiResponseFormat) {
 		Description: description,
 		InputSchema: schema,
 	}}
-	ar.ToolChoice = &anthropicToolChoice{Type: "tool", Name: JSONResponseToolName}
+	if forcesToolChoice(ar.Model) {
+		ar.ToolChoice = &anthropicToolChoice{Type: "tool", Name: JSONResponseToolName}
+		return
+	}
+
+	// The model cannot be forced, so it is offered the tool as its only one and told to use it.
+	// The response side recognises the call by name exactly as in the forced case.
+	const instruction = "Deliver your entire answer by calling the " + JSONResponseToolName + " tool exactly once. Do not reply with text."
+	if ar.System == "" {
+		ar.System = instruction
+	} else {
+		ar.System += "\n\n" + instruction
+	}
+	ar.ToolChoice = &anthropicToolChoice{Type: "auto"}
+}
+
+// noForcedToolChoiceModels reject tool_choice "tool" and "any" outright with a 400 ("not supported
+// for this model"); measured 2026-09-26 against claude-opus-5-5 and claude-fable-5-1, while
+// claude-sonnet-5, claude-opus-4-8 and claude-haiku-4-5 still accept it. Matched as prefixes so
+// dated snapshots of the same model are covered.
+var noForcedToolChoiceModels = []string{"claude-opus-5-5", "claude-fable-5-1"}
+
+// forcesToolChoice reports whether model accepts a forced tool_choice.
+func forcesToolChoice(model string) bool {
+	for _, p := range noForcedToolChoiceModels {
+		if strings.HasPrefix(model, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // parseStop normalizes OpenAI `stop` (string | []string | null) to []string.

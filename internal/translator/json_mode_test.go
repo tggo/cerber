@@ -194,3 +194,56 @@ func TestAnthropicToOpenAI_RealToolCallStillSurfaces(t *testing.T) {
 		t.Fatalf(`expected "tool_calls", got %q`, got.Choices[0].FinishReason)
 	}
 }
+
+// claude-opus-5-5 and claude-fable-5-1 answer a forced tool_choice with a 400, so on them JSON mode
+// offers the same synthetic tool under tool_choice "auto" and tells the model to use it.
+func TestOpenAIToAnthropic_JSONModeOnModelsThatCannotBeForced(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		model      string
+		wantChoice string
+		wantSystem bool
+	}{
+		{model: "claude-opus-5-5", wantChoice: "auto", wantSystem: true},
+		{model: "claude-fable-5-1", wantChoice: "auto", wantSystem: true},
+		{model: "claude-sonnet-5", wantChoice: "tool", wantSystem: false},
+		{model: "claude-haiku-4-5-20251001", wantChoice: "tool", wantSystem: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			t.Parallel()
+
+			out, _, err := New().OpenAIToAnthropic([]byte(`{
+				"model":"` + tt.model + `",
+				"response_format":{"type":"json_object"},
+				"messages":[{"role":"user","content":"capital of France"}]
+			}`))
+			if err != nil {
+				t.Fatalf("translate: %v", err)
+			}
+
+			var got struct {
+				System string `json:"system"`
+				Tools  []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+				ToolChoice struct {
+					Type string `json:"type"`
+				} `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(got.Tools) != 1 || got.Tools[0].Name != JSONResponseToolName {
+				t.Fatalf("expected the synthetic json tool, got %+v", got.Tools)
+			}
+			if got.ToolChoice.Type != tt.wantChoice {
+				t.Fatalf("tool_choice = %q, want %q", got.ToolChoice.Type, tt.wantChoice)
+			}
+			if hasInstruction := got.System != ""; hasInstruction != tt.wantSystem {
+				t.Fatalf("system instruction present = %v, want %v (system %q)", hasInstruction, tt.wantSystem, got.System)
+			}
+		})
+	}
+}
