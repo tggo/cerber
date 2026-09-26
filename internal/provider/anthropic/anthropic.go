@@ -51,7 +51,7 @@ func supports1M(model string) bool {
 // Code: Anthropic ties OAuth (Claude Code) tokens to the Claude Code client and
 // rejects other User-Agents (browser, SDK, curl…) with 401/403. This mirrors the
 // real claude-cli UA; bump the version to match the Claude Code we impersonate.
-const oauthUserAgent = "claude-cli/2.1.170 (external, cli)"
+const oauthUserAgent = "claude-cli/2.1.283 (external, cli)"
 
 // Client issues Anthropic Messages requests.
 type Client struct {
