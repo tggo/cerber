@@ -1,6 +1,8 @@
 package credential
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -198,10 +200,10 @@ func TestSetEnabledAndList(t *testing.T) {
 	now := time.Unix(1000, 0)
 	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1"), apiKeyCfg("b", "2")}, WithClock(func() time.Time { return now }))
 
-	if !s.SetEnabled("a", false) {
-		t.Fatal("SetEnabled should find 'a'")
+	if ok, err := s.SetEnabled("a", false); !ok || err != nil {
+		t.Fatalf("SetEnabled should find 'a': ok=%v err=%v", ok, err)
 	}
-	if s.SetEnabled("nope", false) {
+	if ok, _ := s.SetEnabled("nope", false); ok {
 		t.Fatal("SetEnabled should not match unknown")
 	}
 	// disabled 'a' is skipped; only 'b' returned
@@ -221,7 +223,7 @@ func TestSetEnabledAndList(t *testing.T) {
 		t.Errorf("list enabled wrong: %+v", list)
 	}
 	// re-enable
-	s.SetEnabled("a", true)
+	_, _ = s.SetEnabled("a", true)
 	seen := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		c, _ := s.Next()
@@ -244,7 +246,7 @@ func TestNextOf_FillFirst(t *testing.T) {
 		}
 	}
 	// when 'a' is disabled, fall to 'b'
-	s.SetEnabled("a", false)
+	_, _ = s.SetEnabled("a", false)
 	c, _ := s.Next()
 	if c.Name() != "b" {
 		t.Errorf("got %s, want b", c.Name())
@@ -412,5 +414,89 @@ func TestListReportsCooldownState(t *testing.T) {
 	in := s.List()[0]
 	if !in.CoolingDown || in.CooldownSecs != 60 || in.FailStreak != 1 { // 59.5s rounds up
 		t.Errorf("cooling cred = %+v, want cooling 60s streak 1", in)
+	}
+}
+
+// A credential the operator disabled must stay disabled across a restart: a fresh
+// Store built from the same DisabledSet file starts with it off.
+func TestDisabledSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "disabled.json")
+	cfgs := []config.Credential{apiKeyCfg("a", "1"), apiKeyCfg("b", "2")}
+
+	ds, err := LoadDisabledSet(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1, _ := NewStore(cfgs, WithDisabledSet(ds))
+	if ok, err := s1.SetEnabled("a", false); !ok || err != nil {
+		t.Fatalf("disable: ok=%v err=%v", ok, err)
+	}
+
+	// "restart": reload the file into a brand-new set and store.
+	ds2, err := LoadDisabledSet(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := NewStore(cfgs, WithDisabledSet(ds2))
+	for i := 0; i < 4; i++ {
+		if c, _ := s2.Next(); c.Name() != "b" {
+			t.Fatalf("restarted store picked %q, want only b", c.Name())
+		}
+	}
+	if in := s2.List()[0]; in.Enabled {
+		t.Errorf("a should list as disabled after restart: %+v", in)
+	}
+
+	// re-enabling is persisted too.
+	if _, err := s2.SetEnabled("a", true); err != nil {
+		t.Fatal(err)
+	}
+	ds3, _ := LoadDisabledSet(path)
+	if ds3.Has("a") {
+		t.Error("a should no longer be persisted as disabled")
+	}
+}
+
+func TestDisabledSetEdgeCases(t *testing.T) {
+	var nilSet *DisabledSet
+	if nilSet.Has("x") || nilSet.Set("x", true) != nil {
+		t.Error("nil set must be an inert no-op")
+	}
+
+	dir := t.TempDir()
+	if ds, err := LoadDisabledSet(filepath.Join(dir, "missing.json")); err != nil || ds.Has("x") {
+		t.Errorf("missing file = (%v, %v), want empty set, nil error", ds, err)
+	}
+
+	// A corrupt file must fail loudly, not silently re-enable everything.
+	bad := filepath.Join(dir, "bad.json")
+	_ = os.WriteFile(bad, []byte("{not json"), 0o600)
+	if _, err := LoadDisabledSet(bad); err == nil {
+		t.Error("corrupt file should be an error")
+	}
+	// An unreadable path (a directory) is an error too.
+	if _, err := LoadDisabledSet(dir); err == nil {
+		t.Error("directory path should be an error")
+	}
+
+	// Write failure leaves memory unchanged and is surfaced by SetEnabled.
+	blocker := filepath.Join(dir, "file")
+	_ = os.WriteFile(blocker, []byte("x"), 0o600)
+	ds, _ := LoadDisabledSet(filepath.Join(dir, "w.json"))
+	ds.path = filepath.Join(blocker, "disabled.json") // parent is a file → MkdirAll fails
+	if err := ds.Set("a", true); err == nil || ds.Has("a") {
+		t.Errorf("failed write must error and not change state (err=%v has=%v)", err, ds.Has("a"))
+	}
+	s, _ := NewStore([]config.Credential{apiKeyCfg("a", "1")}, WithDisabledSet(ds))
+	if ok, err := s.SetEnabled("a", false); !ok || err == nil {
+		t.Errorf("SetEnabled with failing persistence = (%v, %v), want found + error", ok, err)
+	}
+	if _, err := s.Next(); err != nil {
+		t.Errorf("credential must stay enabled when persistence failed: %v", err)
+	}
+	// Setting the same state again is a no-op (no write needed).
+	ds2, _ := LoadDisabledSet(filepath.Join(dir, "ok.json"))
+	if err := ds2.Set("a", false); err != nil {
+		t.Errorf("enabling an already-enabled name: %v", err)
 	}
 }

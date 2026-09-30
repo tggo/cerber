@@ -180,6 +180,7 @@ type Store struct {
 	idx       int
 	now       func() time.Time
 	fillFirst bool
+	disabled  *DisabledSet // nil = runtime enable/disable is in-memory only
 }
 
 // Option customizes a Store.
@@ -194,6 +195,13 @@ func WithClock(now func() time.Time) Option {
 // only move on when it is unavailable) instead of round-robin.
 func WithFillFirst(v bool) Option {
 	return func(s *Store) { s.fillFirst = v }
+}
+
+// WithDisabledSet makes the operator's runtime enable/disable choices durable:
+// credentials named in the set start disabled, and SetEnabled writes through to
+// it. Without it a restart/deploy silently re-enables every disabled account.
+func WithDisabledSet(d *DisabledSet) Option {
+	return func(s *Store) { s.disabled = d }
 }
 
 // MatchHeader builds a credential matcher from an X-Cerber-Cred spec: "oauth" or
@@ -227,7 +235,7 @@ func NewStore(cfgs []config.Credential, opts ...Option) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.entries = append(s.entries, &entry{cred: c})
+		s.entries = append(s.entries, &entry{cred: c, disabled: s.disabled.Has(c.Name())})
 	}
 	return s, nil
 }
@@ -270,16 +278,22 @@ func (s *Store) NextOf(match func(*Credential) bool) (*Credential, error) {
 
 // SetEnabled enables or disables the named credential at runtime (disabled
 // credentials are skipped by Next/NextOf). Reports whether a credential matched.
-func (s *Store) SetEnabled(name string, enabled bool) bool {
+// With a DisabledSet the choice is persisted first and applied only if that
+// succeeds, so what the operator sees is what survives a restart; a persistence
+// error is returned with found=true.
+func (s *Store) SetEnabled(name string, enabled bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range s.entries {
 		if e.cred.Name() == name {
+			if err := s.disabled.Set(name, !enabled); err != nil {
+				return true, err
+			}
 			e.disabled = !enabled
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // List returns a redacted snapshot of all credentials and their state.

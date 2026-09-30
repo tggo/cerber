@@ -199,11 +199,20 @@ func main() {
 		}
 		a = config.DefaultAnthropic()
 	}
+	// Operator enable/disable choices survive restarts/deploys (stored next to the usage file).
+	var disabledSet *credential.DisabledSet
+	if cfg.Usage.File != "" {
+		disabledSet, err = credential.LoadDisabledSet(filepath.Join(filepath.Dir(cfg.Usage.File), "disabled.json"))
+		if err != nil {
+			logger.Fatal("load disabled accounts", zap.Error(err))
+		}
+	}
+	withDisabled := credential.WithDisabledSet(disabledSet)
 	merged := append(append([]config.Credential{}, a.Credentials...), diskCreds...)
 	if len(merged) == 0 {
 		logger.Fatal("no anthropic credentials configured; add one to config or run: cerber --claude-login")
 	}
-	store, err := credential.NewStore(merged, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+	store, err := credential.NewStore(merged, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 	if err != nil {
 		logger.Fatal("credentials", zap.Error(err))
 	}
@@ -304,7 +313,7 @@ func main() {
 	srv.RegisterProviderStore("anthropic", store)
 
 	if o := cfg.Providers.OpenAI; o != nil {
-		ostore, err := credential.NewStore(o.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		ostore, err := credential.NewStore(o.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 		if err != nil {
 			logger.Fatal("openai credentials", zap.Error(err))
 		}
@@ -317,7 +326,7 @@ func main() {
 	// provider, named "arliai". Models are discovered via /v1/models and routed
 	// by name (e.g. Qwen3.5-27B-Derestricted).
 	if a := cfg.Providers.ArliAI; a != nil {
-		astore, err := credential.NewStore(a.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		astore, err := credential.NewStore(a.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 		if err != nil {
 			logger.Fatal("arliai credentials", zap.Error(err))
 		}
@@ -331,7 +340,7 @@ func main() {
 	// prefix; Agent API models (openai/gpt-5, …) are discovered via /v1/models and
 	// served on /v1/responses; its Search API backs cerber's POST /v1/search.
 	if px := cfg.Providers.Perplexity; px != nil {
-		pstore, err := credential.NewStore(px.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		pstore, err := credential.NewStore(px.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 		if err != nil {
 			logger.Fatal("perplexity credentials", zap.Error(err))
 		}
@@ -354,7 +363,7 @@ func main() {
 			k = config.DefaultGrok()
 		}
 		merged := append(append([]config.Credential{}, k.Credentials...), xaiCreds...)
-		kstore, err := credential.NewStore(merged, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		kstore, err := credential.NewStore(merged, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 		if err != nil {
 			logger.Fatal("grok credentials", zap.Error(err))
 		}
@@ -387,7 +396,7 @@ func main() {
 			// store (which requires >=1 credential) has something to hand out.
 			creds = []config.Credential{{Type: config.CredentialAPIKey, Name: "ollama", Key: "ollama"}}
 		}
-		ostore, err := credential.NewStore(creds, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		ostore, err := credential.NewStore(creds, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 		if err != nil {
 			logger.Fatal("ollama credentials", zap.Error(err))
 		}
@@ -415,7 +424,7 @@ func main() {
 	// an LLM call shares the GPU with image workflows. Keyless — the dummy
 	// credential only lets the probe loop list the node's models.
 	if cu := cfg.Providers.ComfyUI; cu != nil {
-		cstore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "comfyui", Key: "comfyui"}})
+		cstore, err := credential.NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "comfyui", Key: "comfyui"}}, withDisabled)
 		if err != nil {
 			logger.Fatal("comfyui credentials", zap.Error(err))
 		}
@@ -428,7 +437,7 @@ func main() {
 	}
 
 	if g := cfg.Providers.Gemini; g != nil {
-		gstore, err := credential.NewStore(g.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"))
+		gstore, err := credential.NewStore(g.Credentials, credential.WithFillFirst(cfg.Providers.Strategy == "fill-first"), withDisabled)
 		if err != nil {
 			logger.Fatal("gemini credentials", zap.Error(err))
 		}

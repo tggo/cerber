@@ -1224,7 +1224,13 @@ func (s *Server) handleSetAccount(enabled bool) http.HandlerFunc {
 		name := r.PathValue("name")
 		found := false
 		for _, st := range s.accountStores() {
-			if st.SetEnabled(name, enabled) {
+			ok, err := st.SetEnabled(name, enabled)
+			if err != nil {
+				s.log.Error("persist account state", zap.String("credential", name), zap.Error(err))
+				writeError(w, http.StatusInternalServerError, "could not persist account state: "+err.Error())
+				return
+			}
+			if ok {
 				found = true
 				break
 			}
