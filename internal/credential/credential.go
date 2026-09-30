@@ -164,6 +164,8 @@ type Info struct {
 	Kind            Kind      `json:"kind"`
 	Enabled         bool      `json:"enabled"`
 	CoolingDown     bool      `json:"cooling_down"`
+	CooldownSecs    int       `json:"cooldown_secs,omitempty"` // remaining cooldown, rounded up
+	FailStreak      int       `json:"fail_streak,omitempty"`   // consecutive failures driving the backoff
 	HealthChecked   bool      `json:"health_checked"`
 	Healthy         bool      `json:"healthy"`
 	HealthError     string    `json:"health_error,omitempty"`
@@ -292,6 +294,8 @@ func (s *Store) List() []Info {
 			Kind:            e.cred.Kind(),
 			Enabled:         !e.disabled,
 			CoolingDown:     now.Before(e.cooldownUntil),
+			CooldownSecs:    remainingSecs(now, e.cooldownUntil),
+			FailStreak:      e.failStreak,
 			HealthChecked:   e.healthChecked,
 			Healthy:         e.healthy,
 			HealthError:     e.healthErr,
@@ -339,13 +343,32 @@ func (s *Store) SetHealth(c *Credential, healthy bool, errMsg string) {
 // parked for longer and longer so rotation stops picking it, until MarkSuccess
 // resets it. Returns the applied cooldown. Unknown credentials are ignored.
 func (s *Store) Penalize(c *Credential, base time.Duration) time.Duration {
+	d, _, _ := s.PenalizeDetail(c, base)
+	return d
+}
+
+// PenalizeDetail is Penalize that also reports the failure streak after the call
+// and whether the failure was a duplicate.
+//
+// A failure arriving while the credential is ALREADY cooling down is a duplicate:
+// it comes from a request that picked the credential before the first failure
+// landed (N parallel requests all hit the same 429). It must not advance the
+// streak — otherwise N concurrent failures count as N consecutive ones and a
+// single burst (6 parallel → 60s·2⁵) parks the account for the full maxCooldown,
+// 503-ing every client once all accounts are parked. A duplicate returns the
+// time remaining on the existing cooldown and leaves the state untouched.
+func (s *Store) PenalizeDetail(c *Credential, base time.Duration) (cooldown time.Duration, streak int, duplicate bool) {
 	if c == nil {
-		return 0
+		return 0, 0, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	for _, e := range s.entries {
 		if e.cred == c {
+			if now.Before(e.cooldownUntil) {
+				return e.cooldownUntil.Sub(now), e.failStreak, true
+			}
 			e.failStreak++
 			d := base
 			for i := 1; i < e.failStreak && d < maxCooldown; i++ {
@@ -354,11 +377,18 @@ func (s *Store) Penalize(c *Credential, base time.Duration) time.Duration {
 			if d > maxCooldown {
 				d = maxCooldown
 			}
-			e.cooldownUntil = s.now().Add(d)
-			return d
+			e.cooldownUntil = now.Add(d)
+			return d, e.failStreak, false
 		}
 	}
-	return 0
+	return 0, 0, false
+}
+
+func remainingSecs(now, until time.Time) int {
+	if !now.Before(until) {
+		return 0
+	}
+	return int((until.Sub(now) + time.Second - 1) / time.Second)
 }
 
 // MarkSuccess clears a credential's failure streak and cooldown after a

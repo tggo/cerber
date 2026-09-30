@@ -1616,7 +1616,6 @@ func (s *Server) handleForward(subpath string) http.HandlerFunc {
 	}
 }
 
-
 // moderationProvider and transcriptionProvider are the provider behind the two OpenAI-only
 // endpoints below. Neither is model-routed: Anthropic has no moderation API and no speech-to-text,
 // so "route by model prefix" would send `omni-moderation-latest` and `whisper-1` to Anthropic and
@@ -2035,6 +2034,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 	for i, n := 0, s.creds.Len(); i < n; i++ {
 		cred, err := s.creds.NextOf(match)
 		if err != nil {
+			s.logPoolExhausted(i+1, lastErr)
 			return nil, lastCred, err // ErrNoneAvailable
 		}
 		lastCred = cred.Name()
@@ -2043,7 +2043,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 			s.log.Info("oauth token near expiry, refreshing",
 				zap.String("credential", cred.Name()), zap.Time("expires_at", cred.ExpiresAt()))
 			if _, rerr := s.refreshCred(ctx, cred, false); rerr != nil {
-				s.creds.Penalize(cred, s.cooldown)
+				s.penalize(cred, "refresh failed", 0, rerr)
 				lastErr = fmt.Errorf("refresh %s: %w", cred, rerr)
 				continue
 			}
@@ -2058,9 +2058,8 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 				s.log.Debug("request canceled by client", zap.String("credential", cred.Name()))
 				return nil, cred.Name(), ctx.Err()
 			}
-			s.log.Warn("upstream send failed", zap.String("credential", cred.Name()), zap.Error(err))
 			lastErr = err
-			s.creds.Penalize(cred, s.cooldown)
+			s.penalize(cred, "transport error", 0, err)
 			continue
 		}
 		if isCredFailure(resp.StatusCode) {
@@ -2089,9 +2088,7 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 				}
 			}
 			msg := errMessage(peek, status)
-			s.log.Warn("upstream credential failure, sidelining",
-				zap.String("credential", cred.Name()), zap.Int("status", status), zap.String("error", msg))
-			s.creds.Penalize(cred, s.cooldown)
+			s.penalize(cred, "upstream status", status, errors.New(msg))
 			lastErr = fmt.Errorf("upstream auth/rate-limit status %d", status)
 			if msg != "" {
 				lastErr = fmt.Errorf("%w: %s", lastErr, msg)
@@ -2106,6 +2103,43 @@ func (s *Server) dispatch(ctx context.Context, match func(*credential.Credential
 		lastErr = errors.New("no credentials available")
 	}
 	return nil, lastCred, lastErr
+}
+
+// penalize sidelines cred and logs the outcome. The log is what makes a 503
+// storm diagnosable: it carries the cause, the resulting cooldown and failure
+// streak, and whether the failure was a duplicate from a parallel in-flight
+// request (which does not extend the cooldown — see Store.PenalizeDetail).
+func (s *Server) penalize(cred *credential.Credential, reason string, status int, cause error) {
+	d, streak, dup := s.creds.PenalizeDetail(cred, s.cooldown)
+	fields := []zap.Field{
+		zap.String("credential", cred.Name()), zap.String("reason", reason),
+		zap.Int("status", status), zap.Duration("cooldown", d.Round(time.Second)),
+		zap.Int("fail_streak", streak), zap.Bool("duplicate", dup), zap.Error(cause),
+	}
+	if dup {
+		s.log.Info("credential already cooling down, failure not counted", fields...)
+		return
+	}
+	s.log.Warn("credential sidelined", fields...)
+}
+
+// logPoolExhausted records the state of every credential when rotation finds
+// none usable, so a "all upstream credentials are unavailable" 503 can be traced
+// to which accounts were disabled or cooling down, and for how long.
+func (s *Server) logPoolExhausted(attempt int, lastErr error) {
+	states := make([]string, 0, s.creds.Len())
+	for _, in := range s.creds.List() {
+		switch {
+		case !in.Enabled:
+			states = append(states, in.Name+": disabled")
+		case in.CoolingDown:
+			states = append(states, fmt.Sprintf("%s: cooling %ds (streak %d)", in.Name, in.CooldownSecs, in.FailStreak))
+		default:
+			states = append(states, in.Name+": available")
+		}
+	}
+	s.log.Warn("no credential available", zap.Int("attempt", attempt),
+		zap.Strings("pool", states), zap.NamedError("last_error", lastErr))
 }
 
 // credFilter returns a credential matcher from the X-Cerber-Cred header:

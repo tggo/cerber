@@ -335,15 +335,18 @@ func TestPenalizeBackoffAndReset(t *testing.T) {
 	s, _ := NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "a", Key: "k"}},
 		WithClock(func() time.Time { return now }))
 	cred, _ := s.Next()
-	// exponential: 60s, 120s, 240s ...
+	// Consecutive failures (each after the previous cooldown expired) back off
+	// exponentially: 60s, 120s, 240s ...
 	for i, want := range []time.Duration{60 * time.Second, 120 * time.Second, 240 * time.Second} {
 		if got := s.Penalize(cred, 60*time.Second); got != want {
 			t.Errorf("penalize #%d = %v, want %v", i+1, got, want)
 		}
+		now = now.Add(want + time.Second)
 	}
 	// cap at maxCooldown
 	for i := 0; i < 20; i++ {
 		s.Penalize(cred, 60*time.Second)
+		now = now.Add(maxCooldown + time.Second)
 	}
 	if got := s.Penalize(cred, 60*time.Second); got != maxCooldown {
 		t.Errorf("capped penalize = %v, want %v", got, maxCooldown)
@@ -359,5 +362,55 @@ func TestPenalizeBackoffAndReset(t *testing.T) {
 	}
 	if got := s.Penalize(cred, 60*time.Second); got != 60*time.Second {
 		t.Errorf("after reset, first penalize = %v, want 60s", got)
+	}
+}
+
+// A burst of parallel requests that all fail on the same credential must count as
+// ONE failure: duplicates landing while it is already cooling down neither advance
+// the streak nor extend the cooldown.
+func TestPenalizeDetailDedupesParallelFailures(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s, _ := NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "a", Key: "k"}},
+		WithClock(func() time.Time { return now }))
+	cred, _ := s.Next()
+
+	d, streak, dup := s.PenalizeDetail(cred, 60*time.Second)
+	if d != 60*time.Second || streak != 1 || dup {
+		t.Fatalf("first failure = (%v, %d, dup=%v), want (60s, 1, false)", d, streak, dup)
+	}
+	now = now.Add(10 * time.Second)
+	for i := 0; i < 5; i++ { // five more in-flight requests fail after the first
+		d, streak, dup = s.PenalizeDetail(cred, 60*time.Second)
+		if d != 50*time.Second || streak != 1 || !dup {
+			t.Fatalf("duplicate #%d = (%v, %d, dup=%v), want (50s remaining, 1, true)", i+1, d, streak, dup)
+		}
+	}
+	// Once the cooldown has expired, the next failure is a genuine second one.
+	now = now.Add(time.Minute)
+	if d, streak, dup = s.PenalizeDetail(cred, 60*time.Second); d != 120*time.Second || streak != 2 || dup {
+		t.Errorf("post-expiry failure = (%v, %d, dup=%v), want (120s, 2, false)", d, streak, dup)
+	}
+	if d, streak, dup = s.PenalizeDetail(nil, time.Minute); d != 0 || streak != 0 || dup {
+		t.Errorf("nil credential = (%v, %d, %v), want zeros", d, streak, dup)
+	}
+	other := &Credential{}
+	if d, streak, dup = s.PenalizeDetail(other, time.Minute); d != 0 || streak != 0 || dup {
+		t.Errorf("unknown credential = (%v, %d, %v), want zeros", d, streak, dup)
+	}
+}
+
+func TestListReportsCooldownState(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s, _ := NewStore([]config.Credential{{Type: config.CredentialAPIKey, Name: "a", Key: "k"}},
+		WithClock(func() time.Time { return now }))
+	cred, _ := s.Next()
+	if in := s.List()[0]; in.CooldownSecs != 0 || in.FailStreak != 0 {
+		t.Errorf("healthy cred = %+v, want no cooldown/streak", in)
+	}
+	s.Penalize(cred, 60*time.Second)
+	now = now.Add(500 * time.Millisecond)
+	in := s.List()[0]
+	if !in.CoolingDown || in.CooldownSecs != 60 || in.FailStreak != 1 { // 59.5s rounds up
+		t.Errorf("cooling cred = %+v, want cooling 60s streak 1", in)
 	}
 }

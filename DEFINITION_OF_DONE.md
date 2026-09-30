@@ -39,6 +39,8 @@ Keep entries terse. When behaviour changes, edit the entry (don't append a secon
 - Round-robin order is stable; `Next()` cycles through all credentials.
 - A failing credential is sidelined with **exponential backoff** (`Penalize`: 60s→120s→…→30m cap); a successful use (`MarkSuccess`) resets the streak and clears the cooldown. So a persistently-broken account (e.g. unpaid → 403) is parked instead of retried every minute, and `auto` stops picking it until it recovers.
 - When all credentials are cooling down, `Next()` returns `ErrNoneAvailable`.
+- **Parallel failures count once.** A failure that lands while the credential is already cooling down (N in-flight requests that all picked it before the first 429 arrived) is a duplicate: it neither advances the failure streak nor extends the cooldown (`PenalizeDetail` → `duplicate=true`). Without this, a burst of 6 parallel requests walked 60s→…→30m in one go and parked every account, 503-ing all clients.
+- Sidelining is observable: each penalty logs `credential sidelined` (credential, reason, status, cooldown, fail_streak) or `credential already cooling down, failure not counted`; when rotation finds nothing usable it logs `no credential available` with every credential's state (disabled / cooling Ns, streak / available). `List()`/`/admin/accounts` expose `cooldown_secs` and `fail_streak`.
 - Secrets are never present in `String()`/logs; readable only via explicit accessors.
 **Verified:** `internal/credential` tests, 100% coverage — 2026-06-07.
 
