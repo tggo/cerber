@@ -79,6 +79,8 @@ providers:
   gemini:
     credentials:
       - { type: api_key, name: gemini, key: "${GEMINI_KEY}" }
+      - { type: api_key, name: gemini-speaking, key: "${GEMINI_KEY_SPEAKING}" }
+      - { type: api_key, name: gemini-cases, key: "${GEMINI_KEY_CASES}" }
 
   grok:
     credentials:
