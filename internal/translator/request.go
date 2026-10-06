@@ -282,10 +282,11 @@ func applyJSONResponseFormat(ar *anthropicRequest, rf *openaiResponseFormat) {
 }
 
 // noForcedToolChoiceModels reject tool_choice "tool" and "any" outright with a 400 ("not supported
-// for this model"); measured 2026-09-26 against claude-opus-5-5 and claude-fable-5-1, while
+// for this model"); measured 2026-09-26 against claude-opus-5-5 and claude-fable-5-1 (and
+// claude-sonnet-5-5, reported 2026-10-06 in issue #2), while
 // claude-sonnet-5, claude-opus-4-8 and claude-haiku-4-5 still accept it. Matched as prefixes so
 // dated snapshots of the same model are covered.
-var noForcedToolChoiceModels = []string{"claude-opus-5-5", "claude-fable-5-1"}
+var noForcedToolChoiceModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
 // forcesToolChoice reports whether model accepts a forced tool_choice.
 func forcesToolChoice(model string) bool {

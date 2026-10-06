@@ -207,6 +207,7 @@ func TestOpenAIToAnthropic_JSONModeOnModelsThatCannotBeForced(t *testing.T) {
 	}{
 		{model: "claude-opus-5-5", wantChoice: "auto", wantSystem: true},
 		{model: "claude-fable-5-1", wantChoice: "auto", wantSystem: true},
+		{model: "claude-sonnet-5-5", wantChoice: "auto", wantSystem: true},
 		{model: "claude-sonnet-5", wantChoice: "tool", wantSystem: false},
 		{model: "claude-haiku-4-5-20251001", wantChoice: "tool", wantSystem: false},
 	}
