@@ -23,6 +23,7 @@ var fullCloakModelMarkers = []string{
 	"claude-opus-5-5",
 	"claude-opus-4-8",
 	"claude-haiku-4-5",
+	"claude-haiku-5-5",
 }
 
 // oauthSystemForModel returns the OAuth system-prompt transform to apply for the
