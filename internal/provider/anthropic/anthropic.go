@@ -81,9 +81,12 @@ const ModelsPath = "/v1/models"
 // provider. Keep in sync with the cloak gate (fullCloakModelMarkers) and
 // Anthropic's current subscription lineup.
 var SubscriptionModels = []string{
+	"claude-fable-5-1",
 	"claude-opus-5-5",
 	"claude-opus-4-8",
+	"claude-sonnet-5-5",
 	"claude-sonnet-5",
+	"claude-haiku-5-5",
 	"claude-haiku-4-5-20251001",
 }
 
