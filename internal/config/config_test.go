@@ -568,3 +568,17 @@ func TestLoad_FileRoundTrip(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestParse_PricingCacheRates(t *testing.T) {
+	y := "access: {keys: [k]}\nusage: {pricing: {claude-opus-5-5: {input: 5, output: 25, cache_read: 0.2, cache_write: 6.25}, claude-x: {input: 1, output: 2}}}\nproviders: {perplexity: {credentials: [{type: api_key, key: x}]}}"
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := c.Usage.Pricing["claude-opus-5-5"]; got != (Price{Input: 5, Output: 25, CacheRead: 0.2, CacheWrite: 6.25}) {
+		t.Errorf("opus price = %+v", got)
+	}
+	if got := c.Usage.Pricing["claude-x"]; got.CacheRead != 0 || got.CacheWrite != 0 {
+		t.Errorf("unset cache rates must stay zero (default multipliers): %+v", got)
+	}
+}

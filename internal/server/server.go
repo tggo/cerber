@@ -558,12 +558,13 @@ func (s *Server) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="cerber-usage.csv"`)
 	w.WriteHeader(http.StatusOK)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"section", "key", "requests", "errors", "input_tokens", "output_tokens", "cost"})
+	_ = cw.Write([]string{"section", "key", "requests", "errors", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost"})
 	row := func(section, key string, st usage.Stat, cost float64) {
 		_ = cw.Write([]string{
 			section, key,
 			strconv.FormatInt(st.Requests, 10), strconv.FormatInt(st.Errors, 10),
 			strconv.FormatInt(st.InputTokens, 10), strconv.FormatInt(st.OutputTokens, 10),
+			strconv.FormatInt(st.CacheReadTokens, 10), strconv.FormatInt(st.CacheWriteTokens, 10),
 			strconv.FormatFloat(cost, 'f', -1, 64),
 		})
 	}
@@ -583,12 +584,14 @@ func (s *Server) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
 // accountView is one credential's state plus its usage and quota, for orchestration.
 type accountView struct {
 	credential.Info
-	Provider     string          `json:"provider"`
-	Requests     int64           `json:"requests"`
-	Errors       int64           `json:"errors"`
-	InputTokens  int64           `json:"input_tokens"`
-	OutputTokens int64           `json:"output_tokens"`
-	Quota        *quota.Snapshot `json:"quota,omitempty"`
+	Provider         string          `json:"provider"`
+	Requests         int64           `json:"requests"`
+	Errors           int64           `json:"errors"`
+	InputTokens      int64           `json:"input_tokens"`
+	OutputTokens     int64           `json:"output_tokens"`
+	CacheReadTokens  int64           `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64           `json:"cache_write_tokens,omitempty"`
+	Quota            *quota.Snapshot `json:"quota,omitempty"`
 }
 
 // accountStores returns every provider credential store keyed by provider name.
@@ -728,6 +731,7 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			av := accountView{
 				Info: info, Provider: prov, Requests: st.Requests, Errors: st.Errors,
 				InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
+				CacheReadTokens: st.CacheReadTokens, CacheWriteTokens: st.CacheWriteTokens,
 			}
 			if q, ok := s.quota.Get(info.Name); ok {
 				av.Quota = &q
@@ -870,6 +874,20 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "- Cheap/fast: `claude-haiku-4-5-20251001`.\n")
 	fmt.Fprintf(&b, "- Local/free: an ollama model from the list below.\n")
 	fmt.Fprintf(&b, "Always set `model` to an exact id (see `GET /v1/models` or the list below). Streaming: add `\"stream\": true`.\n\n")
+
+	fmt.Fprintf(&b, "## Prompt caching (Claude)\n\n")
+	fmt.Fprintf(&b, "Repeated stable context (instructions, rubrics, examples) is billed at ~0.1x input when it is a cache hit. To get hits:\n\n")
+	fmt.Fprintf(&b, "- Use `POST /v1/messages` (Anthropic dialect). `/v1/chat/completions` does not carry `cache_control`.\n")
+	fmt.Fprintf(&b, "- Put the stable part FIRST and keep it byte-identical across requests: render order is `tools` → `system` → `messages`. No timestamps, ids or unsorted JSON in it.\n")
+	fmt.Fprintf(&b, "- Mark the LAST stable block with `\"cache_control\": {\"type\": \"ephemeral\"}` (on a `system` block or a user content block). Put the varying part (the item to process) in a separate block AFTER it. Max 4 markers per request.\n")
+	fmt.Fprintf(&b, "- The marked prefix must reach the model minimum or it silently is not cached: 512 tokens on Claude 5 models (`claude-*-5*`, incl. `claude-haiku-5-5`), 1024 on `claude-opus-4-8`/`claude-sonnet-5`, 4096 on `claude-haiku-4-5`.\n")
+	fmt.Fprintf(&b, "- An entry lives 5 minutes, refreshed on every hit (`\"ttl\": \"1h\"` for bursty traffic, 2x write cost). Writes cost 1.25x input, so caching pays off from the 2nd request within the TTL. Caches are per model.\n")
+	fmt.Fprintf(&b, "- Verify: the response `usage.cache_read_input_tokens` must be > 0 on the 2nd identical-prefix request. cerber shows the cached share per key/model in the dashboard (\"cached\" column).\n")
+	fmt.Fprintf(&b, "- cerber keeps your markers when it rewrites OAuth requests (system text moved into the first user message keeps its `cache_control`).\n\n")
+	fmt.Fprintf(&b, "Example (classification of many posts against fixed criteria):\n\n")
+	fmt.Fprintf(&b, "    {\"model\": \"claude-haiku-5-5\", \"max_tokens\": 1024,\n")
+	fmt.Fprintf(&b, "     \"system\": [{\"type\": \"text\", \"text\": \"<role, about, criteria, reference examples>\", \"cache_control\": {\"type\": \"ephemeral\"}}],\n")
+	fmt.Fprintf(&b, "     \"messages\": [{\"role\": \"user\", \"content\": \"<the post>\"}]}\n\n")
 
 	fmt.Fprintf(&b, "## Picking a specific account / subscription\n\n")
 	fmt.Fprintf(&b, "Send header `X-Cerber-Cred: <value>` to pin which credential serves the request: `oauth` (a subscription token), `key` (an API key), or an exact account name from `GET /admin/accounts`. Omit it to let cerber rotate.\n\n")
@@ -1447,8 +1465,7 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "read upstream response")
 			return
 		}
-		in, out := anthropicUsage(body)
-		s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+		s.record(r.Context(), anthropicEvent(cred, model, anthropicUsage(body)))
 		copyUpstreamHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
@@ -1458,40 +1475,46 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	// token counts are recorded (Claude Code streams).
 	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	in, out := streamRelayAnthropicUsage(w, resp.Body)
-	s.log.Debug("native usage", zap.String("credential", cred), zap.Int64("input", in), zap.Int64("output", out), zap.Bool("stream", true))
-	s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+	u := streamRelayAnthropicUsage(w, resp.Body)
+	s.log.Debug("native usage", zap.String("credential", cred), zap.Int64("input", u.In), zap.Int64("output", u.Out),
+		zap.Int64("cache_read", u.CacheRead), zap.Int64("cache_write", u.CacheWrite), zap.Bool("stream", true))
+	s.record(r.Context(), anthropicEvent(cred, model, u))
+}
+
+// anthropicEvent builds the usage event for an Anthropic response: InputTokens
+// is the total input and the cache read/write counts are its subsets.
+func anthropicEvent(cred, model string, u translator.Usage) usage.Event {
+	return usage.Event{
+		Credential: cred, Model: model, InputTokens: u.In, OutputTokens: u.Out,
+		CacheReadTokens: u.CacheRead, CacheWriteTokens: u.CacheWrite,
+	}
 }
 
 // streamRelayAnthropicUsage copies an Anthropic SSE stream to the client
-// (flushing per line) while extracting token usage: input from message_start,
-// output from message_delta.
-func streamRelayAnthropicUsage(w http.ResponseWriter, body io.Reader) (in, out int64) {
+// (flushing per line) while extracting token usage: input and cache counts from
+// message_start (and message_delta when it repeats them), output from
+// message_delta.
+func streamRelayAnthropicUsage(w http.ResponseWriter, body io.Reader) (u translator.Usage) {
 	flush := flusher(w)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if _, err := w.Write(append(line, '\n')); err != nil {
-			return in, out
+			return u
 		}
 		flush()
 		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			i, o := parseAnthropicStreamUsage(bytes.TrimSpace(data))
-			if i > 0 {
-				in = i
-			}
-			if o > 0 {
-				out = o
-			}
+			parseAnthropicStreamUsage(bytes.TrimSpace(data), &u)
 		}
 	}
-	return in, out
+	return u
 }
 
-// parseAnthropicStreamUsage pulls token counts from one SSE data payload. Input
-// (from message_start) includes cache tokens; output comes from message_delta.
-func parseAnthropicStreamUsage(data []byte) (in, out int64) {
+// parseAnthropicStreamUsage folds one SSE data payload's usage into u: the
+// message_start usage (input incl. cache) first, then the top-level
+// message_delta usage (output, and cache/input counts when repeated).
+func parseAnthropicStreamUsage(data []byte, u *translator.Usage) {
 	var ev struct {
 		Message struct {
 			Usage anthropicUsageFields `json:"usage"`
@@ -1499,13 +1522,10 @@ func parseAnthropicStreamUsage(data []byte) (in, out int64) {
 		Usage anthropicUsageFields `json:"usage"`
 	}
 	if json.Unmarshal(data, &ev) != nil {
-		return 0, 0
+		return
 	}
-	out = ev.Usage.OutputTokens
-	if out == 0 {
-		out = ev.Message.Usage.OutputTokens
-	}
-	return ev.Message.Usage.totalInput(), out
+	ev.Message.Usage.addTo(u)
+	ev.Usage.addTo(u)
 }
 
 // handleModels serves an OpenAI-shaped model list aggregated from every
@@ -1975,9 +1995,9 @@ func (s *Server) relayAnthropicAsOpenAI(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
 		flush := flusher(w)
-		in, out, err := s.tr.StreamAnthropicToOpenAI(w, resp.Body, flush)
+		u, err := s.tr.StreamAnthropicToOpenAIUsage(w, resp.Body, flush)
 		// Record the streamed usage (cost/budget) even if the client went away.
-		s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+		s.record(r.Context(), anthropicEvent(cred, model, u))
 		_ = err
 		return
 	}
@@ -1987,8 +2007,7 @@ func (s *Server) relayAnthropicAsOpenAI(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadGateway, "read upstream response")
 		return
 	}
-	in, out := anthropicUsage(upstreamBody)
-	s.record(r.Context(), usage.Event{Credential: cred, Model: model, InputTokens: in, OutputTokens: out})
+	s.record(r.Context(), anthropicEvent(cred, model, anthropicUsage(upstreamBody)))
 	translated, err := s.tr.AnthropicToOpenAI(upstreamBody)
 	if err != nil {
 		s.log.Warn("translate upstream response failed", zap.Error(err),
@@ -2241,15 +2260,17 @@ func setModelField(body []byte, model string) ([]byte, bool) {
 	return out, true
 }
 
-// anthropicUsage extracts input/output token counts from an Anthropic Messages
-// response body. Input includes cache creation/read tokens (Claude Code caches
-// its large tool/system prompt, so plain input_tokens alone is misleadingly low).
-func anthropicUsage(body []byte) (in, out int64) {
+// anthropicUsage extracts token counts from an Anthropic Messages response
+// body. In is the total input including cache creation/read tokens (Claude Code
+// caches its large tool/system prompt, so plain input_tokens alone is
+// misleadingly low); CacheRead/CacheWrite are its cached subsets.
+func anthropicUsage(body []byte) (u translator.Usage) {
 	var probe struct {
 		Usage anthropicUsageFields `json:"usage"`
 	}
 	_ = json.Unmarshal(body, &probe)
-	return probe.Usage.totalInput(), probe.Usage.OutputTokens
+	probe.Usage.addTo(&u)
+	return u
 }
 
 // anthropicUsageFields are the token fields in an Anthropic usage object.
@@ -2260,9 +2281,9 @@ type anthropicUsageFields struct {
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
-// totalInput sums fresh input with cache creation and cache read tokens.
-func (u anthropicUsageFields) totalInput() int64 {
-	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+// addTo folds the fields into u.
+func (f anthropicUsageFields) addTo(u *translator.Usage) {
+	u.Add(f.InputTokens, f.OutputTokens, f.CacheReadInputTokens, f.CacheCreationInputTokens)
 }
 
 // isCredFailure reports statuses that indicate the credential, not the request,
@@ -2400,7 +2421,9 @@ func (s *Server) record(ctx context.Context, e usage.Event) {
 	seq := s.usage.RecordRequest(usage.RequestEvent{
 		Time: s.now(), IP: m.ip, UserAgent: m.ua, Client: m.client, Endpoint: m.endpoint,
 		Provider: s.route(e.Model), Model: e.Model, Credential: e.Credential,
-		InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, Cost: cost, Error: e.IsError,
+		InputTokens: e.InputTokens, OutputTokens: e.OutputTokens,
+		CacheReadTokens: e.CacheReadTokens, CacheWriteTokens: e.CacheWriteTokens,
+		Cost: cost, Error: e.IsError,
 	})
 	if tag, ok := ctx.Value(tagKey).(*reqTag); ok {
 		tag.seq = seq // logRequests attaches the served status/error message here

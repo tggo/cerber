@@ -20,6 +20,7 @@ import (
 	anthropicpkg "github.com/tggo/cerber/internal/provider/anthropic"
 	providermocks "github.com/tggo/cerber/internal/provider/mocks"
 	"github.com/tggo/cerber/internal/server/mocks"
+	"github.com/tggo/cerber/internal/translator"
 	"github.com/tggo/cerber/internal/usage"
 
 	"github.com/stretchr/testify/mock"
@@ -323,21 +324,103 @@ func TestNative_StreamRecordsUsage(t *testing.T) {
 }
 
 func TestParseAnthropicStreamUsage(t *testing.T) {
-	in, out := parseAnthropicStreamUsage([]byte(`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`))
-	if in != 10 {
-		t.Errorf("input = %d", in)
+	tests := []struct {
+		name                         string
+		events                       []string
+		in, out, cacheRead, cacheWrt int64
+	}{
+		{"plain start", []string{`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`}, 10, 1, 0, 0},
+		{"cache in start (Claude Code caches its big prompt)",
+			[]string{`{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":2000,"cache_read_input_tokens":48000}}}`},
+			50010, 0, 48000, 2000},
+		{"delta output only",
+			[]string{`{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90}}}`, `{"type":"message_delta","usage":{"output_tokens":42}}`},
+			100, 42, 90, 0},
+		{"delta repeats cache cumulatively",
+			[]string{`{"type":"message_start","message":{"usage":{"input_tokens":10}}}`, `{"type":"message_delta","usage":{"input_tokens":10,"cache_read_input_tokens":500,"cache_creation_input_tokens":40,"output_tokens":7}}`},
+			550, 7, 500, 40},
+		{"zeros in delta do not erase start", []string{`{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90}}}`, `{"type":"message_delta","usage":{"input_tokens":0,"cache_read_input_tokens":0,"output_tokens":3}}`}, 100, 3, 90, 0},
+		{"bad json", []string{`not json`}, 0, 0, 0, 0},
 	}
-	// cache tokens are included in input (Claude Code caches its big tool/system prompt)
-	inC, _ := parseAnthropicStreamUsage([]byte(`{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":2000,"cache_read_input_tokens":48000}}}`))
-	if inC != 50010 {
-		t.Errorf("input with cache = %d, want 50010", inC)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var u translator.Usage
+			for _, e := range tc.events {
+				parseAnthropicStreamUsage([]byte(e), &u)
+			}
+			if u.In != tc.in || u.Out != tc.out || u.CacheRead != tc.cacheRead || u.CacheWrite != tc.cacheWrt {
+				t.Errorf("usage = %+v, want in %d out %d read %d write %d", u, tc.in, tc.out, tc.cacheRead, tc.cacheWrt)
+			}
+		})
 	}
-	_, out = parseAnthropicStreamUsage([]byte(`{"type":"message_delta","usage":{"output_tokens":42}}`))
-	if out != 42 {
-		t.Errorf("output = %d", out)
+}
+
+func TestAnthropicUsage_NonStreamSplit(t *testing.T) {
+	u := anthropicUsage([]byte(`{"usage":{"input_tokens":5,"output_tokens":9,"cache_creation_input_tokens":100,"cache_read_input_tokens":400}}`))
+	if u.In != 505 || u.Out != 9 || u.CacheRead != 400 || u.CacheWrite != 100 {
+		t.Errorf("usage = %+v", u)
 	}
-	if i, o := parseAnthropicStreamUsage([]byte(`not json`)); i != 0 || o != 0 {
-		t.Errorf("bad json = %d %d", i, o)
+	if u := anthropicUsage([]byte(`garbage`)); u != (translator.Usage{}) {
+		t.Errorf("garbage usage = %+v", u)
+	}
+}
+
+// Cache split reaches the stats API (totals, per model, per credential, per
+// client) and the request log, for both streamed and buffered native calls.
+func TestNative_CacheSplitInAPIs(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	s.usage.SetPricing(map[string]usage.Price{"claude-x": {Input: 10, Output: 0}})
+	stream := "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":800,\"cache_creation_input_tokens\":100}}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n"
+	up.EXPECT().Send(mock.Anything, mock.Anything, true, mock.Anything, mock.Anything).
+		Return(resp(200, "text/event-stream", stream), nil).Once()
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"usage":{"input_tokens":50,"cache_read_input_tokens":150,"output_tokens":1}}`), nil).Once()
+	h := s.Handler()
+	do(t, h, "POST", "/v1/messages", `{"model":"claude-x","stream":true}`, clientKey)
+	do(t, h, "POST", "/v1/messages", `{"model":"claude-x"}`, clientKey)
+
+	var stats struct {
+		Totals       usage.Stat `json:"totals"`
+		TotalCost    float64    `json:"total_cost"`
+		ByModel      []usage.Entry
+		ByCredential []usage.Entry `json:"by_credential"`
+	}
+	body := do(t, h, "GET", "/admin/stats", "", clientKey).Body.Bytes()
+	if err := json.Unmarshal(body, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.Totals.InputTokens != 1200 || stats.Totals.CacheReadTokens != 950 || stats.Totals.CacheWriteTokens != 100 {
+		t.Errorf("totals = %+v", stats.Totals)
+	}
+	// 150 fresh*10 + 950 read*1 + 100 write*12.5 = 1500+950+1250 = 3700 per 1e6
+	if want := 3700.0 / 1e6; stats.TotalCost < want-1e-12 || stats.TotalCost > want+1e-12 {
+		t.Errorf("total cost = %v, want %v", stats.TotalCost, want)
+	}
+	if !strings.Contains(string(body), `"cache_read_tokens":950`) {
+		t.Errorf("per-entry cache split missing: %s", body)
+	}
+	for _, e := range stats.ByCredential {
+		if e.CacheReadTokens != 950 {
+			t.Errorf("credential entry = %+v", e)
+		}
+	}
+
+	var reqs struct {
+		Requests []usage.RequestEvent `json:"requests"`
+	}
+	if err := json.Unmarshal(do(t, h, "GET", "/admin/requests", "", clientKey).Body.Bytes(), &reqs); err != nil {
+		t.Fatal(err)
+	}
+	var reads, writes int64
+	for _, r := range reqs.Requests {
+		if r.Endpoint == "/v1/messages" {
+			reads += r.CacheReadTokens
+			writes += r.CacheWriteTokens
+		}
+	}
+	if reads != 950 || writes != 100 {
+		t.Errorf("request log cache read/write = %d/%d, want 950/100", reads, writes)
 	}
 }
 
@@ -1258,6 +1341,7 @@ func TestLLMDoc(t *testing.T) {
 		"X-Cerber-Compat", "`raw`", "`force`", "max_completion_tokens", // compatibility mode
 		"/v1/search", "sonar*", "citations", // perplexity: web search endpoint + web-grounded chat
 		"comfyui-*", "ComfyUI's queue", // local GGUF inside ComfyUI
+		"## Prompt caching", "cache_control", "cache_read_input_tokens", "512 tokens", // caching guide
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("llm.md missing %q\n%s", want, body)
@@ -1407,7 +1491,7 @@ func TestUsageCSV(t *testing.T) {
 		t.Errorf("content-type = %q", ct)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "section,key,requests,errors,input_tokens,output_tokens,cost") {
+	if !strings.Contains(body, "section,key,requests,errors,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost") {
 		t.Errorf("missing header: %s", body)
 	}
 	if !strings.Contains(body, "credential,c1,") || !strings.Contains(body, "model,claude-x,") {
@@ -1566,5 +1650,26 @@ func TestKeyUsage_PerKeyBreakdown(t *testing.T) {
 	}
 	if rep.Name != "ghost" || rep.Requests != 0 || len(rep.ByModel) != 0 {
 		t.Errorf("ghost report = %+v", rep)
+	}
+}
+
+// The OpenAI-compatible path translated from Anthropic carries the cache split
+// into the usage tracker (stream and non-stream).
+func TestOpenAI_TranslatedCacheSplit(t *testing.T) {
+	s, up := newServer(t, newStore(t, 1))
+	stream := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":70,\"cache_creation_input_tokens\":20}}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	up.EXPECT().Send(mock.Anything, mock.Anything, true, mock.Anything, mock.Anything).
+		Return(resp(200, "text/event-stream", stream), nil).Once()
+	up.EXPECT().Send(mock.Anything, mock.Anything, false, mock.Anything, mock.Anything).
+		Return(resp(200, "application/json", `{"id":"m","model":"claude","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"cache_read_input_tokens":9,"output_tokens":2}}`), nil).Once()
+	h := s.Handler()
+	body := `{"model":"claude","messages":[{"role":"user","content":"hi"}]`
+	do(t, h, "POST", "/v1/chat/completions", body+`,"stream":true}`, clientKey)
+	do(t, h, "POST", "/v1/chat/completions", body+`}`, clientKey)
+	tot := s.usage.Snapshot().Totals
+	if tot.InputTokens != 110 || tot.CacheReadTokens != 79 || tot.CacheWriteTokens != 20 {
+		t.Errorf("totals = %+v, want input 110, read 79, write 20", tot)
 	}
 }

@@ -23,6 +23,12 @@ type Stat struct {
 	Errors       int64 `json:"errors"`
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
+	// CacheReadTokens / CacheWriteTokens are the prompt-cache subsets of
+	// InputTokens (which still counts all input, cached or not): tokens served
+	// from the cache and tokens written to it. Zero for providers that report no
+	// cache split and for data persisted before the split existed.
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 	// ExtraCost is cost not derivable from tokens × pricing, fixed at record
 	// time: per-request fees, and the difference between an upstream-reported
 	// cost and the token-priced estimate (so it may be negative). Reported cost
@@ -73,10 +79,48 @@ const retentionHours = 24 * 30
 
 // Price is per-model pricing: Input/Output in cost units per 1,000,000 tokens,
 // Request a flat fee per successful request (e.g. a web-search charge).
+// CacheRead/CacheWrite optionally price prompt-cache tokens per 1,000,000; when
+// zero they default to 0.1x and 1.25x Input (Anthropic's standard multipliers).
 type Price struct {
-	Input   float64 `json:"input"`
-	Output  float64 `json:"output"`
-	Request float64 `json:"request,omitempty"`
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	Request    float64 `json:"request,omitempty"`
+	CacheRead  float64 `json:"cache_read,omitempty"`
+	CacheWrite float64 `json:"cache_write,omitempty"`
+}
+
+// Default prompt-cache price multipliers applied to Price.Input.
+const (
+	cacheReadMultiplier  = 0.1
+	cacheWriteMultiplier = 1.25
+)
+
+// inputCost prices s's input tokens: cache reads and writes at their cache
+// rates, the remainder at the plain input rate. Cache tokens are clamped to
+// InputTokens so a malformed split never yields negative fresh input.
+func (p Price) inputCost(s Stat) float64 {
+	read, write := s.CacheReadTokens, s.CacheWriteTokens
+	if read < 0 {
+		read = 0
+	}
+	if write < 0 {
+		write = 0
+	}
+	if read > s.InputTokens {
+		read = s.InputTokens
+	}
+	if write > s.InputTokens-read {
+		write = s.InputTokens - read
+	}
+	readRate, writeRate := p.CacheRead, p.CacheWrite
+	if readRate == 0 {
+		readRate = p.Input * cacheReadMultiplier
+	}
+	if writeRate == 0 {
+		writeRate = p.Input * cacheWriteMultiplier
+	}
+	fresh := s.InputTokens - read - write
+	return (float64(fresh)*p.Input + float64(read)*readRate + float64(write)*writeRate) / 1e6
 }
 
 // Event is one recorded request outcome.
@@ -87,6 +131,9 @@ type Event struct {
 	IsError      bool
 	InputTokens  int64
 	OutputTokens int64
+	// CacheReadTokens/CacheWriteTokens are subsets of InputTokens (see Stat).
+	CacheReadTokens  int64
+	CacheWriteTokens int64
 	// ReportedCost is the cost the upstream itself reported for this request
 	// (e.g. Perplexity's usage.cost.total_cost, which includes its search fee).
 	// When > 0 it is authoritative: pricing is not applied to this event.
@@ -186,11 +233,19 @@ func (t *Tracker) eventCost(e Event) float64 {
 	if e.ReportedCost > 0 {
 		return e.ReportedCost
 	}
-	cost := t.modelCost(e.Model, Stat{InputTokens: e.InputTokens, OutputTokens: e.OutputTokens})
+	cost := t.modelCost(e.Model, eventStat(e))
 	if p, ok := t.priceFor(e.Model); ok && !e.IsError {
 		cost += p.Request
 	}
 	return cost
+}
+
+// eventStat is the token-bearing part of an event as a Stat, for pricing.
+func eventStat(e Event) Stat {
+	return Stat{
+		InputTokens: e.InputTokens, OutputTokens: e.OutputTokens,
+		CacheReadTokens: e.CacheReadTokens, CacheWriteTokens: e.CacheWriteTokens,
+	}
 }
 
 // priceFor resolves a model's price: an exact match wins, otherwise the
@@ -218,7 +273,7 @@ func (t *Tracker) modelCost(model string, s Stat) float64 {
 	if !ok {
 		return s.ExtraCost
 	}
-	return float64(s.InputTokens)/1e6*p.Input + float64(s.OutputTokens)/1e6*p.Output + s.ExtraCost
+	return p.inputCost(s) + float64(s.OutputTokens)/1e6*p.Output + s.ExtraCost
 }
 
 // Record adds one event to the aggregates.
@@ -239,7 +294,7 @@ func (t *Tracker) Record(e Event) {
 	defer t.mu.Unlock()
 	// Fix the non-token part of this event's cost now, so later snapshots
 	// (tokens × pricing + ExtraCost) add up to EventCost.
-	e.extraCost = t.eventCost(e) - t.modelCost(e.Model, Stat{InputTokens: e.InputTokens, OutputTokens: e.OutputTokens})
+	e.extraCost = t.eventCost(e) - t.modelCost(e.Model, eventStat(e))
 	apply(&t.totals, e, now)
 	apply(get(t.byCredential, cred), e, now)
 	apply(get(t.byModel, model), e, now)
@@ -331,6 +386,8 @@ func apply(s *Stat, e Event, now time.Time) {
 	}
 	s.InputTokens += e.InputTokens
 	s.OutputTokens += e.OutputTokens
+	s.CacheReadTokens += e.CacheReadTokens
+	s.CacheWriteTokens += e.CacheWriteTokens
 	s.ExtraCost += e.extraCost
 	s.LastUsed = now
 }
@@ -400,6 +457,8 @@ func (t *Tracker) SnapshotWindow(window time.Duration) Report {
 		totals.Errors += st.Errors
 		totals.InputTokens += st.InputTokens
 		totals.OutputTokens += st.OutputTokens
+		totals.CacheReadTokens += st.CacheReadTokens
+		totals.CacheWriteTokens += st.CacheWriteTokens
 		totals.ExtraCost += st.ExtraCost
 		if st.LastUsed.After(totals.LastUsed) {
 			totals.LastUsed = st.LastUsed
@@ -477,6 +536,8 @@ func apply2(dst *Stat, src Stat) {
 	dst.Errors += src.Errors
 	dst.InputTokens += src.InputTokens
 	dst.OutputTokens += src.OutputTokens
+	dst.CacheReadTokens += src.CacheReadTokens
+	dst.CacheWriteTokens += src.CacheWriteTokens
 	dst.ExtraCost += src.ExtraCost
 	if src.LastUsed.After(dst.LastUsed) {
 		dst.LastUsed = src.LastUsed
@@ -515,6 +576,8 @@ func (t *Tracker) clientReportFromModels(name string, byModelStat map[string]*St
 		cr.Errors += byModel[i].Errors
 		cr.InputTokens += byModel[i].InputTokens
 		cr.OutputTokens += byModel[i].OutputTokens
+		cr.CacheReadTokens += byModel[i].CacheReadTokens
+		cr.CacheWriteTokens += byModel[i].CacheWriteTokens
 		cr.ExtraCost += byModel[i].ExtraCost
 		if byModel[i].LastUsed.After(cr.LastUsed) {
 			cr.LastUsed = byModel[i].LastUsed

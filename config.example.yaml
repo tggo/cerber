@@ -56,6 +56,8 @@ usage:
   # pricing:
   #   claude-opus:  { input: 5, output: 25 }
   #   claude-sonnet:{ input: 3, output: 15 }
+  #   # optional prompt-cache prices per 1M tokens; default 0.1x (read) / 1.25x (write) of input:
+  #   claude-opus-5-5: { input: 5, output: 25, cache_read: 0.2, cache_write: 6.25 }
   #   gpt-4o-mini:  { input: 0.15, output: 0.6 }
   #   perplexity-search: { request: 0.005 }   # POST /v1/search, $5 per 1k
   # recent_log: 1000               # # of recent per-request events kept in memory

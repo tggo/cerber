@@ -1,7 +1,11 @@
 package usage
 
 import (
+	"encoding/json"
+	"math"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -422,5 +426,118 @@ func TestSnapshotWindow_ByClientScopedToWindow(t *testing.T) {
 	}
 	if fg.Requests != 3 {
 		t.Fatalf("all-time gandalf = %+v, want 3 requests", fg)
+	}
+}
+
+func TestCacheCost(t *testing.T) {
+	tests := []struct {
+		name  string
+		price Price
+		ev    Event
+		want  float64 // per-1M-token units
+	}{
+		{"default multipliers", Price{Input: 10, Output: 20},
+			Event{InputTokens: 1_000_000, CacheReadTokens: 600_000, CacheWriteTokens: 100_000, OutputTokens: 1_000_000},
+			// fresh 0.3*10 + read 0.6*1 + write 0.1*12.5 + out 20
+			3 + 0.6 + 1.25 + 20},
+		{"explicit cache prices", Price{Input: 10, Output: 0, CacheRead: 0.2, CacheWrite: 7},
+			Event{InputTokens: 1_000_000, CacheReadTokens: 500_000, CacheWriteTokens: 250_000},
+			2.5 + 0.1 + 1.75},
+		{"explicit read only, write defaults", Price{Input: 4, CacheRead: 0.25},
+			Event{InputTokens: 1_000_000, CacheReadTokens: 1_000_000}, 0.25},
+		{"no cache equals plain", Price{Input: 3, Output: 15},
+			Event{InputTokens: 2_000_000, OutputTokens: 1_000_000}, 6 + 15},
+		{"split larger than input is clamped", Price{Input: 10},
+			Event{InputTokens: 100_000, CacheReadTokens: 900_000, CacheWriteTokens: 900_000}, 0.1},
+		{"negative split ignored", Price{Input: 10},
+			Event{InputTokens: 1_000_000, CacheReadTokens: -5, CacheWriteTokens: -5}, 10},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := fixedTracker()
+			tr.SetPricing(map[string]Price{"m": tc.price})
+			tc.ev.Model = "m"
+			if got := tr.EventCost(tc.ev); math.Abs(got-tc.want) > 1e-9 {
+				t.Errorf("EventCost = %v, want %v", got, tc.want)
+			}
+			tr.Record(tc.ev)
+			if got := tr.Snapshot().TotalCost; math.Abs(got-tc.want) > 1e-9 {
+				t.Errorf("Snapshot total = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCacheTokens_AggregatesAndWindow(t *testing.T) {
+	tr := fixedTracker()
+	tr.Record(Event{Credential: "a", Client: "k", Model: "m", InputTokens: 100, CacheReadTokens: 60, CacheWriteTokens: 10})
+	tr.Record(Event{Credential: "a", Client: "k", Model: "m", InputTokens: 50, CacheReadTokens: 20})
+	for name, rep := range map[string]Report{"all": tr.Snapshot(), "window": tr.SnapshotWindow(time.Hour)} {
+		if rep.Totals.CacheReadTokens != 80 || rep.Totals.CacheWriteTokens != 10 || rep.Totals.InputTokens != 150 {
+			t.Errorf("%s totals = %+v", name, rep.Totals)
+		}
+		if e := rep.ByModel[0]; e.CacheReadTokens != 80 || e.CacheWriteTokens != 10 {
+			t.Errorf("%s by_model = %+v", name, e)
+		}
+		if e := rep.ByCredential[0]; e.CacheReadTokens != 80 {
+			t.Errorf("%s by_credential = %+v", name, e)
+		}
+		cr := rep.ByClient[0]
+		if cr.CacheReadTokens != 80 || cr.CacheWriteTokens != 10 || cr.ByModel[0].CacheReadTokens != 80 {
+			t.Errorf("%s by_client = %+v", name, cr)
+		}
+		if len(rep.Series) != 1 || rep.Series[0].CacheReadTokens != 80 {
+			t.Errorf("%s series = %+v", name, rep.Series)
+		}
+	}
+}
+
+func TestCacheTokens_PersistRoundTripAndLegacy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "u.json")
+	tr := fixedTracker()
+	tr.Record(Event{Credential: "a", Model: "m", InputTokens: 100, CacheReadTokens: 60, CacheWriteTokens: 10})
+	if err := tr.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := loaded.Snapshot().Totals; s.CacheReadTokens != 60 || s.CacheWriteTokens != 10 {
+		t.Errorf("round trip totals = %+v", s)
+	}
+
+	// Data persisted before the split existed loads with zero cache fields.
+	legacy := filepath.Join(t.TempDir(), "old.json")
+	old := `{"totals":{"requests":2,"errors":0,"input_tokens":30,"output_tokens":4,"last_used":"2026-01-01T00:00:00Z"},` +
+		`"by_model":{"m":{"requests":2,"errors":0,"input_tokens":30,"output_tokens":4,"last_used":"2026-01-01T00:00:00Z"}},"since_unix":5}`
+	if err := os.WriteFile(legacy, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lt, err := Load(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := lt.Snapshot()
+	if rep.Totals.InputTokens != 30 || rep.Totals.CacheReadTokens != 0 || rep.ByModel[0].CacheWriteTokens != 0 {
+		t.Errorf("legacy totals = %+v", rep.Totals)
+	}
+	out, _ := json.Marshal(rep.Totals)
+	if strings.Contains(string(out), "cache_") {
+		t.Errorf("zero cache fields must be omitted: %s", out)
+	}
+}
+
+func TestRecentRequests_CacheFields(t *testing.T) {
+	tr := fixedTracker()
+	tr.RecordRequest(RequestEvent{Model: "m", InputTokens: 10, CacheReadTokens: 7, CacheWriteTokens: 2})
+	got, _ := tr.RecentRequests(RequestFilter{}, 0, 0)
+	b, _ := json.Marshal(got[0])
+	if !strings.Contains(string(b), `"cache_read_tokens":7`) || !strings.Contains(string(b), `"cache_write_tokens":2`) {
+		t.Errorf("request json = %s", b)
+	}
+	b, _ = json.Marshal(RequestEvent{Model: "m"})
+	if strings.Contains(string(b), "cache_") {
+		t.Errorf("zero cache fields must be omitted: %s", b)
 	}
 }

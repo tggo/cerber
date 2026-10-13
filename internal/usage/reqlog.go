@@ -19,8 +19,11 @@ type RequestEvent struct {
 	Credential   string    `json:"credential,omitempty"` // upstream account used
 	InputTokens  int64     `json:"input_tokens"`
 	OutputTokens int64     `json:"output_tokens"`
-	Cost         float64   `json:"cost"`
-	Error        bool      `json:"error,omitempty"`
+	// Cache* are the prompt-cache subsets of InputTokens.
+	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	Cost             float64 `json:"cost"`
+	Error            bool    `json:"error,omitempty"`
 	// Status/Detail are the failure as the client saw it: the HTTP status cerber
 	// returned and a short message extracted from the error body. They are filled
 	// after the fact (the handler records the event before the error response is

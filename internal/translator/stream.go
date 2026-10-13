@@ -39,8 +39,38 @@ type anthropicStreamUsage struct {
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 }
 
-func (u anthropicStreamUsage) totalInput() int64 {
-	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+// Usage is the token accounting of one streamed Anthropic response. In is the
+// total input (fresh + cache), CacheRead/CacheWrite its prompt-cache subsets.
+type Usage struct {
+	In, Out, CacheRead, CacheWrite int64
+	fresh                          int64
+}
+
+// merge folds an Anthropic usage object into u (see Add).
+func (u *Usage) merge(a anthropicStreamUsage) {
+	u.Add(a.InputTokens, a.OutputTokens, a.CacheReadInputTokens, a.CacheCreationInputTokens)
+}
+
+// Add folds one Anthropic usage object into u. message_start carries input and
+// cache counts; message_delta may repeat them (cumulative), so a non-zero value
+// replaces what was seen before and zeros never erase it. input is the fresh
+// (uncached) input_tokens; u.In becomes fresh + cache read + cache write.
+func (u *Usage) Add(input, output, cacheRead, cacheWrite int64) {
+	if input > 0 {
+		u.fresh = input
+	}
+	if cacheRead > 0 {
+		u.CacheRead = cacheRead
+	}
+	if cacheWrite > 0 {
+		u.CacheWrite = cacheWrite
+	}
+	if t := u.fresh + u.CacheRead + u.CacheWrite; t > 0 {
+		u.In = t
+	}
+	if output > 0 {
+		u.Out = output
+	}
 }
 
 type anthropicStreamEvent struct {
@@ -74,6 +104,13 @@ type anthropicStreamEvent struct {
 // the stream (input from message_start incl. cache, output from message_delta)
 // so the caller can record cost for streamed responses.
 func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush func()) (in, out int64, err error) {
+	u, err := t.StreamAnthropicToOpenAIUsage(w, r, flush)
+	return u.In, u.Out, err
+}
+
+// StreamAnthropicToOpenAIUsage is StreamAnthropicToOpenAI returning the full
+// usage, including the prompt-cache read/write split.
+func (t *Translator) StreamAnthropicToOpenAIUsage(w io.Writer, r io.Reader, flush func()) (u Usage, err error) {
 	created := t.now().Unix()
 	var id, model, finalReason string
 	emittedRole := false
@@ -144,17 +181,12 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 		case "message_start":
 			if ev.Message != nil {
 				id, model = ev.Message.ID, ev.Message.Model
-				if t := ev.Message.Usage.totalInput(); t > 0 {
-					in = t
-				}
-				if ev.Message.Usage.OutputTokens > 0 {
-					out = ev.Message.Usage.OutputTokens
-				}
+				u.merge(ev.Message.Usage)
 			}
 			if !emittedRole {
 				emittedRole = true
 				if err := emit(openaiStreamChoice{Index: 0, Delta: openaiDelta{Role: "assistant"}}); err != nil {
-					return in, out, err
+					return u, err
 				}
 			}
 		case "content_block_start":
@@ -171,7 +203,7 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 				Function: openaiToolCallFuncDelta{Name: ev.ContentBlock.Name},
 			}}}
 			if err := emit(openaiStreamChoice{Index: 0, Delta: delta}); err != nil {
-				return in, out, err
+				return u, err
 			}
 		case "content_block_delta":
 			if ev.Delta == nil {
@@ -180,7 +212,7 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 			switch {
 			case ev.Delta.Type == "text_delta" && ev.Delta.Text != "":
 				if err := emit(openaiStreamChoice{Index: 0, Delta: openaiDelta{Content: ev.Delta.Text}}); err != nil {
-					return in, out, err
+					return u, err
 				}
 			case ev.Delta.Type == "input_json_delta" && ev.Index != nil:
 				ti, ok := toolIndex[*ev.Index]
@@ -192,22 +224,22 @@ func (t *Translator) StreamAnthropicToOpenAI(w io.Writer, r io.Reader, flush fun
 					Function: openaiToolCallFuncDelta{Arguments: ev.Delta.PartialJSON},
 				}}}
 				if err := emit(openaiStreamChoice{Index: 0, Delta: delta}); err != nil {
-					return in, out, err
+					return u, err
 				}
 			}
 		case "message_delta":
 			if ev.Delta != nil && ev.Delta.StopReason != "" {
 				finalReason = ev.Delta.StopReason
 			}
-			if ev.Usage != nil && ev.Usage.OutputTokens > 0 {
-				out = ev.Usage.OutputTokens
+			if ev.Usage != nil {
+				u.merge(*ev.Usage)
 			}
 		case "message_stop":
-			return in, out, finish()
+			return u, finish()
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return in, out, fmt.Errorf("translator: read anthropic stream: %w", err)
+		return u, fmt.Errorf("translator: read anthropic stream: %w", err)
 	}
-	return in, out, finish()
+	return u, finish()
 }

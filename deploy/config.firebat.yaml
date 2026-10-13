@@ -25,6 +25,14 @@ usage:
     claude-opus:            { input: 5,    output: 25 }   # Opus 4.x ($5/$25)
     claude-sonnet:          { input: 3,    output: 15 }   # Sonnet 4.x
     claude-haiku:           { input: 1,    output: 5 }    # Haiku 4.x
+    # Explicit prompt-cache read price ($/MTok); cache_write defaults to 1.25x input.
+    # Claude 5 rates per Anthropic pricing, Oct 2026.
+    claude-opus-5-5:        { input: 4,    output: 20, cache_read: 0.2 }
+    claude-sonnet-5:        { input: 2,    output: 10 }   # Sonnet 5 ($2/$10)
+    claude-sonnet-5-5:      { input: 2,    output: 10, cache_read: 0.2 }
+    claude-fable-5:         { input: 10,   output: 50 }   # Fable 5
+    claude-fable-5-1:       { input: 10,   output: 50, cache_read: 0.25 }
+    claude-haiku-5-5:       { input: 0.1,  output: 0.5 }  # <=100K-token prompts
     claude-3-5-sonnet:      { input: 3,    output: 15 }   # legacy 3.5 Sonnet
     claude-3-5-haiku:       { input: 0.8,  output: 4 }    # legacy 3.5 Haiku
     # OpenAI (longer keys win: -mini beats the base family)

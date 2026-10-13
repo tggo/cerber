@@ -42,6 +42,10 @@ type Price struct {
 	Input   float64 `yaml:"input"`
 	Output  float64 `yaml:"output"`
 	Request float64 `yaml:"request"`
+	// CacheRead/CacheWrite price prompt-cache tokens per 1,000,000. Zero means
+	// the default multiplier of Input (0.1x read, 1.25x write).
+	CacheRead  float64 `yaml:"cache_read"`
+	CacheWrite float64 `yaml:"cache_write"`
 }
 
 // Server holds HTTP listener settings.

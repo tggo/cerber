@@ -113,3 +113,38 @@ func TestStream_WriteErrorDuringDone(t *testing.T) {
 		t.Fatal("expected write error on DONE to propagate")
 	}
 }
+
+func TestStreamUsage_CacheSplit(t *testing.T) {
+	start := func(u string) string {
+		return `data: {"type":"message_start","message":{"id":"m","model":"c","usage":` + u + `}}` + "\n\n"
+	}
+	delta := func(u string) string {
+		return `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":` + u + `}` + "\n\n"
+	}
+	tests := []struct {
+		name   string
+		stream string
+		want   Usage
+	}{
+		{"start only", start(`{"input_tokens":10,"cache_read_input_tokens":80,"cache_creation_input_tokens":5}`) + delta(`{"output_tokens":7}`),
+			Usage{In: 95, Out: 7, CacheRead: 80, CacheWrite: 5}},
+		{"delta repeats cache", start(`{"input_tokens":10}`) + delta(`{"input_tokens":10,"cache_read_input_tokens":200,"output_tokens":3}`),
+			Usage{In: 210, Out: 3, CacheRead: 200}},
+		{"no cache", start(`{"input_tokens":4}`) + delta(`{"output_tokens":1}`), Usage{In: 4, Out: 1}},
+		{"zero delta keeps start", start(`{"input_tokens":4,"cache_read_input_tokens":6}`) + delta(`{"cache_read_input_tokens":0,"output_tokens":2}`),
+			Usage{In: 10, Out: 2, CacheRead: 6}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf strings.Builder
+			got, err := fixedTr().StreamAnthropicToOpenAIUsage(&buf, strings.NewReader(tc.stream), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got.fresh = 0
+			if got != tc.want {
+				t.Errorf("usage = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

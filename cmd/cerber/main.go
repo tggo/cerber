@@ -278,7 +278,7 @@ func main() {
 	if len(cfg.Usage.Pricing) > 0 {
 		pricing := map[string]usage.Price{}
 		for m, p := range cfg.Usage.Pricing {
-			pricing[m] = usage.Price{Input: p.Input, Output: p.Output, Request: p.Request}
+			pricing[m] = usage.Price{Input: p.Input, Output: p.Output, Request: p.Request, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite}
 		}
 		tracker.SetPricing(pricing)
 	}

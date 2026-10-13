@@ -52,6 +52,8 @@
   tr:last-child td { border-bottom:none; }
   .err { color:var(--err); }
   .muted { color:var(--muted); }
+  /* "1,234,567 87% · w 12,345" must stay on one line; the .tscroll wrapper scrolls. */
+  td.cached { white-space:nowrap; cursor:help; }
   #status { font-size:12px; }
   .chart { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; }
   .chart svg { width:100%; height:130px; display:block; }
@@ -200,6 +202,15 @@
 
   const fmt = (n) => (n ?? 0).toLocaleString();
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  // Prompt-cache cell: cache-read tokens and their share of all input tokens
+  // (hit rate). Cache-write tokens are in the tooltip. "—" when nothing cached.
+  const cachedCell = (e) => {
+    const r = e.cache_read_tokens || 0, w = e.cache_write_tokens || 0, i = e.input_tokens || 0;
+    if (!r && !w) return `<td class="muted" title="no prompt-cache tokens">—</td>`;
+    const pct = i > 0 ? Math.round(100 * r / i) + "%" : "—";
+    const tip = `cache read ${fmt(r)} / write ${fmt(w)} of ${fmt(i)} input tokens`;
+    return `<td class="cached" title="${esc(tip)}">${fmt(r)} <span class="muted">${pct}</span>${w ? ` <span class="muted">· w ${fmt(w)}</span>` : ""}</td>`;
+  };
   const usd = (c) => c ? "$" + (c >= 1 ? c.toFixed(2) : c.toFixed(4)) : "—";
 
   // Governance windows are rolling spans (see internal/access: week=7d, month=30d),
@@ -277,6 +288,7 @@
       <td class="${e.errors ? 'err' : 'muted'}">${fmt(e.errors)}</td>
       <td>${fmt(e.input_tokens)}</td>
       <td>${fmt(e.output_tokens)}</td>
+      ${cachedCell(e)}
       ${withCost ? `<td class="muted">${usd(e.cost)}</td>` : ""}
       <td class="muted">${ago(e.last_used && Date.parse(e.last_used)/1000)}</td>
     </tr>`).join("");
@@ -301,10 +313,11 @@
         ["errors", fmt(t.errors)],
         ["input tokens", fmt(t.input_tokens)],
         ["output tokens", fmt(t.output_tokens)],
+        ["cached input", fmt(t.cache_read_tokens) + (t.input_tokens ? " (" + Math.round(100 * (t.cache_read_tokens || 0) / t.input_tokens) + "%)" : "")],
         ["cost", "$" + (d.total_cost || 0).toFixed(2)],
       ].map(([k,v]) => `<div class="card"><div class="k">${k}</div><div class="v" style="--n:${String(v).length}">${v}</div></div>`).join("");
-      rows($("byCred"), d.by_credential || [], ["name","requests","errors","input","output","last"]);
-      rows($("byModel"), d.by_model || [], ["name","requests","errors","input","output","cost","last"], true);
+      rows($("byCred"), d.by_credential || [], ["name","requests","errors","input","output","cached","last"]);
+      rows($("byModel"), d.by_model || [], ["name","requests","errors","input","output","cached","cost","last"], true);
       byClientMap = Object.fromEntries((d.by_client || []).map(c => [c.name, c]));
       setOpts($("fModel"), (d.by_model || []).map(m => m.name));
       renderChart(d.series || []);
@@ -387,7 +400,7 @@
   }
 
   function renderRequests() {
-    const head = "<tr><th>when</th><th>client</th><th>ip</th><th>user-agent</th><th>provider</th><th>model</th><th>account</th><th>in</th><th>out</th><th>cost</th><th>status</th></tr>";
+    const head = "<tr><th>when</th><th>client</th><th>ip</th><th>user-agent</th><th>provider</th><th>model</th><th>account</th><th>in</th><th>out</th><th>cached</th><th>cost</th><th>status</th></tr>";
     const body = reqRows.map((e, i) => {
       const t = e.time ? ago(Date.parse(e.time)/1000) : "—";
       const ua = (e.user_agent || "").slice(0, 48);
@@ -402,7 +415,7 @@
         const open = reqOpen.has(k);
         status = `<a href="#" class="expand err" data-i="${i}" data-k="${esc(k)}" title="${esc(msg)}">${esc(String(code))} ${open ? "▴" : "▾"}</a>`;
         detail = `<tr class="detail" id="rd-${i}"${open ? "" : " hidden"}><td class="muted">${esc(e.endpoint||"")}</td>
-          <td colspan="10"><code class="err">${esc(msg)}</code></td></tr>`;
+          <td colspan="11"><code class="err">${esc(msg)}</code></td></tr>`;
       }
       return `<tr>
         <td class="muted" title="${esc(e.time||"")}">${t}</td>
@@ -414,11 +427,12 @@
         <td class="muted">${esc(e.credential||"—")}</td>
         <td>${fmt(e.input_tokens)}</td>
         <td>${fmt(e.output_tokens)}</td>
+        ${cachedCell(e)}
         <td class="muted">${e.cost ? "$"+e.cost.toFixed(4) : "—"}</td>
         <td>${status}</td>
       </tr>${detail}`;
     }).join("");
-    $("requests").innerHTML = head + (body || `<tr><td colspan="11" class="muted">no requests yet</td></tr>`);
+    $("requests").innerHTML = head + (body || `<tr><td colspan="12" class="muted">no requests yet</td></tr>`);
     $("requests").querySelectorAll("a.expand").forEach(a => a.addEventListener("click", (ev) => {
       ev.preventDefault();
       const row = document.getElementById("rd-" + a.dataset.i);
@@ -625,8 +639,8 @@
         const nm = (u && u.by_model && u.by_model.length)
           ? `<a href="#" class="expand" data-i="${i}">${nmTxt}</a>` : nmTxt;
         const detail = `<tr class="detail" id="kd-${i}" hidden><td></td>
-          <td colspan="9"><table class="sub"><tr><th>model</th><th>requests</th><th>input</th><th>output</th><th>cost</th></tr>${
-            u && u.by_model ? u.by_model.map(m => `<tr><td>${esc(m.name)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td><td class="muted">${usd(m.cost)}</td></tr>`).join("") : ""
+          <td colspan="9"><table class="sub"><tr><th>model</th><th>requests</th><th>input</th><th>output</th><th>cached</th><th>cost</th></tr>${
+            u && u.by_model ? u.by_model.map(m => `<tr><td>${esc(m.name)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td>${cachedCell(m)}<td class="muted">${usd(m.cost)}</td></tr>`).join("") : ""
           }</table></td></tr>`;
         // Spans all columns (no leading blank cell like the per-model row) so
         // the editor starts at the table's left edge and fits a phone viewport.
