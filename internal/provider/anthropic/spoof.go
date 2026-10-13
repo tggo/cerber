@@ -104,6 +104,10 @@ func cloakClaudeCode(body []byte) ([]byte, error) {
 	}
 
 	var relocate []string
+	// cacheCtl is the caller's last system cache_control marker. Relocating the
+	// system text must not silently drop the caller's prompt-cache breakpoint, so
+	// it moves onto the reminder block that now carries that text.
+	var cacheCtl json.RawMessage
 	if raw, ok := m["system"]; ok {
 		existing, err := parseSystem(raw)
 		if err != nil {
@@ -117,6 +121,9 @@ func cloakClaudeCode(body []byte) ([]byte, error) {
 				continue
 			}
 			relocate = append(relocate, b.Text)
+			if len(b.CacheControl) > 0 {
+				cacheCtl = b.CacheControl
+			}
 		}
 	}
 
@@ -138,14 +145,14 @@ func cloakClaudeCode(body []byte) ([]byte, error) {
 		"IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n" +
 		"</system-reminder>\n"
 
-	msgs, ok, err := prependToFirstUserMessage(m["messages"], reminder)
+	msgs, ok, err := prependToFirstUserMessage(m["messages"], reminder, cacheCtl)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		// No user message to carry the reminder — fall back to keeping the system
 		// content in place (after the agent block) rather than dropping it.
-		blocks := append(agent, systemBlock{Type: "text", Text: strings.Join(relocate, "\n\n")})
+		blocks := append(agent, systemBlock{Type: "text", Text: strings.Join(relocate, "\n\n"), CacheControl: cacheCtl})
 		enc, err := json.Marshal(blocks)
 		if err != nil {
 			return nil, err
@@ -162,8 +169,9 @@ func cloakClaudeCode(body []byte) ([]byte, error) {
 // prependToFirstUserMessage prepends text to the content of the first user
 // message in a Messages `messages` array. It reports ok=false (leaving the input
 // untouched) if there is no user message. String content stays a string; block-
-// array content gets a leading text block.
-func prependToFirstUserMessage(raw json.RawMessage, text string) (json.RawMessage, bool, error) {
+// array content gets a leading text block. A non-empty cacheCtl is set on the
+// prepended block (string content is then converted to blocks to carry it).
+func prependToFirstUserMessage(raw json.RawMessage, text string, cacheCtl json.RawMessage) (json.RawMessage, bool, error) {
 	if len(raw) == 0 {
 		return raw, false, nil
 	}
@@ -181,7 +189,7 @@ func prependToFirstUserMessage(raw json.RawMessage, text string) (json.RawMessag
 		if role != "user" {
 			continue
 		}
-		newContent, err := prependToContent(msg["content"], text)
+		newContent, err := prependToContent(msg["content"], text, cacheCtl)
 		if err != nil {
 			return nil, false, err
 		}
@@ -201,17 +209,25 @@ func prependToFirstUserMessage(raw json.RawMessage, text string) (json.RawMessag
 }
 
 // prependToContent prepends text to a Messages content value, which is either a
-// string or an array of content blocks.
-func prependToContent(content json.RawMessage, text string) (json.RawMessage, error) {
+// string or an array of content blocks. With a cacheCtl the text becomes its own
+// block carrying that cache_control, so the marker ends exactly where the
+// relocated system text ends (the same prefix the caller asked to cache).
+func prependToContent(content json.RawMessage, text string, cacheCtl json.RawMessage) (json.RawMessage, error) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
-		return json.Marshal(text + s)
+		if len(cacheCtl) == 0 {
+			return json.Marshal(text + s)
+		}
+		content, err = json.Marshal([]systemBlock{{Type: "text", Text: s}})
+		if err != nil {
+			return nil, err
+		}
 	}
 	var blocks []json.RawMessage
 	if err := json.Unmarshal(content, &blocks); err != nil {
 		return nil, err
 	}
-	block, err := json.Marshal(systemBlock{Type: "text", Text: text})
+	block, err := json.Marshal(systemBlock{Type: "text", Text: text, CacheControl: cacheCtl})
 	if err != nil {
 		return nil, err
 	}

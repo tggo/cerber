@@ -280,3 +280,80 @@ func TestCloakClaudeCode(t *testing.T) {
 		}
 	})
 }
+
+// TestCloakClaudeCodeKeepsCacheControl: relocating system text must carry the
+// caller's prompt-cache breakpoint along, ending where the system text ends.
+func TestCloakClaudeCodeKeepsCacheControl(t *testing.T) {
+	const cc = `{"type":"ephemeral"}`
+	tests := []struct {
+		name string
+		in   string
+		// wantBlocks is the expected first-user-message blocks: text substring
+		// and whether cache_control is set on it.
+		wantBlocks []struct {
+			contains string
+			cached   bool
+		}
+	}{
+		{
+			name: "string user content becomes blocks with marker on reminder",
+			in:   `{"system":[{"type":"text","text":"stable rules","cache_control":` + cc + `}],"messages":[{"role":"user","content":"post 1"}]}`,
+			wantBlocks: []struct {
+				contains string
+				cached   bool
+			}{{"stable rules", true}, {"post 1", false}},
+		},
+		{
+			name: "array user content keeps its own markers",
+			in: `{"system":[{"type":"text","text":"sys A"},{"type":"text","text":"sys B","cache_control":` + cc + `}],` +
+				`"messages":[{"role":"user","content":[{"type":"text","text":"about","cache_control":` + cc + `},{"type":"text","text":"post"}]}]}`,
+			wantBlocks: []struct {
+				contains string
+				cached   bool
+			}{{"sys A", true}, {"about", true}, {"post", false}},
+		},
+		{
+			name: "no marker in system adds none",
+			in:   `{"system":[{"type":"text","text":"sys"}],"messages":[{"role":"user","content":[{"type":"text","text":"q"}]}]}`,
+			wantBlocks: []struct {
+				contains string
+				cached   bool
+			}{{"sys", false}, {"q", false}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := cloakClaudeCode([]byte(tt.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b := systemOf(t, out); len(b) != 1 || b[0].Text != claudeCodeAgentPrompt || len(b[0].CacheControl) != 0 {
+				t.Fatalf("system[] = %+v, want only unmarked agent block", b)
+			}
+			_, blocks := firstUserContent(t, out)
+			if len(blocks) != len(tt.wantBlocks) {
+				t.Fatalf("blocks = %+v, want %d", blocks, len(tt.wantBlocks))
+			}
+			for i, w := range tt.wantBlocks {
+				if !strings.Contains(blocks[i].Text, w.contains) {
+					t.Errorf("block %d text = %q, want contains %q", i, blocks[i].Text, w.contains)
+				}
+				if got := len(blocks[i].CacheControl) > 0; got != w.cached {
+					t.Errorf("block %d cached = %v, want %v", i, got, w.cached)
+				}
+			}
+		})
+	}
+
+	t.Run("no user message keeps marker on in-place system", func(t *testing.T) {
+		in := `{"system":[{"type":"text","text":"keep","cache_control":` + cc + `}],"messages":[{"role":"assistant","content":"prev"}]}`
+		out, err := cloakClaudeCode([]byte(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := systemOf(t, out)
+		if len(b) != 2 || b[1].Text != "keep" || string(b[1].CacheControl) != cc {
+			t.Errorf("fallback system = %+v", b)
+		}
+	})
+}
