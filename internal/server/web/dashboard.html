@@ -506,15 +506,15 @@
       const head = "<tr><th>provider</th><th>name</th><th>kind</th><th>key</th><th>state</th><th>requests</th><th>errors</th><th>5h quota</th><th>7d quota</th><th></th></tr>";
       const body = (d.accounts || []).map(a => {
         const btn = a.enabled
-          ? `<button data-n="${a.name}" data-act="disable">disable</button>`
-          : `<button data-n="${a.name}" data-act="enable">enable</button>`;
+          ? `<button data-n="${esc(a.name)}" data-act="disable">disable</button>`
+          : `<button data-n="${esc(a.name)}" data-act="enable">enable</button>`;
         const state = a.cooling_down ? `<span class="err">cooling</span>` : (a.enabled ? `<span style="color:var(--ok)">on</span>` : `<span class="muted">off</span>`);
         let key;
         if (!a.health_checked) key = `<span class="muted">—</span>`;
         else if (a.healthy) key = `<span style="color:var(--ok)">✓ valid</span>`;
-        else key = `<span class="err" title="${(a.health_error||'').replace(/"/g,'')}">✗ invalid</span>`;
-        const chat = `<a href="/chat?provider=${encodeURIComponent(a.provider||'')}&cred=${encodeURIComponent(a.name)}" title="chat with this account">${a.name}</a>`;
-        return `<tr><td class="muted">${a.provider||"—"}</td><td>${chat}</td><td class="muted">${a.kind}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td>${quotaCell(a.quota, "five_hour", "5h")}</td><td>${quotaCell(a.quota, "seven_day", "7d")}</td><td>${btn}</td></tr>`;
+        else key = `<span class="err" title="${esc(a.health_error||'')}">✗ invalid</span>`;
+        const chat = `<a href="/chat?provider=${encodeURIComponent(a.provider||'')}&cred=${encodeURIComponent(a.name)}" title="chat with this account">${esc(a.name)}</a>`;
+        return `<tr><td class="muted">${esc(a.provider||"—")}</td><td>${chat}</td><td class="muted">${esc(a.kind||"")}</td><td>${key}</td><td>${state}</td><td>${fmt(a.requests)}</td><td class="${a.errors?'err':'muted'}">${fmt(a.errors)}</td><td>${quotaCell(a.quota, "five_hour", "5h")}</td><td>${quotaCell(a.quota, "seven_day", "7d")}</td><td>${btn}</td></tr>`;
       }).join("");
       $("accounts").innerHTML = head + (body || `<tr><td colspan="10" class="muted">no accounts</td></tr>`);
       setOpts($("fProvider"), (d.accounts || []).map(a => a.provider));
@@ -538,9 +538,9 @@
         const cls = ok === 0 ? "err" : (ok < total ? "" : "");
         const keys = `<span class="${ok===0?'err':''}" style="${ok>0&&ok===total?'color:var(--ok)':''}">${ok}/${total}</span>`;
         const models = (p.models && p.models.length)
-          ? `<span title="${p.models.join('\n')}">${p.models.length} ▾</span>`
+          ? `<span title="${esc(p.models.join('\n'))}">${p.models.length} ▾</span>`
           : `<span class="muted">—</span>`;
-        return `<tr><td><a href="/chat?provider=${encodeURIComponent(p.name)}" title="chat with ${p.name}">${p.name}</a></td><td class="muted">${p.base_url||"—"}</td><td>${keys}</td><td class="muted">${models}</td></tr>`;
+        return `<tr><td><a href="/chat?provider=${encodeURIComponent(p.name)}" title="chat with ${esc(p.name)}">${esc(p.name)}</a></td><td class="muted">${esc(p.base_url||"—")}</td><td>${keys}</td><td class="muted">${models}</td></tr>`;
       }).join("");
       $("providers").innerHTML = head + (body || `<tr><td colspan="4" class="muted">no providers</td></tr>`);
     } catch (e) { /* ignore */ }
@@ -551,6 +551,9 @@
   // While a limits editor is open the 5s auto-refresh must not re-render the
   // keys table under the operator's cursor — that would drop half-typed values.
   let limitsOpen = null;   // key name being edited, or null
+  // Keys whose per-model breakdown is expanded, by key name, so the 5s
+  // auto-refresh re-renders them open instead of collapsing them.
+  const keyOpen = new Set();
 
   const PERIODS = ["minute", "hour", "day", "week", "month"];
   const periodOptions = (sel, dflt) => PERIODS.map(p =>
@@ -636,9 +639,12 @@
         const u = byClientMap[k.name];
         const tok = u ? fmt((u.input_tokens||0)+(u.output_tokens||0)) : "—";
         const spend = u ? usd(u.cost) : "—";
-        const nm = (u && u.by_model && u.by_model.length)
-          ? `<a href="#" class="expand" data-i="${i}">${nmTxt}</a>` : nmTxt;
-        const detail = `<tr class="detail" id="kd-${i}" hidden><td></td>
+        const hasModels = !!(u && u.by_model && u.by_model.length);
+        if (!hasModels) keyOpen.delete(k.name); // no toggle link → must not stay open
+        const isOpen = keyOpen.has(k.name);
+        const nm = hasModels
+          ? `<a href="#" class="expand" data-i="${i}" aria-expanded="${isOpen}" aria-controls="kd-${i}">${nmTxt}</a>` : nmTxt;
+        const detail = `<tr class="detail" id="kd-${i}"${isOpen ? "" : " hidden"}><td></td>
           <td colspan="9"><table class="sub"><tr><th>model</th><th>requests</th><th>input</th><th>output</th><th>cached</th><th>cost</th></tr>${
             u && u.by_model ? u.by_model.map(m => `<tr><td>${esc(m.name)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.input_tokens)}</td><td>${fmt(m.output_tokens)}</td>${cachedCell(m)}<td class="muted">${usd(m.cost)}</td></tr>`).join("") : ""
           }</table></td></tr>`;
@@ -655,7 +661,11 @@
       $("keys").querySelectorAll("a.expand").forEach(a => a.addEventListener("click", (ev) => {
         ev.preventDefault();
         const row = document.getElementById("kd-" + a.dataset.i);
-        if (row) row.hidden = !row.hidden;
+        if (!row) return;
+        row.hidden = !row.hidden;
+        const name = a.textContent; // the decoded key name
+        row.hidden ? keyOpen.delete(name) : keyOpen.add(name);
+        a.setAttribute("aria-expanded", String(!row.hidden));
       }));
       $("keys").querySelectorAll("form.limits").forEach(f => {
         f.addEventListener("input", () => { f.dataset.dirty = "1"; });
@@ -690,6 +700,7 @@
         if (act === "delete") {
           if (!confirm(`Delete client key "${n}"? Anything using it stops working.`)) return;
           await fetch(`/admin/keys/${encodeURIComponent(n)}`, { method: "DELETE", headers: authHeaders() });
+          keyOpen.delete(n);
         } else {
           await fetch(`/admin/keys/${encodeURIComponent(n)}/${act}`, { method: "POST", headers: authHeaders() });
         }
@@ -707,13 +718,13 @@
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      $("newKeyReveal").innerHTML = `<div class="reveal" style="border-color:var(--err)"><span class="err">${e.error || ("HTTP " + r.status)}</span></div>`;
+      $("newKeyReveal").innerHTML = `<div class="reveal" style="border-color:var(--err)"><span class="err">${esc(e.error || ("HTTP " + r.status))}</span></div>`;
       return;
     }
     const d = await r.json();
     $("newKeyReveal").innerHTML = `<div class="reveal">
       <span class="muted">copy now — shown once:</span>
-      <code id="newKeyVal">${d.key}</code>
+      <code id="newKeyVal">${esc(d.key)}</code>
       <button id="copyKey">copy</button></div>`;
     $("copyKey").addEventListener("click", () => {
       navigator.clipboard?.writeText(d.key);
