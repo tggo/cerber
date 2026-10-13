@@ -582,3 +582,18 @@ func TestParse_PricingCacheRates(t *testing.T) {
 		t.Errorf("unset cache rates must stay zero (default multipliers): %+v", got)
 	}
 }
+
+func TestParse_BlockedModels(t *testing.T) {
+	c, err := Parse([]byte(validYAML + "blocked_models:\n  - claude-haiku-4-5\n  - \"claude-opus-*\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(c.BlockedModels) != 2 || c.BlockedModels[1] != "claude-opus-*" {
+		t.Errorf("BlockedModels = %v", c.BlockedModels)
+	}
+	for _, bad := range []string{"\"\"", "\"a b\""} {
+		if _, err := Parse([]byte(validYAML + "blocked_models:\n  - " + bad + "\n")); err == nil {
+			t.Errorf("blocked_models entry %s must be rejected", bad)
+		}
+	}
+}

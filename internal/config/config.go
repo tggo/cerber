@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tggo/cerber/internal/compat"
+	"github.com/tggo/cerber/internal/modelblock"
 )
 
 // Config is the top-level cerber configuration.
@@ -26,6 +27,10 @@ type Config struct {
 	Usage     Usage     `yaml:"usage"`
 	AuthDir   string    `yaml:"auth_dir"` // dir for OAuth tokens written by --claude-login
 	Providers Providers `yaml:"providers"`
+	// BlockedModels is the global model blocklist seed: exact ids or "*" globs no
+	// caller may use. The operator can add more at runtime (persisted separately);
+	// entries listed here are shown as non-removable.
+	BlockedModels []string `yaml:"blocked_models"`
 }
 
 // Usage configures usage persistence and per-model pricing (for cost reporting).
@@ -524,6 +529,11 @@ func (c *Config) Validate() error {
 	}
 	if l := c.Access.DefaultKeyLimits; !validKeyPeriod(l.BudgetPeriod) || !validKeyPeriod(l.RatePeriod) {
 		return fmt.Errorf("config: access.default_key_limits period must be minute|hour|day|week|month")
+	}
+	for i, m := range c.BlockedModels {
+		if _, err := modelblock.Normalize(m); err != nil {
+			return fmt.Errorf("config: blocked_models[%d] %q: %w", i, m, err)
+		}
 	}
 	p := c.Providers
 	if p.Anthropic == nil && p.OpenAI == nil && p.Gemini == nil && p.Grok == nil && p.ArliAI == nil && p.Perplexity == nil && p.ComfyUI == nil && p.Ollama == nil {

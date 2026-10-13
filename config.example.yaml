@@ -63,6 +63,18 @@ usage:
   # recent_log: 1000               # # of recent per-request events kept in memory
   #                                # (GET /admin/requests: who/IP/UA/model/tokens/cost)
 
+# Global model blocklist: exact ids or `*` globs that NO caller may use (managed
+# keys, config keys, localhost alike). Matched case-insensitively against the
+# requested model AND its alias-resolved name. A mask without `*` also blocks
+# dated variants (`claude-haiku-4-5` blocks `claude-haiku-4-5-20251001`).
+# Blocked requests get HTTP 403 and never reach an upstream; fallback chains skip
+# blocked models; /v1/models and /llm.md hide them. Entries here are shown as
+# non-removable in the dashboard; the operator can add/remove more there
+# (persisted to blocked_models.json next to usage.file).
+# blocked_models:
+#   - "claude-haiku-4-5"
+#   - "claude-opus-*"
+
 providers:
   # Multiple providers can be enabled; on /v1/chat/completions cerber routes by
   # model name (gpt*/o1*/o3*/o4*/chatgpt* -> openai, gemini* -> gemini,

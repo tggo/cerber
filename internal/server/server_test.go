@@ -750,7 +750,7 @@ func TestMetricsAndDashboardServed(t *testing.T) {
 	// The accounts table shows both Anthropic unified windows: the weekly cap is the
 	// one that silently locks a subscription for days once it's spent.
 	for _, want := range []string{"<th>budget</th>", "function budgetCell", "AT CAP",
-		"<th>5h quota</th><th>7d quota</th>", `quotaCell(a.quota, "seven_day", "7d")`} {
+		"<th>5h quota</th><th>7d quota</th>", "/admin/blocked-models", `id="blocked"`, `quotaCell(a.quota, "seven_day", "7d")`} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("dashboard missing %q", want)
 		}

@@ -171,6 +171,15 @@
     <div id="newKeyReveal"></div>
     <div class="tscroll"><table id="keys"></table></div>
   </section>
+  <section id="blockedSection">
+    <h2>blocked models <span class="sub-note">— global: no caller can use these (403); masks are exact ids or <code>*</code> globs, a plain id also covers its dated variants</span></h2>
+    <div class="keybar">
+      <input id="newBlockMask" aria-label="model mask to block" placeholder="mask, e.g. claude-opus-*" autocomplete="off" spellcheck="false">
+      <button id="addBlock">block</button>
+    </div>
+    <div id="blockErr" class="err" role="alert" style="margin:-4px 0 12px" hidden></div>
+    <div class="tscroll"><table id="blocked"></table></div>
+  </section>
   <section><h2>by credential</h2><div class="tscroll"><table id="byCred"></table></div></section>
   <section><h2>by model</h2><div class="tscroll"><table id="byModel"></table></div></section>
   <section id="reqSection">
@@ -324,6 +333,7 @@
       loadProviders();
       loadAccounts();
       loadKeys();
+      loadBlocked();
       refreshRequests();
       $("status").innerHTML = `<span class="ok" style="color:var(--ok)">●</span> updated ${new Date().toLocaleTimeString()}`;
     } catch (e) {
@@ -733,6 +743,63 @@
     $("newKeyName").value = "";
     loadKeys();
   }
+
+  function blockError(msg) {
+    $("blockErr").textContent = msg || "";
+    $("blockErr").hidden = !msg;
+  }
+  async function errText(r) {
+    const e = await r.json().catch(() => ({}));
+    return (typeof e.error === "string" ? e.error : (e.error && e.error.message)) || ("HTTP " + r.status);
+  }
+
+  async function loadBlocked() {
+    try {
+      const r = await fetch("/admin/blocked-models", { headers: authHeaders() });
+      if (!r.ok) { $("blocked").innerHTML = `<tr><td colspan="4" class="muted">blocked models: HTTP ${r.status}</td></tr>`; return; }
+      const d = await r.json();
+      const head = "<tr><th>mask</th><th>source</th><th>matches</th><th><span style=\"position:absolute;left:-9999px\">actions</span></th></tr>";
+      const body = (d.blocked || []).map(b => {
+        const act = b.source === "config"
+          ? `<span class="muted" title="set in config blocked_models; edit the config to remove">from config</span>`
+          : `<button class="danger" data-mask="${esc(b.mask)}" aria-label="Unblock ${esc(b.mask)}">remove</button>`;
+        return `<tr><td><code>${esc(b.mask)}</code></td><td class="muted">${esc(b.source)}</td><td>${fmt(b.matches)}</td><td>${act}</td></tr>`;
+      }).join("");
+      $("blocked").innerHTML = head + (body || `<tr><td colspan="4" class="muted">nothing blocked</td></tr>`);
+      $("blocked").querySelectorAll("button[data-mask]").forEach(b => b.addEventListener("click", async () => {
+        const m = b.dataset.mask;
+        if (!confirm(`Unblock "${m}"?`)) return;
+        try {
+          const dr = await fetch("/admin/blocked-models?mask=" + encodeURIComponent(m), { method: "DELETE", headers: authHeaders() });
+          blockError(dr.ok ? "" : await errText(dr));
+        } catch (e) { blockError("network error — not removed"); }
+        loadBlocked();
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  async function addBlock() {
+    const mask = $("newBlockMask").value.trim();
+    if (!mask) { $("newBlockMask").focus(); return; }
+    $("addBlock").disabled = true;
+    try {
+      const r = await fetch("/admin/blocked-models", {
+        method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ mask }),
+      });
+      if (!r.ok) { blockError(await errText(r)); return; }
+      blockError("");
+      $("newBlockMask").value = "";
+      loadBlocked();
+    } catch (e) {
+      blockError("network error — not saved");
+    } finally {
+      $("addBlock").disabled = false;
+    }
+  }
+  $("addBlock").addEventListener("click", addBlock);
+  $("newBlockMask").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) addBlock(); });
+  $("newBlockMask").addEventListener("input", () => blockError(""));
 
   $("createKey").addEventListener("click", createKey);
   $("newKeyName").addEventListener("keydown", (e) => { if (e.key === "Enter") createKey(); });

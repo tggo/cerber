@@ -33,6 +33,7 @@ import (
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/metrics"
+	"github.com/tggo/cerber/internal/modelblock"
 	"github.com/tggo/cerber/internal/provider"
 	"github.com/tggo/cerber/internal/provider/anthropic"
 	"github.com/tggo/cerber/internal/provider/comfyui"
@@ -84,6 +85,7 @@ type Server struct {
 	routes         []config.Route
 	fallbacks      []config.Fallback // cross-provider/model fallback chains (OpenAI endpoint)
 	catalog        *catalog.Catalog  // model alias -> canonical resolution
+	blocklist      *modelblock.List  // global model blocklist (never nil)
 	persist        func(name string, tok credential.OAuthTokens)
 	allowLocalhost bool
 	mgmt           *access.Checker // if set, /admin/* requires this key
@@ -110,7 +112,9 @@ func New(checker *access.Checker, creds *credential.Store, up Upstream, refreshe
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	bl, _ := modelblock.New(nil)
 	return &Server{
+		blocklist:   bl,
 		access:      checker,
 		creds:       creds,
 		upstream:    up,
@@ -316,6 +320,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/providers", s.handleProviders)
 	mux.HandleFunc("POST /admin/accounts/{name}/enable", s.handleSetAccount(true))
 	mux.HandleFunc("POST /admin/accounts/{name}/disable", s.handleSetAccount(false))
+	mux.HandleFunc("GET /admin/blocked-models", s.handleBlockedList)
+	mux.HandleFunc("POST /admin/blocked-models", s.handleBlockedAdd)
+	mux.HandleFunc("DELETE /admin/blocked-models", s.handleBlockedRemove)
+	mux.HandleFunc("POST /admin/blocked-models/delete", s.handleBlockedRemove)
 	mux.HandleFunc("GET /admin/keys", s.handleKeysList)
 	mux.HandleFunc("GET /admin/keys/{name}/usage", s.handleKeyUsage)
 	mux.HandleFunc("POST /admin/keys", s.handleKeyCreate)
@@ -954,7 +962,8 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if models := s.providerModels(name); len(models) > 0 {
+		if len(s.providerModels(name)) > 0 {
+			models := s.visibleModels(name)
 			fmt.Fprintf(&b, "### %s (%d)\n\n", name, len(models))
 			for _, m := range models {
 				fmt.Fprintf(&b, "- `%s`\n", m)
@@ -964,6 +973,15 @@ func (s *Server) handleLLMDoc(w http.ResponseWriter, r *http.Request) {
 		}
 		// No discovered list (e.g. Claude via OAuth): give the routing hint.
 		fmt.Fprintf(&b, "### %s\n\nUse this provider's standard model names (routed by the prefixes above).\n\n", name)
+	}
+
+	if entries := s.blocklist.Entries(); len(entries) > 0 {
+		fmt.Fprintf(&b, "## Blocked models\n\n")
+		fmt.Fprintf(&b, "These models are blocked on this instance (HTTP 403, no upstream call); they are hidden from the lists above. A mask ending in `*` is a prefix glob; a plain id also covers its dated variants:\n\n")
+		for _, e := range entries {
+			fmt.Fprintf(&b, "- `%s`\n", e.Mask)
+		}
+		b.WriteString("\n")
 	}
 
 	fmt.Fprintf(&b, "## Examples\n\n")
@@ -1429,7 +1447,11 @@ func (s *Server) handleNative(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requested := extractModel(body)
 	body, model := s.canonicalModel(body)
+	if s.rejectBlocked(w, r, dialectAnthropic, requested, model) {
+		return
+	}
 	if s.cacheOpts.Enabled {
 		if injected, changed, err := anthropic.InjectCacheBreakpoints(body, s.cacheOpts); err != nil {
 			// Never fail a request over cache injection: forward the original body.
@@ -1548,6 +1570,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	var data []model
 	for _, prov := range names {
 		for _, id := range s.provModels[prov] {
+			if _, blocked := s.blocklist.Blocked(id); blocked {
+				continue
+			}
 			data = append(data, model{ID: id, Object: "model", OwnedBy: prov})
 		}
 	}
@@ -1568,7 +1593,11 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requested := extractModel(body)
 	body, model := s.canonicalModel(body)
+	if s.rejectBlocked(w, r, dialectOpenAI, requested, model) {
+		return
+	}
 	target := s.route(model)
 	tagProvider(r.Context(), target)
 	if target == "" || target == "anthropic" {
@@ -1617,7 +1646,11 @@ func (s *Server) handleForward(subpath string) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		requested := extractModel(body)
 		body, model := s.canonicalModel(body)
+		if s.rejectBlocked(w, r, dialectOpenAI, requested, model) {
+			return
+		}
 		stream := wantsStream(body)
 		target := s.route(model)
 		tagProvider(r.Context(), target)
@@ -1669,9 +1702,13 @@ func (s *Server) handleModerations(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requested := extractModel(body)
 	body, model := s.canonicalModel(body)
 	if model == "" {
 		model = "omni-moderation-latest"
+	}
+	if s.rejectBlocked(w, r, dialectOpenAI, requested, model) {
+		return
 	}
 	fwd, ok := s.chatters[moderationProvider].(provider.Forwarder)
 	if !ok {
@@ -1698,16 +1735,22 @@ func (s *Server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tagProvider(r.Context(), transcriptionProvider)
-	const model = "whisper-1"
-
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	model := "whisper-1" // the form field is optional for cerber's accounting
+	requested := multipartModel(body, r.Header.Get("Content-Type"))
+	if requested != "" {
+		model = s.catalog.Canonical(requested)
+	}
+	if s.rejectBlocked(w, r, dialectOpenAI, requested, model) {
+		return
+	}
 	fwd, ok := s.chatters[transcriptionProvider].(provider.RawForwarder)
 	if !ok {
 		s.record(r.Context(), usage.Event{Model: model, IsError: true})
 		writeError(w, http.StatusNotImplemented, "transcriptions: provider openai is not configured")
-		return
-	}
-	body, ok := readBody(w, r)
-	if !ok {
 		return
 	}
 	resp, err := fwd.ForwardRaw(r.Context(), transcriptionsPath, body, r.Header.Get("Content-Type"), r.Header)
@@ -1775,7 +1818,11 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requested := extractModel(body)
 	body, model := s.canonicalModel(body)
+	if s.rejectBlocked(w, r, dialectAnthropic, requested, model) {
+		return
+	}
 	resp, cred, err := s.dispatch(r.Context(), credFilter(r), func(c *credential.Credential) (*http.Response, error) {
 		return s.upstream.CountTokens(r.Context(), body, c, r.Header)
 	})
@@ -1804,7 +1851,11 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requested := extractModel(body)
 	body, model := s.canonicalModel(body)
+	if s.rejectBlocked(w, r, dialectOpenAI, requested, model) {
+		return
+	}
 	stream := wantsStream(body)
 
 	mode, err := compat.ParseMode(strings.TrimSpace(r.Header.Get("X-Cerber-Compat")), s.compatMode)
@@ -1816,7 +1867,7 @@ func (s *Server) handleOpenAI(w http.ResponseWriter, r *http.Request) {
 	// Try the requested model, then any fallback targets, until one succeeds or is
 	// a non-retryable (client) error. Fallback only kicks in before any bytes are
 	// written, so a started stream is never re-attempted.
-	targets := s.openAITargets(r, model)
+	targets := s.dropBlocked(s.openAITargets(r, model))
 	for i, tgt := range targets {
 		if s.tryOpenAITarget(w, r, body, tgt, stream, i == len(targets)-1, mode) {
 			return

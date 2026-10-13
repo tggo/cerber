@@ -25,6 +25,7 @@ import (
 	"github.com/tggo/cerber/internal/config"
 	"github.com/tggo/cerber/internal/credential"
 	"github.com/tggo/cerber/internal/logging"
+	"github.com/tggo/cerber/internal/modelblock"
 	"github.com/tggo/cerber/internal/provider/anthropic"
 	"github.com/tggo/cerber/internal/provider/comfyui"
 	"github.com/tggo/cerber/internal/provider/gemini"
@@ -267,6 +268,18 @@ func main() {
 	}
 	srv.SetAllowLocalhost(cfg.Access.AllowLocalhost)
 	srv.SetManagementKey(cfg.Access.ManagementKey)
+
+	// Global model blocklist: config seed + operator masks persisted next to the
+	// usage file so they survive restarts/deploys.
+	blockPath := ""
+	if cfg.Usage.File != "" {
+		blockPath = filepath.Join(filepath.Dir(cfg.Usage.File), "blocked_models.json")
+	}
+	blocklist, berr := modelblock.Load(blockPath, cfg.BlockedModels)
+	if berr != nil {
+		logger.Fatal("load model blocklist", zap.Error(berr))
+	}
+	srv.SetModelBlocklist(blocklist)
 
 	// Persistent usage + per-model pricing (cost). Loaded from disk, saved
 	// periodically and on shutdown.
